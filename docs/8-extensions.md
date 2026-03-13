@@ -1,6 +1,6 @@
-# 💡🔗 Extensions
+# Extensions
 
-With Extensions, you can enhance the functionality of Azure Chat by integrating it with your internal APIs or external resources.Extensions are created using OpenAI Tools, specifically through Function Calling.
+With Extensions, you can enhance the functionality of Bühler Chat by integrating it with your internal APIs or external resources. Extensions are created using OpenAI Tools, specifically through Function Calling.
 
 As a user, you have the ability to create extensions that call your own internal APIs or external resources. However, if you are an admin, you can create extensions that can be utilised by all users within your organization.
 

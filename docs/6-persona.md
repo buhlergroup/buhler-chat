@@ -1,4 +1,4 @@
-# 🎭 Persona
+# Persona
 
 Persona helps you craft individual personas to bring personality and engagement into your conversations.
 

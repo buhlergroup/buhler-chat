@@ -28,7 +28,7 @@ export const ChatPersonaPage: FC<ChatPersonaProps> = (props) => {
             showContextMenu
           />
         </div>
-        <AddNewPersona extensions={props.extensions} />
+        <AddNewPersona extensions={props.extensions} personas={props.personas} />
       </main>
     </ScrollArea>
   );

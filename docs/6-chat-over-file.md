@@ -1,4 +1,4 @@
-# 📃 Chatting With Your File
+# Chatting With Your File
 
 There are multiple ways you can integrate chat with your data.
 

@@ -13,7 +13,8 @@ import {
   executeFunction, 
   registerDynamicFunction, 
   FunctionCall,
-  getToolByName
+  getToolByName,
+  buildSubAgentTool
 } from "./function-registry";
 import { OpenAIResponsesStream } from "./openai-responses-stream";
 import { createConversationState, startConversation, continueConversation, ConversationState } from "./conversation-manager";
@@ -119,6 +120,17 @@ export const ChatAPIResponse = async (props: UserPrompt, signal: AbortSignal) =>
     if (companyContentTool) {
       tools.push(companyContentTool);
       logInfo("Added search_company_content function (company content search)");
+    }
+  }
+
+  // Add call_sub_agent tool if sub-agents are configured
+  if (currentChatThread.subAgentIds && currentChatThread.subAgentIds.length > 0) {
+    const subAgentTool = await buildSubAgentTool(currentChatThread.subAgentIds);
+    if (subAgentTool) {
+      tools.push(subAgentTool);
+      logInfo("Added call_sub_agent function", {
+        subAgentCount: currentChatThread.subAgentIds.length,
+      });
     }
   }
 

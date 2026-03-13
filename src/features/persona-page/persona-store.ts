@@ -162,6 +162,14 @@ const FormDataToPersonaModel = (formData: FormData): PersonaModel => {
     : [];
   const codeInterpreterDocumentIds = Array.isArray(ciFileObj) ? ciFileObj : [];
 
+  const selectedModelRaw = formData.get("selectedModel") as string | null;
+  const selectedModel = selectedModelRaw || undefined;
+  
+  const subAgentIdsRaw = formData.get("subAgentIds") as string;
+  const subAgentIds = subAgentIdsRaw
+    ? JSON.parse(subAgentIdsRaw) as string[]
+    : [];
+
   return {
     id: formData.get("id") as string,
     name: formData.get("name") as string,
@@ -178,5 +186,7 @@ const FormDataToPersonaModel = (formData: FormData): PersonaModel => {
     },
     personaDocumentIds: personaDocumentIds,
     codeInterpreterDocumentIds: codeInterpreterDocumentIds,
+    selectedModel: selectedModel,
+    subAgentIds: subAgentIds,
   };
 };

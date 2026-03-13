@@ -89,6 +89,8 @@ export const PersonaModelSchema = z.object({
   personaDocumentIds: z.array(z.string()).optional(),
   codeInterpreterDocumentIds: z.array(z.string()).optional(), // SharePoint documents for Code Interpreter
   accessGroup: AccessGroupSchema.optional(),
+  selectedModel: z.string().optional(), // Specific model to use for this agent
+  subAgentIds: z.array(z.string()).optional(), // IDs of sub-agents this agent can call
 });
 
 

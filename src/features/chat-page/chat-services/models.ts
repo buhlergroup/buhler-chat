@@ -18,6 +18,7 @@ export type ChatModel =
   | "gpt-5-pro"
   | "gpt-5.1"
   | "gpt-5.2"
+  | "gpt-5.3-chat"
   | "gpt-4o" 
   | "gpt-4o-mini" 
   | "gpt-4.1" 
@@ -54,6 +55,16 @@ export const MODEL_CONFIGS: Record<ChatModel, ModelConfig> = {
     supportsImageGeneration: true,
     deploymentName: process.env.AZURE_OPENAI_API_GPT52_DEPLOYMENT_NAME,
     defaultReasoningEffort: "low"
+  },
+  "gpt-5.3-chat": {
+    id: "gpt-5.3-chat",
+    name: "GPT-5.3 Chat",
+    description: "Latest GPT-5.3 Chat model optimized for conversational interactions",
+    getInstance: () => OpenAIV1Instance(),
+    supportsReasoning: true,
+    supportsResponsesAPI: true,
+    deploymentName: process.env.AZURE_OPENAI_API_GPT53_CHAT_DEPLOYMENT_NAME,
+    defaultReasoningEffort: "medium"
   },
   "gpt-5.1": {
     id: "gpt-5.1",
@@ -324,6 +335,7 @@ export interface ChatThreadModel {
   codeInterpreterContainerId?: string;
   codeInterpreterFileIdsSignature?: string;
   attachedFiles?: Array<AttachedFileModel>;
+  subAgentIds?: string[];
 }
 
 export interface UserPrompt {

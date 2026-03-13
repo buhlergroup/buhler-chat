@@ -7,6 +7,8 @@ import { getCurrentUser, userHashedId } from "@/features/auth-page/helpers";
 import { logInfo, logDebug, logError } from "@/features/common/services/logger";
 import { AllowedPersonaDocumentIds } from "@/features/persona-page/persona-services/persona-documents-service";
 import { ConversationContext } from "./conversation-manager";
+import { FindPersonaByID, FindAllPersonaForCurrentUser } from "@/features/persona-page/persona-services/persona-service";
+import { MODEL_CONFIGS, ChatModel } from "../models";
 
 // Type definitions for function calling
 export interface FunctionDefinition {
@@ -310,6 +312,137 @@ function extractTitleFromUrl(url: string): string {
   }
 }
 
+// Sub-agent calling function
+async function callSubAgent(
+  args: { agent_id: string; task: string },
+  context: { conversationContext: ConversationContext; userMessage: string; signal: AbortSignal; headers?: Record<string, string> }
+) {
+  logInfo("Calling sub-agent", {
+    agentId: args.agent_id,
+    taskLength: args.task?.length || 0,
+    threadId: context.conversationContext.chatThread.id,
+  });
+
+  // Validate the agent_id is in the allowed sub-agent list for this chat thread
+  const allowedSubAgentIds = context.conversationContext.chatThread.subAgentIds || [];
+  if (!allowedSubAgentIds.includes(args.agent_id)) {
+    logError("Sub-agent call denied: agent not in allowed list", {
+      requestedAgentId: args.agent_id,
+      allowedIds: allowedSubAgentIds,
+    });
+    return {
+      error: true,
+      summary: `Agent "${args.agent_id}" is not configured as a sub-agent for this conversation. Available sub-agents are limited to those configured by the parent agent.`,
+    };
+  }
+
+  // Verify user access to the target agent
+  const personaResponse = await FindPersonaByID(args.agent_id);
+  if (personaResponse.status !== "OK") {
+    logError("Sub-agent not found or not accessible", {
+      agentId: args.agent_id,
+      status: personaResponse.status,
+    });
+    return {
+      error: true,
+      summary: `Agent "${args.agent_id}" was not found or you do not have access to it.`,
+    };
+  }
+
+  const subAgent = personaResponse.response;
+
+  // Determine which model to use for the sub-agent
+  // Falls back to the model selected for the current chat thread, then to "gpt-4o"
+  const subAgentModelId = (subAgent.selectedModel as ChatModel) ||
+    context.conversationContext.chatThread.selectedModel ||
+    "gpt-4o";
+  const subAgentModelConfig = MODEL_CONFIGS[subAgentModelId];
+
+  if (!subAgentModelConfig?.deploymentName) {
+    logError("Sub-agent model not available", {
+      agentId: args.agent_id,
+      requestedModel: subAgentModelId,
+    });
+    return {
+      error: true,
+      summary: `The model "${subAgentModelId}" configured for agent "${subAgent.name}" is not available.`,
+    };
+  }
+
+  try {
+    const openaiInstance = subAgentModelConfig.getInstance();
+    
+    const requestOptions: any = {
+      model: subAgentModelConfig.deploymentName,
+      stream: false,
+      store: false,
+    };
+
+    if (subAgentModelConfig.supportsReasoning) {
+      requestOptions.reasoning = {
+        effort: subAgentModelConfig.defaultReasoningEffort || "low",
+        summary: "auto",
+      };
+    }
+
+    const input = [
+      {
+        type: "message" as const,
+        role: "system" as const,
+        content: subAgent.personaMessage,
+      },
+      {
+        type: "message" as const,
+        role: "user" as const,
+        content: args.task,
+      },
+    ];
+
+    logDebug("Sub-agent request", {
+      agentName: subAgent.name,
+      model: subAgentModelConfig.deploymentName,
+      taskPreview: args.task.substring(0, 200),
+    });
+
+    const response = await openaiInstance.responses.create({
+      ...requestOptions,
+      input,
+    }, { signal: context.signal });
+
+    // Extract text content from the response
+    const outputText = response.output
+      ?.filter((item: any) => item.type === "message")
+      .flatMap((item: any) => item.content || [])
+      .filter((content: any) => content.type === "output_text")
+      .map((content: any) => content.text)
+      .join("\n") || "";
+
+    logInfo("Sub-agent call completed", {
+      agentId: args.agent_id,
+      agentName: subAgent.name,
+      responseLength: outputText.length,
+    });
+
+    return {
+      agentName: subAgent.name,
+      agentId: args.agent_id,
+      model: subAgentModelId,
+      response: outputText,
+      summary: `Agent "${subAgent.name}" responded successfully.`,
+    };
+  } catch (error) {
+    logError("Sub-agent call failed", {
+      agentId: args.agent_id,
+      error: error instanceof Error ? error.message : String(error),
+    });
+    return {
+      error: true,
+      agentName: subAgent.name,
+      summary: `Sub-agent "${subAgent.name}" failed: ${error instanceof Error ? error.message : "Unknown error"}`,
+    };
+  }
+}
+
 // Register built-in functions (will be called when needed)
 async function ensureBuiltInFunctionsRegistered() {
   if (!functionRegistry.has("search_documents")) {
@@ -317,6 +450,9 @@ async function ensureBuiltInFunctionsRegistered() {
   }
   if (!functionRegistry.has("search_company_content")) {
     await registerFunction("search_company_content", searchCompanyContent);
+  }
+  if (!functionRegistry.has("call_sub_agent")) {
+    await registerFunction("call_sub_agent", callSubAgent);
   }
 }
 
@@ -382,6 +518,25 @@ export async function getToolByName(toolName: string): Promise<FunctionDefinitio
         }
       },
       strict: true as const
+    },
+    {
+      type: "function" as const,
+      name: "call_sub_agent",
+      description: "Delegate a task to a specialized sub-agent. Use this when a question or task is better handled by another agent with specific expertise. The sub-agent will process the task independently and return its response.",
+      parameters: {
+        type: "object",
+        properties: {
+          agent_id: {
+            type: "string",
+            description: "The unique identifier of the sub-agent to call."
+          },
+          task: {
+            type: "string",
+            description: "The task or question to delegate to the sub-agent. Be specific and provide all necessary context."
+          }
+        }
+      },
+      strict: true as const
     }
   ];
 
@@ -394,6 +549,86 @@ export async function getToolByName(toolName: string): Promise<FunctionDefinitio
   }
   
   return null;
+}
+
+// Build a call_sub_agent tool definition with validated accessible sub-agents
+export async function buildSubAgentTool(
+  subAgentIds: string[]
+): Promise<FunctionDefinition | null> {
+  if (!subAgentIds || subAgentIds.length === 0) {
+    return null;
+  }
+
+  await ensureBuiltInFunctionsRegistered();
+
+  // Verify user access to each sub-agent and build the description
+  const accessibleAgents: Array<{ id: string; name: string; description: string }> = [];
+  const allPersonasResponse = await FindAllPersonaForCurrentUser();
+
+  if (allPersonasResponse.status !== "OK") {
+    logError("Failed to fetch accessible personas for sub-agent validation");
+    return null;
+  }
+
+  const accessiblePersonaIds = new Set(
+    allPersonasResponse.response.map((p) => p.id)
+  );
+
+  for (const agentId of subAgentIds) {
+    if (!accessiblePersonaIds.has(agentId)) {
+      logInfo("Sub-agent not accessible to user, skipping", { agentId });
+      continue;
+    }
+
+    const personaResponse = await FindPersonaByID(agentId);
+    if (personaResponse.status === "OK") {
+      accessibleAgents.push({
+        id: personaResponse.response.id,
+        name: personaResponse.response.name,
+        description: personaResponse.response.description,
+      });
+    }
+  }
+
+  if (accessibleAgents.length === 0) {
+    logInfo("No accessible sub-agents found");
+    return null;
+  }
+
+  // Build a rich description that tells the AI about available sub-agents
+  const agentList = accessibleAgents
+    .map((a) => `- "${a.name}" (id: ${a.id}): ${a.description}`)
+    .join("\n");
+
+  const toolDescription = `Delegate a task to a specialized sub-agent. Use this when a question or task is better handled by another agent with specific expertise. The sub-agent will process the task independently and return its response.\n\nAvailable sub-agents:\n${agentList}`;
+
+  const tool: FunctionDefinition = {
+    type: "function",
+    name: "call_sub_agent",
+    description: toolDescription,
+    parameters: validateAndFixSchema({
+      type: "object",
+      properties: {
+        agent_id: {
+          type: "string",
+          description: `The unique identifier of the sub-agent to call. Must be one of: ${accessibleAgents.map((a) => a.id).join(", ")}`,
+        },
+        task: {
+          type: "string",
+          description:
+            "The task or question to delegate to the sub-agent. Be specific and provide all necessary context.",
+        },
+      },
+    }),
+    strict: true,
+  };
+
+  logInfo("Built sub-agent tool", {
+    accessibleCount: accessibleAgents.length,
+    agentNames: accessibleAgents.map((a) => a.name).join(", "),
+  });
+
+  return tool;
 }
 
 // Helper function to validate and fix function schemas for Azure OpenAI strict mode
