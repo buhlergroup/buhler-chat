@@ -1,7 +1,7 @@
 "use client";
 import { uniqueId } from "@/features/common/util";
 import { showError } from "@/features/globals/global-message-store";
-import { AI_NAME, NEW_CHAT_NAME } from "@/features/theme/theme-config";
+import { AI_NAME } from "@/features/theme/theme-config";
 import {
   ParsedEvent,
   ReconnectInterval,
@@ -459,11 +459,14 @@ class ChatState {
   }
 
   private async updateTitle() {
-    if (this.chatThread && this.chatThread.name === NEW_CHAT_NAME) {
+    // Generate a title after the first user message is sent, regardless of the initial chat name.
+    // This works reliably for both regular chats and agent-based chats.
+    const userMessages = this.messages.filter((m) => m.role === "user");
+    if (this.chatThread && userMessages.length === 1) {
       // Fire-and-forget: update title asynchronously without blocking the UI
       setTimeout(async () => {
         try {
-          await UpdateChatTitle(this.chatThreadId, this.messages[0].content);
+          await UpdateChatTitle(this.chatThreadId, userMessages[0].content);
           RevalidateCache({
             page: "chat",
             type: "layout",
