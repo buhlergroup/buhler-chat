@@ -316,7 +316,7 @@ export const OpenAIResponsesStream = (props: {
         totalTokens: total_tokens
       });
       
-      await reportCompletionTokens(output_tokens, chatThread.selectedModel || "gpt-4o", {
+      await reportCompletionTokens(output_tokens, chatThread.selectedModel || "gpt-5.4", {
         personaMessageTitle: chatThread.personaMessageTitle,
         threadId: chatThread.id,
         messageId: originalMessageId,
@@ -324,7 +324,7 @@ export const OpenAIResponsesStream = (props: {
         inputTokens: input_tokens
       });
 
-      await reportPromptTokens(input_tokens, chatThread.selectedModel || "gpt-4o", "user", {
+      await reportPromptTokens(input_tokens, chatThread.selectedModel || "gpt-5.4", "user", {
         personaMessageTitle: chatThread.personaMessageTitle,
         threadId: chatThread.id,
         messageId: originalMessageId

@@ -40,7 +40,7 @@ export const ChatAPIResponse = async (props: UserPrompt, signal: AbortSignal) =>
   }
 
   const currentChatThread = currentChatThreadResponse.response;
-  const selectedModel = props.selectedModel || "gpt-5";
+  const selectedModel = props.selectedModel || "gpt-5.4";
   const modelConfig = MODEL_CONFIGS[selectedModel];
   const reasoningEffort = props.reasoningEffort || modelConfig?.defaultReasoningEffort || "low";
 

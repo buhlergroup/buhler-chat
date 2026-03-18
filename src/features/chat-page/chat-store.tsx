@@ -45,7 +45,7 @@ class ChatState {
   public autoScroll: boolean = true;
   public userName: string = "";
   public chatThreadId: string = "";
-  public selectedModel: ChatModel = "gpt-5.2"; // Will be updated when available models are fetched
+  public selectedModel: ChatModel = "gpt-5.4"; // Will be updated when available models are fetched
   public reasoningEffort: ReasoningEffort = "low";
   public webSearchEnabled: boolean = false;
   public imageGenerationEnabled: boolean = false;
@@ -126,7 +126,7 @@ class ChatState {
       this.chatThreadId = chatThread.id;
       this.messages = messages;
       const threadModel = chatThread.selectedModel;
-      this.selectedModel = (threadModel && MODEL_CONFIGS[threadModel]) ? threadModel : "gpt-5.2";
+      this.selectedModel = (threadModel && MODEL_CONFIGS[threadModel]) ? threadModel : "gpt-5.4";
       this.toolCallHistory = {};
       this.tempReasoningContent = "";
       this.currentAssistantMessageId = "";

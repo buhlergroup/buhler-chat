@@ -352,10 +352,10 @@ async function callSubAgent(
   const subAgent = personaResponse.response;
 
   // Determine which model to use for the sub-agent
-  // Falls back to the model selected for the current chat thread, then to "gpt-4o"
+  // Falls back to the model selected for the current chat thread, then to "gpt-5.4"
   const subAgentModelId = (subAgent.selectedModel as ChatModel) ||
     context.conversationContext.chatThread.selectedModel ||
-    "gpt-4o";
+    "gpt-5.4";
   const subAgentModelConfig = MODEL_CONFIGS[subAgentModelId];
 
   if (!subAgentModelConfig?.deploymentName) {

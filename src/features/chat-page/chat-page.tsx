@@ -169,7 +169,7 @@ export const ChatPage = (props: ChatPageProps) => {
   const fileInputRef = useRef<HTMLInputElement | null>(null);
 
   // Ensure we always have a valid model selected
-  const effectiveModel = selectedModel && MODEL_CONFIGS[selectedModel] ? selectedModel : "gpt-5.2";
+  const effectiveModel = selectedModel && MODEL_CONFIGS[selectedModel] ? selectedModel : "gpt-5.4";
 
   const internetSearch = useMemo(() => props.extensions.find(e => e.name === "Bing Search"), [props.extensions]);
   

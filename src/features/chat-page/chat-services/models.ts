@@ -1,10 +1,7 @@
 import { ChatCompletionMessage } from "openai/resources/chat/completions";
-import { 
-  OpenAIInstance, 
-  OpenAIReasoningInstance, 
-  OpenAIV1Instance, 
+import {
+  OpenAIV1Instance,
   OpenAIV1ReasoningInstance,
-  OpenAIV1ImageInstance 
 } from "@/features/common/services/openai";
 import { logError } from "@/features/common/services/logger";
 
@@ -13,22 +10,11 @@ export const CHAT_THREAD_ATTRIBUTE = "CHAT_THREAD";
 export const MESSAGE_ATTRIBUTE = "CHAT_MESSAGE";
 export const CHAT_CITATION_ATTRIBUTE = "CHAT_CITATION";
 
-export type ChatModel = 
-  | "gpt-5"
-  | "gpt-5-pro"
-  | "gpt-5.1"
+export type ChatModel =
   | "gpt-5.2"
   | "gpt-5.3-chat"
-  | "gpt-4o" 
-  | "gpt-4o-mini" 
-  | "gpt-4.1" 
-  | "gpt-4.1-mini" 
-  | "gpt-4.1-nano" 
-  | "gpt-image-1"
-  | "o3" 
-  | "o3-pro"
-  | "o4-mini"
-  | "computer-use-preview";
+  | "gpt-5.4"
+  | "gpt-5.4-mini";
 
 export interface ModelConfig {
   id: ChatModel;
@@ -66,147 +52,27 @@ export const MODEL_CONFIGS: Record<ChatModel, ModelConfig> = {
     deploymentName: process.env.AZURE_OPENAI_API_GPT53_CHAT_DEPLOYMENT_NAME,
     defaultReasoningEffort: "medium"
   },
-  "gpt-5.1": {
-    id: "gpt-5.1",
-    name: "GPT-5.1",
-    description: "Latest GPT-5.1 model with enhanced capabilities",
+  "gpt-5.4": {
+    id: "gpt-5.4",
+    name: "GPT-5.4",
+    description: "Latest GPT-5.4 model with advanced capabilities",
     getInstance: () => OpenAIV1ReasoningInstance(),
     supportsReasoning: true,
     supportsResponsesAPI: true,
     supportsImageGeneration: true,
-    deploymentName: "gpt-5.1",
+    deploymentName: process.env.AZURE_OPENAI_API_GPT54_DEPLOYMENT_NAME,
     defaultReasoningEffort: "low"
   },
-  "gpt-5": {
-    id: "gpt-5",
-    name: "GPT-5",
-    description: "Most advanced model with superior reasoning and capabilities",
-    getInstance: () => OpenAIV1ReasoningInstance(),
-    supportsReasoning: true,
-    supportsResponsesAPI: true,
-    supportsImageGeneration: true,
-    deploymentName: process.env.AZURE_OPENAI_API_GPT5_DEPLOYMENT_NAME,
-    defaultReasoningEffort: "low"
-  },
-  "gpt-5-pro": {
-    id: "gpt-5-pro",
-    name: "GPT-5 Pro",
-    description: "Premium GPT-5 model with enhanced performance and extended capabilities",
-    getInstance: () => OpenAIV1ReasoningInstance(),
-    supportsReasoning: true,
-    supportsResponsesAPI: true,
-    supportsImageGeneration: true,
-    deploymentName: process.env.AZURE_OPENAI_API_GPT5_PRO_DEPLOYMENT_NAME,
-    defaultReasoningEffort: "high"
-  },
-  "gpt-4o": {
-    id: "gpt-4o",
-    name: "GPT-4o",
-    description: "Most capable multimodal model, great for complex tasks",
+  "gpt-5.4-mini": {
+    id: "gpt-5.4-mini",
+    name: "GPT-5.4 Mini",
+    description: "Fast and efficient GPT-5.4 model for everyday tasks",
     getInstance: () => OpenAIV1Instance(),
     supportsReasoning: false,
     supportsResponsesAPI: true,
-    deploymentName: process.env.AZURE_OPENAI_API_DEPLOYMENT_NAME,
+    deploymentName: process.env.AZURE_OPENAI_API_GPT54_MINI_DEPLOYMENT_NAME,
     defaultReasoningEffort: "medium"
   },
-  "gpt-4o-mini": {
-    id: "gpt-4o-mini",
-    name: "GPT-4o Mini",
-    description: "Fast and efficient model for everyday tasks",
-    getInstance: () => OpenAIV1Instance(),
-    supportsReasoning: false,
-    supportsResponsesAPI: true,
-    deploymentName: process.env.AZURE_OPENAI_API_MINI_DEPLOYMENT_NAME,
-    defaultReasoningEffort: "medium"
-  },
-  "gpt-4.1": {
-    id: "gpt-4.1",
-    name: "GPT-4.1",
-    description: "Latest GPT-4.1 model with enhanced capabilities",
-    getInstance: () => OpenAIV1Instance(),
-    supportsReasoning: false,
-    supportsResponsesAPI: true,
-    deploymentName: process.env.AZURE_OPENAI_API_GPT41_DEPLOYMENT_NAME,
-    defaultReasoningEffort: "medium"
-  },
-  "gpt-4.1-mini": {
-    id: "gpt-4.1-mini",
-    name: "GPT-4.1 Mini",
-    description: "Efficient version of GPT-4.1",
-    getInstance: () => OpenAIV1Instance(),
-    supportsReasoning: false,
-    supportsResponsesAPI: true,
-    deploymentName: process.env.AZURE_OPENAI_API_GPT41_MINI_DEPLOYMENT_NAME,
-    defaultReasoningEffort: "medium"
-  },
-  "gpt-4.1-nano": {
-    id: "gpt-4.1-nano",
-    name: "GPT-4.1 Nano",
-    description: "Ultra-fast and lightweight GPT-4.1",
-    getInstance: () => OpenAIV1Instance(),
-    supportsReasoning: false,
-    supportsResponsesAPI: true,
-    deploymentName: process.env.AZURE_OPENAI_API_GPT41_NANO_DEPLOYMENT_NAME,
-    defaultReasoningEffort: "medium"
-  },
-  "gpt-image-1": {
-    id: "gpt-image-1",
-    name: "GPT Image 1",
-    description: "Specialized model for image generation and editing",
-    getInstance: () => OpenAIV1ImageInstance(),
-    supportsReasoning: false,
-    supportsResponsesAPI: true,
-    supportsImageGeneration: true,
-    deploymentName: process.env.AZURE_OPENAI_GPT_IMAGE_DEPLOYMENT_NAME,
-    defaultReasoningEffort: "medium"
-  },
-  "o3": {
-    id: "o3",
-    name: "o3 Reasoning",
-    description: "Advanced reasoning model with step-by-step thinking",
-    getInstance: () => OpenAIV1ReasoningInstance(),
-    supportsReasoning: true,
-    supportsResponsesAPI: true,
-    supportsImageGeneration: true,
-    supportedSummarizers: ["detailed", "concise", "auto"],
-    deploymentName: process.env.AZURE_OPENAI_API_O3_DEPLOYMENT_NAME,
-    defaultReasoningEffort: "low"
-  },
-  "o3-pro": {
-    id: "o3-pro",
-    name: "o3-Pro",
-    description: "Premium reasoning model with enhanced capabilities and detailed analysis",
-    getInstance: () => OpenAIV1ReasoningInstance(),
-    supportsReasoning: true,
-    supportsResponsesAPI: true,
-    supportsImageGeneration: true,
-    supportedSummarizers: ["detailed", "concise", "auto"],
-    deploymentName: process.env.AZURE_OPENAI_API_O3_PRO_DEPLOYMENT_NAME,
-    defaultReasoningEffort: "low"
-  },
-  "o4-mini": {
-    id: "o4-mini",
-    name: "o4-Mini",
-    description: "Efficient reasoning model with detailed summaries",
-    getInstance: () => OpenAIV1ReasoningInstance(),
-    supportsReasoning: true,
-    supportsResponsesAPI: true,
-    supportsImageGeneration: true,
-    supportedSummarizers: ["detailed", "concise", "auto"],
-    deploymentName: process.env.AZURE_OPENAI_API_O4_MINI_DEPLOYMENT_NAME,
-    defaultReasoningEffort: "low"
-  },
-  "computer-use-preview": {
-    id: "computer-use-preview",
-    name: "Computer Use Preview",
-    description: "Experimental model with computer interaction capabilities",
-    getInstance: () => OpenAIV1ReasoningInstance(),
-    supportsReasoning: false,
-    supportsResponsesAPI: true,
-    supportsComputerUse: true,
-    deploymentName: process.env.AZURE_OPENAI_API_COMPUTER_USE_DEPLOYMENT_NAME,
-    defaultReasoningEffort: "medium"
-  }
 };
 
 /**
@@ -265,8 +131,8 @@ export async function getDefaultModel(): Promise<ChatModel> {
     logError("Error fetching default model", { 
       error: error instanceof Error ? error.message : String(error) 
     });
-    // Fallback to gpt-5.2 if API fails
-    return "gpt-5.2";
+    // Fallback to gpt-5.4 if API fails
+    return "gpt-5.4";
   }
 }
 
