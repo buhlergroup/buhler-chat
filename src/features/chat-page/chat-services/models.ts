@@ -13,22 +13,29 @@ export const CHAT_THREAD_ATTRIBUTE = "CHAT_THREAD";
 export const MESSAGE_ATTRIBUTE = "CHAT_MESSAGE";
 export const CHAT_CITATION_ATTRIBUTE = "CHAT_CITATION";
 
-export type ChatModel = 
+export type ChatModel =
   | "gpt-5"
   | "gpt-5-pro"
   | "gpt-5.1"
   | "gpt-5.2"
   | "gpt-5.3-chat"
-  | "gpt-4o" 
-  | "gpt-4o-mini" 
-  | "gpt-4.1" 
-  | "gpt-4.1-mini" 
-  | "gpt-4.1-nano" 
+  | "gpt-5.4"
+  | "gpt-4o"
+  | "gpt-4o-mini"
+  | "gpt-4.1"
+  | "gpt-4.1-mini"
+  | "gpt-4.1-nano"
   | "gpt-image-1"
-  | "o3" 
+  | "o3"
   | "o3-pro"
   | "o4-mini"
   | "computer-use-preview";
+
+/**
+ * The default model used when no model is explicitly selected.
+ * Single source of truth for the fallback model across the app.
+ */
+export const DEFAULT_MODEL: ChatModel = "gpt-5.4";
 
 export interface ModelConfig {
   id: ChatModel;
@@ -54,6 +61,17 @@ export const MODEL_CONFIGS: Record<ChatModel, ModelConfig> = {
     supportsResponsesAPI: true,
     supportsImageGeneration: true,
     deploymentName: process.env.AZURE_OPENAI_API_GPT52_DEPLOYMENT_NAME,
+    defaultReasoningEffort: "low"
+  },
+  "gpt-5.4": {
+    id: "gpt-5.4",
+    name: "GPT-5.4",
+    description: "Latest GPT-5.4 model with enhanced reasoning capabilities",
+    getInstance: () => OpenAIV1ReasoningInstance(),
+    supportsReasoning: true,
+    supportsResponsesAPI: true,
+    supportsImageGeneration: true,
+    deploymentName: process.env.AZURE_OPENAI_API_GPT54_DEPLOYMENT_NAME,
     defaultReasoningEffort: "low"
   },
   "gpt-5.3-chat": {
@@ -265,8 +283,7 @@ export async function getDefaultModel(): Promise<ChatModel> {
     logError("Error fetching default model", { 
       error: error instanceof Error ? error.message : String(error) 
     });
-    // Fallback to gpt-5.2 if API fails
-    return "gpt-5.2";
+    return DEFAULT_MODEL;
   }
 }
 
@@ -336,6 +353,8 @@ export interface ChatThreadModel {
   codeInterpreterFileIdsSignature?: string;
   attachedFiles?: Array<AttachedFileModel>;
   subAgentIds?: string[];
+  parentThreadId?: string;       // Links child thread to parent (presence = sub-agent thread)
+  subAgentPersonaId?: string;    // Which persona this sub-agent thread serves
 }
 
 export interface UserPrompt {

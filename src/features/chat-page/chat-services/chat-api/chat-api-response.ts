@@ -5,7 +5,7 @@ import { getCurrentUser } from "@/features/auth-page/helpers";
 import { CHAT_DEFAULT_SYSTEM_PROMPT } from "@/features/theme/theme-config";
 import { CreateChatMessage } from "../chat-message-service";
 import { EnsureChatThreadOperation, UpdateChatThreadCodeInterpreterContainer } from "../chat-thread-service";
-import { UserPrompt, MODEL_CONFIGS, ChatThreadModel } from "../models";
+import { UserPrompt, MODEL_CONFIGS, ChatThreadModel, DEFAULT_MODEL } from "../models";
 import { mapOpenAIChatMessages } from "../utils";
 import { FindTopChatMessagesForCurrentUser } from "../chat-message-service";
 import { 
@@ -40,7 +40,7 @@ export const ChatAPIResponse = async (props: UserPrompt, signal: AbortSignal) =>
   }
 
   const currentChatThread = currentChatThreadResponse.response;
-  const selectedModel = props.selectedModel || "gpt-5";
+  const selectedModel = props.selectedModel || DEFAULT_MODEL;
   const modelConfig = MODEL_CONFIGS[selectedModel];
   const reasoningEffort = props.reasoningEffort || modelConfig?.defaultReasoningEffort || "low";
 
@@ -275,6 +275,8 @@ export const ChatAPIResponse = async (props: UserPrompt, signal: AbortSignal) =>
     openaiInstance: openaiInstance,
     requestOptions: requestOptions,
     headers: extensionHeaders, // Pass extension headers to conversation context
+    depth: 0,
+    maxDepth: 3,
   };
 
   // Build initial conversation input

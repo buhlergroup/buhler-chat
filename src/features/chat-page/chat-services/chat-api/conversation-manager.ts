@@ -14,6 +14,9 @@ export interface ConversationContext {
   openaiInstance: any;
   requestOptions: any;
   headers?: Record<string, string>;
+  depth?: number;         // Current sub-agent nesting depth (0 = top-level)
+  maxDepth?: number;      // Max allowed depth (default 3)
+  conversationInput?: ResponseInputItem[]; // Current conversation input for ask_parent_agent
 }
 
 export interface ConversationState {
@@ -85,7 +88,10 @@ export async function processFunctionCall(
     };
 
     const result = await executeFunction(parsedFunctionCall, {
-      conversationContext: state.context,
+      conversationContext: {
+        ...state.context,
+        conversationInput: state.conversationInput,
+      },
       userMessage: state.context.userMessage,
       signal: state.context.signal,
       headers: state.context.headers,

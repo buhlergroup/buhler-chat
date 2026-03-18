@@ -26,6 +26,7 @@ import {
 } from "./models";
 import { redirect } from "next/navigation";
 import { ChatApiText } from "./chat-api/chat-api-text";
+import { findChildThreads } from "./chat-api/sub-agent-thread-service";
 
 export const FindAllChatThreadForCurrentUser = async (): Promise<
   ServerActionResponse<Array<ChatThreadModel>>
@@ -33,7 +34,7 @@ export const FindAllChatThreadForCurrentUser = async (): Promise<
   try {
     const querySpec: SqlQuerySpec = {
       query:
-        "SELECT * FROM root r WHERE r.type=@type AND r.userId=@userId AND (NOT IS_DEFINED(r.isTemporary) OR r.isTemporary=@isTemporary) AND r.isDeleted=@isDeleted ORDER BY r.createdAt DESC",
+        "SELECT * FROM root r WHERE r.type=@type AND r.userId=@userId AND (NOT IS_DEFINED(r.isTemporary) OR r.isTemporary=@isTemporary) AND r.isDeleted=@isDeleted AND (NOT IS_DEFINED(r.parentThreadId) OR r.parentThreadId='') ORDER BY r.createdAt DESC",
       parameters: [
         {
           name: "@type",
@@ -196,6 +197,12 @@ export const SoftDeleteChatThreadForCurrentUser = async (
     const chatThreadResponse = await FindChatThreadForCurrentUser(chatThreadID);
 
     if (chatThreadResponse.status === "OK") {
+      // Cascade delete child threads (sub-agent threads) recursively
+      const childThreads = await findChildThreads(chatThreadID);
+      for (const childThread of childThreads) {
+        await SoftDeleteChatThreadForCurrentUser(childThread.id);
+      }
+
       const response = await SoftDeleteChatContentsForCurrentUser(chatThreadID);
       if (response.status !== "OK") {
         return response;

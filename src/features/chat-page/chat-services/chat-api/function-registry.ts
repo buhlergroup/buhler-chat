@@ -312,12 +312,14 @@ function extractTitleFromUrl(url: string): string {
   }
 }
 
-// Sub-agent calling function
+// Sub-agent calling function — delegates to full sub-conversation executor
 async function callSubAgent(
   args: { agent_id: string; task: string },
   context: { conversationContext: ConversationContext; userMessage: string; signal: AbortSignal; headers?: Record<string, string> }
 ) {
-  logInfo("Calling sub-agent", {
+  const { executeSubConversation } = await import("./sub-conversation-executor");
+
+  logInfo("Calling sub-agent (full sub-conversation)", {
     agentId: args.agent_id,
     taskLength: args.task?.length || 0,
     threadId: context.conversationContext.chatThread.id,
@@ -336,111 +338,21 @@ async function callSubAgent(
     };
   }
 
-  // Verify user access to the target agent
-  const personaResponse = await FindPersonaByID(args.agent_id);
-  if (personaResponse.status !== "OK") {
-    logError("Sub-agent not found or not accessible", {
-      agentId: args.agent_id,
-      status: personaResponse.status,
-    });
-    return {
-      error: true,
-      summary: `Agent "${args.agent_id}" was not found or you do not have access to it.`,
-    };
-  }
+  const depth = context.conversationContext.depth ?? 0;
+  const maxDepth = context.conversationContext.maxDepth ?? 3;
 
-  const subAgent = personaResponse.response;
-
-  // Determine which model to use for the sub-agent
-  // Falls back to the model selected for the current chat thread, then to "gpt-4o"
-  const subAgentModelId = (subAgent.selectedModel as ChatModel) ||
-    context.conversationContext.chatThread.selectedModel ||
-    "gpt-4o";
-  const subAgentModelConfig = MODEL_CONFIGS[subAgentModelId];
-
-  if (!subAgentModelConfig?.deploymentName) {
-    logError("Sub-agent model not available", {
-      agentId: args.agent_id,
-      requestedModel: subAgentModelId,
-    });
-    return {
-      error: true,
-      summary: `The model "${subAgentModelId}" configured for agent "${subAgent.name}" is not available.`,
-    };
-  }
-
-  try {
-    const openaiInstance = subAgentModelConfig.getInstance();
-    
-    const requestOptions: any = {
-      model: subAgentModelConfig.deploymentName,
-      stream: false,
-      store: false,
-    };
-
-    if (subAgentModelConfig.supportsReasoning) {
-      requestOptions.reasoning = {
-        effort: subAgentModelConfig.defaultReasoningEffort || "low",
-        summary: "auto",
-      };
-    }
-
-    const input = [
-      {
-        type: "message" as const,
-        role: "system" as const,
-        content: subAgent.personaMessage,
-      },
-      {
-        type: "message" as const,
-        role: "user" as const,
-        content: args.task,
-      },
-    ];
-
-    logDebug("Sub-agent request", {
-      agentName: subAgent.name,
-      model: subAgentModelConfig.deploymentName,
-      taskPreview: args.task.substring(0, 200),
-    });
-
-    const response = await openaiInstance.responses.create({
-      ...requestOptions,
-      input,
-    }, { signal: context.signal });
-
-    // Extract text content from the response
-    const outputText = response.output
-      ?.filter((item: any) => item.type === "message")
-      .flatMap((item: any) => item.content || [])
-      .filter((content: any) => content.type === "output_text")
-      .map((content: any) => content.text)
-      .join("\n") || "";
-
-    logInfo("Sub-agent call completed", {
-      agentId: args.agent_id,
-      agentName: subAgent.name,
-      responseLength: outputText.length,
-    });
-
-    return {
-      agentName: subAgent.name,
-      agentId: args.agent_id,
-      model: subAgentModelId,
-      response: outputText,
-      summary: `Agent "${subAgent.name}" responded successfully.`,
-    };
-  } catch (error) {
-    logError("Sub-agent call failed", {
-      agentId: args.agent_id,
-      error: error instanceof Error ? error.message : String(error),
-    });
-    return {
-      error: true,
-      agentName: subAgent.name,
-      summary: `Sub-agent "${subAgent.name}" failed: ${error instanceof Error ? error.message : "Unknown error"}`,
-    };
-  }
+  return await executeSubConversation({
+    parentThread: context.conversationContext.chatThread,
+    subAgentPersonaId: args.agent_id,
+    task: args.task,
+    signal: context.signal,
+    parentConversationInput: context.conversationContext.conversationInput || [],
+    parentOpenaiInstance: context.conversationContext.openaiInstance,
+    parentRequestOptions: context.conversationContext.requestOptions,
+    depth,
+    maxDepth,
+    headers: context.headers,
+  });
 }
 
 // Register built-in functions (will be called when needed)
@@ -522,7 +434,7 @@ export async function getToolByName(toolName: string): Promise<FunctionDefinitio
     {
       type: "function" as const,
       name: "call_sub_agent",
-      description: "Delegate a task to a specialized sub-agent. Use this when a question or task is better handled by another agent with specific expertise. The sub-agent will process the task independently and return its response.",
+      description: "Delegate a task to a specialized sub-agent. The sub-agent runs a full conversation with its own tools, documents, and extensions. It can search its own documents, call its own APIs, and even ask you (the parent) for additional context. Use this when a question or task is better handled by another agent with specific expertise.",
       parameters: {
         type: "object",
         properties: {
@@ -600,7 +512,7 @@ export async function buildSubAgentTool(
     .map((a) => `- "${a.name}" (id: ${a.id}): ${a.description}`)
     .join("\n");
 
-  const toolDescription = `Delegate a task to a specialized sub-agent. Use this when a question or task is better handled by another agent with specific expertise. The sub-agent will process the task independently and return its response.\n\nAvailable sub-agents:\n${agentList}`;
+  const toolDescription = `Delegate a task to a specialized sub-agent. The sub-agent runs a full conversation with its own tools, documents, and extensions. It can search its own documents, call its own APIs, and even ask you (the parent) for additional context. Use this when a question or task is better handled by another agent with specific expertise.\n\nAvailable sub-agents:\n${agentList}`;
 
   const tool: FunctionDefinition = {
     type: "function",
