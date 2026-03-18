@@ -56,7 +56,7 @@
     "lucide-react": "^0.453.0",
     "microsoft-cognitiveservices-speech-sdk": "^1.47.0",
     "nanoid": "^5.1.6",
-    "next": "^16.1.4",
+    "next": "^16.1.7",
     "next-auth": "^4.24.13",
     "next-themes": "^0.4.6",
     "openai": "^5.23.2",
