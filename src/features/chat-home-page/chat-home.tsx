@@ -2,6 +2,7 @@
 
 import { ExtensionModel } from "@/features/extensions-page/extension-services/models";
 import { AgentList } from "@/features/persona-page/agent-list";
+import { AddNewPersona } from "@/features/persona-page/add-new-persona";
 import { PersonaModel } from "@/features/persona-page/persona-services/models";
 import { AI_DESCRIPTION, AI_NAME } from "@/features/theme/theme-config";
 import { Hero } from "@/features/ui/hero";
@@ -99,7 +100,7 @@ const ArticlesSection = ({
   </div>
 );
 
-export const ChatHome: FC<ChatPersonaProps> = ({ personas, news, favoriteAgentIds, currentUserId }) => {
+export const ChatHome: FC<ChatPersonaProps> = ({ personas, extensions, news, favoriteAgentIds, currentUserId }) => {
   const [showChangelog, setShowChangelog] = useState<boolean>(false);
 
   return (
@@ -137,6 +138,7 @@ export const ChatHome: FC<ChatPersonaProps> = ({ personas, news, favoriteAgentId
             </>
           )}
         </div>
+        <AddNewPersona extensions={extensions} personas={personas} />
       </main>
     </ScrollArea>
   );

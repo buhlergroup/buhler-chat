@@ -23,7 +23,7 @@ export type ToolProps = ComponentProps<typeof Collapsible>;
 
 export const Tool = ({ className, ...props }: ToolProps) => (
   <Collapsible
-    className={cn('not-prose mb-4 w-full rounded-md border', className)}
+    className={cn('not-prose mb-2 w-full rounded-md border border-muted', className)}
     {...props}
   />
 );
@@ -122,20 +122,20 @@ export const ToolOutput = ({
   }
 
   return (
-    <div className={cn('space-y-2 p-4', className)} {...props}>
-      <h4 className="font-medium text-muted-foreground text-xs uppercase tracking-wide">
+    <div className={cn('space-y-1 px-4 pb-3', className)} {...props}>
+      <h4 className="font-medium text-muted-foreground text-[10px] uppercase tracking-wide">
         {errorText ? 'Error' : 'Result'}
       </h4>
       <div
         className={cn(
-          'overflow-x-auto rounded-md text-xs [&_table]:w-full',
+          'overflow-x-auto rounded text-xs max-h-[200px] overflow-y-auto [&_table]:w-full',
           errorText
-            ? 'bg-destructive/10 text-destructive'
-            : 'bg-muted/50 text-foreground'
+            ? 'bg-destructive/10 text-destructive p-2'
+            : 'text-muted-foreground'
         )}
       >
         {errorText && <div>{errorText}</div>}
-        {output && <div>{output}</div>}
+        {output && <div className="line-clamp-[8]">{output}</div>}
       </div>
     </div>
   );

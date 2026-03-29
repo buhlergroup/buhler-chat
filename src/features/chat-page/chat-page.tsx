@@ -95,22 +95,7 @@ const ChatMessages = memo(function ChatMessages({ profilePicture }: { profilePic
                     })}
                   </div>
                 )}
-                {m.role === 'tool' && (() => {
-                  let parsed: any = null;
-                  try { parsed = JSON.parse(m.content); } catch { /* ignore */ }
-                  const toolName = parsed?.name || m.name || 'tool';
-                  const toolArgs = parsed?.arguments ? (() => { try { return JSON.parse(parsed.arguments); } catch { return parsed.arguments; } })() : undefined;
-                  const toolResult = parsed?.result;
-                  return (
-                    <Tool>
-                      <ToolHeader type={toolName} state={toolResult ? 'output-available' : 'input-available'} />
-                      <ToolContent>
-                        {toolArgs && <ToolInput input={toolArgs} />}
-                        <ToolOutput output={toolResult} errorText={undefined} />
-                      </ToolContent>
-                    </Tool>
-                  );
-                })()}
+                {/* Tool role messages are already rendered via toolHistory on the assistant message above */}
                 {(m.role === 'assistant' || m.role === 'user' || m.role === 'system') && (
                   <RichResponse content={m.content} />
                 )}

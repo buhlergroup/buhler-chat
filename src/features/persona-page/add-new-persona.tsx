@@ -31,7 +31,7 @@ import {
 } from "./persona-store";
 import { ExtensionDetail } from "../chat-page/chat-header/extension-detail";
 import { ExtensionModel } from "../extensions-page/extension-services/models";
-import { PersonaModel } from "./persona-services/models";
+import { PersonaModel, DefaultTools } from "./persona-services/models";
 import { PersonaDocuments } from "./persona-documents/persona-documents";
 import { CodeInterpreterDocuments } from "./persona-documents/code-interpreter-documents";
 import { PersonaAccessGroup } from "./persona-access-group/persona-access-group";
@@ -63,13 +63,17 @@ export const AddNewPersona: FC<Props> = (props) => {
   const [selectedSubAgentIds, setSelectedSubAgentIds] = useState<string[]>(
     [...(persona.subAgentIds || [])]
   );
+  const [defaultTools, setDefaultTools] = useState<NonNullable<DefaultTools>>(
+    persona.defaultTools || {}
+  );
   const [availableModels, setAvailableModels] = useState<Record<string, ModelConfig>>(MODEL_CONFIGS);
 
   // Reset local state when persona changes
   useEffect(() => {
     setSelectedModel(persona.selectedModel || "__default__");
     setSelectedSubAgentIds([...(persona.subAgentIds || [])]);
-  }, [persona.id, persona.selectedModel, persona.subAgentIds]);
+    setDefaultTools(persona.defaultTools || {});
+  }, [persona.id, persona.selectedModel, persona.subAgentIds, persona.defaultTools]);
 
   useEffect(() => {
     const fetchModels = async () => {
@@ -148,6 +152,11 @@ export const AddNewPersona: FC<Props> = (props) => {
                   name="subAgentIds"
                   value={JSON.stringify(selectedSubAgentIds)}
                 />
+                <input
+                  type="hidden"
+                  name="defaultTools"
+                  value={JSON.stringify(defaultTools)}
+                />
                 <div className="grid gap-2">
                   <Label>Name</Label>
                   <Input
@@ -204,6 +213,58 @@ export const AddNewPersona: FC<Props> = (props) => {
                   <p className="text-xs text-muted-foreground">
                     Optionally set a specific model for this agent. If not set, the model selected by the user at chat time will be used.
                   </p>
+                </div>
+                <div className="grid gap-2">
+                  <Label>Default Tools</Label>
+                  <p className="text-xs text-muted-foreground">
+                    Tools enabled by default when a chat is started with this agent. Users can still toggle them in the chat.
+                  </p>
+                  <div className="flex flex-col gap-2 border rounded-md p-3">
+                    <label className="flex items-center gap-2 cursor-pointer">
+                      <input
+                        type="checkbox"
+                        className="h-4 w-4 rounded border-input"
+                        checked={defaultTools.webSearch ?? false}
+                        onChange={(e) =>
+                          setDefaultTools((prev) => ({ ...prev, webSearch: e.target.checked }))
+                        }
+                      />
+                      <span className="text-sm">Web Search</span>
+                    </label>
+                    <label className="flex items-center gap-2 cursor-pointer">
+                      <input
+                        type="checkbox"
+                        className="h-4 w-4 rounded border-input"
+                        checked={defaultTools.imageGeneration ?? false}
+                        onChange={(e) =>
+                          setDefaultTools((prev) => ({ ...prev, imageGeneration: e.target.checked }))
+                        }
+                      />
+                      <span className="text-sm">Image Generation</span>
+                    </label>
+                    <label className="flex items-center gap-2 cursor-pointer">
+                      <input
+                        type="checkbox"
+                        className="h-4 w-4 rounded border-input"
+                        checked={defaultTools.companyContent ?? false}
+                        onChange={(e) =>
+                          setDefaultTools((prev) => ({ ...prev, companyContent: e.target.checked }))
+                        }
+                      />
+                      <span className="text-sm">Company Content</span>
+                    </label>
+                    <label className="flex items-center gap-2 cursor-pointer">
+                      <input
+                        type="checkbox"
+                        className="h-4 w-4 rounded border-input"
+                        checked={defaultTools.codeInterpreter ?? false}
+                        onChange={(e) =>
+                          setDefaultTools((prev) => ({ ...prev, codeInterpreter: e.target.checked }))
+                        }
+                      />
+                      <span className="text-sm">Code Interpreter</span>
+                    </label>
+                  </div>
                 </div>
                 <div className="grid gap-2">
                   <Label htmlFor="extensionIds[]">Extensions</Label>

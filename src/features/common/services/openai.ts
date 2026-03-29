@@ -66,6 +66,7 @@ export const OpenAIV1Instance = () => {
     ...buildAzureOpenAIAuthConfig(),
     baseURL: `https://${instanceName}.openai.azure.com/openai/v1/`,
     apiVersion,
+    maxRetries: 5,
   });
   return openai;
 };
@@ -177,6 +178,7 @@ export const OpenAIV1ReasoningInstance = () => {
     }),
     baseURL: `https://${instanceName}.openai.azure.com/openai/v1/`,
     apiVersion,
+    maxRetries: 5,
   });
   return openai;
 };
@@ -201,6 +203,7 @@ export const OpenAIV1ImageInstance = () => {
     }),
     baseURL: `https://${instanceName}.openai.azure.com/openai/v1/`,
     apiVersion,
+    maxRetries: 5,
   });
   return openai;
 };

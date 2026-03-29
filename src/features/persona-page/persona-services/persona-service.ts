@@ -18,6 +18,7 @@ import { uniqueId } from "@/features/common/util";
 import { SqlQuerySpec } from "@azure/cosmos";
 import {
   AccessGroup,
+  DefaultTools,
   DocumentMetadata,
   PERSONA_ATTRIBUTE,
   PersonaModel,
@@ -50,6 +51,7 @@ interface PersonaInput {
   codeInterpreterDocumentIds?: string[];
   selectedModel?: string;
   subAgentIds?: string[];
+  defaultTools?: DefaultTools;
 }
 
 export const FindPersonaByID = async (
@@ -150,6 +152,7 @@ export const CreatePersona = async (
       codeInterpreterDocumentIds: props.codeInterpreterDocumentIds || [],
       selectedModel: props.selectedModel,
       subAgentIds: props.subAgentIds || [],
+      defaultTools: props.defaultTools,
     };
 
     const valid = ValidateSchema(modelToSave);
@@ -283,6 +286,7 @@ export const UpsertPersona = async (
         codeInterpreterDocumentIds: personaInput.codeInterpreterDocumentIds || [],
         selectedModel: personaInput.selectedModel,
         subAgentIds: personaInput.subAgentIds || [],
+        defaultTools: personaInput.defaultTools,
       };
 
       const validationResponse = ValidateSchema(modelToUpdate);
@@ -518,6 +522,7 @@ export const CreatePersonaChat = async (
       attachedFiles: attachedFiles.length > 0 ? attachedFiles : undefined,
       selectedModel: persona.selectedModel as ChatModel | undefined,
       subAgentIds: persona.subAgentIds || [],
+      defaultTools: persona.defaultTools,
     });
 
     return response;

@@ -373,11 +373,28 @@ async function callSubAgent(
 
   try {
     const openaiInstance = subAgentModelConfig.getInstance();
-    
+
+    // Build built-in tools from sub-agent persona's defaultTools
+    const dt = subAgent.defaultTools;
+    const builtInTools: any[] = [];
+    if (dt?.imageGeneration) {
+      builtInTools.push({ type: "image_generation" });
+    }
+    if (dt?.webSearch) {
+      builtInTools.push({ type: "web_search_preview" });
+    }
+    if (dt?.codeInterpreter) {
+      builtInTools.push({ type: "code_interpreter", container: { type: "auto" } });
+    }
+
     const requestOptions: any = {
       model: subAgentModelConfig.deploymentName,
       stream: false,
       store: false,
+      ...(builtInTools.length > 0 && {
+        tools: builtInTools,
+        tool_choice: "auto",
+      }),
     };
 
     if (subAgentModelConfig.supportsReasoning) {

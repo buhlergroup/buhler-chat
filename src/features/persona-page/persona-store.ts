@@ -170,6 +170,11 @@ const FormDataToPersonaModel = (formData: FormData): PersonaModel => {
     ? JSON.parse(subAgentIdsRaw) as string[]
     : [];
 
+  const defaultToolsRaw = formData.get("defaultTools") as string;
+  const defaultTools = defaultToolsRaw
+    ? JSON.parse(defaultToolsRaw)
+    : undefined;
+
   return {
     id: formData.get("id") as string,
     name: formData.get("name") as string,
@@ -188,5 +193,6 @@ const FormDataToPersonaModel = (formData: FormData): PersonaModel => {
     codeInterpreterDocumentIds: codeInterpreterDocumentIds,
     selectedModel: selectedModel,
     subAgentIds: subAgentIds,
+    defaultTools: defaultTools,
   };
 };

@@ -61,6 +61,15 @@ export const AccessGroupSchema = z.object({
 export const PERSONA_ATTRIBUTE = "PERSONA";
 export type PersonaModel = z.infer<typeof PersonaModelSchema>;
 
+export const DefaultToolsSchema = z.object({
+  webSearch: z.boolean().optional(),
+  imageGeneration: z.boolean().optional(),
+  companyContent: z.boolean().optional(),
+  codeInterpreter: z.boolean().optional(),
+}).optional();
+
+export type DefaultTools = z.infer<typeof DefaultToolsSchema>;
+
 export const PersonaModelSchema = z.object({
   id: z.string(),
   userId: z.string(),
@@ -91,6 +100,7 @@ export const PersonaModelSchema = z.object({
   accessGroup: AccessGroupSchema.optional(),
   selectedModel: z.string().optional(), // Specific model to use for this agent
   subAgentIds: z.array(z.string()).optional(), // IDs of sub-agents this agent can call
+  defaultTools: DefaultToolsSchema, // Default tool settings for this agent
 });
 
 

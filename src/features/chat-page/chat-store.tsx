@@ -1,7 +1,7 @@
 "use client";
 import { uniqueId } from "@/features/common/util";
 import { showError } from "@/features/globals/global-message-store";
-import { AI_NAME, NEW_CHAT_NAME } from "@/features/theme/theme-config";
+import { AI_NAME } from "@/features/theme/theme-config";
 import {
   ParsedEvent,
   ReconnectInterval,
@@ -139,11 +139,12 @@ class ChatState {
       this.tempReasoningContent = "";
       this.currentAssistantMessageId = "";
       
-      // Reset tool states for new chat
-      this.webSearchEnabled = false;
-      this.imageGenerationEnabled = true;
-      this.companyContentEnabled = false;
-      this.codeInterpreterEnabled = false;
+      // Apply default tool states from persona, or use defaults
+      const dt = chatThread.defaultTools;
+      this.webSearchEnabled = dt?.webSearch ?? false;
+      this.imageGenerationEnabled = dt?.imageGeneration ?? true;
+      this.companyContentEnabled = dt?.companyContent ?? false;
+      this.codeInterpreterEnabled = dt?.codeInterpreter ?? false;
       
       // Load attached files from the chat thread
       this.attachedFiles = chatThread.attachedFiles || [];
@@ -487,11 +488,14 @@ class ChatState {
   }
 
   private async updateTitle() {
-    if (this.chatThread && this.chatThread.name === NEW_CHAT_NAME) {
+    // Generate a title after the first user message, regardless of the initial chat name.
+    // This works for both regular chats ("New chat") and agent-based chats (named after the agent).
+    const userMessages = this.messages.filter((m) => m.role === "user");
+    if (this.chatThread && userMessages.length === 1) {
       // Fire-and-forget: update title asynchronously without blocking the UI
       setTimeout(async () => {
         try {
-          await UpdateChatTitle(this.chatThreadId, this.messages[0].content);
+          await UpdateChatTitle(this.chatThreadId, userMessages[0].content);
           RevalidateCache({
             page: "chat",
             type: "layout",
