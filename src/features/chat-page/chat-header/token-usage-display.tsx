@@ -125,6 +125,10 @@ export const TokenUsageDisplay: FC = () => {
             </DropdownMenuLabel>
           </>
         )}
+        <DropdownMenuSeparator />
+        <DropdownMenuLabel className="font-normal py-1.5">
+          <p className="text-[10px] text-muted-foreground/60 leading-tight">Costs are estimates only. No charges are applied.</p>
+        </DropdownMenuLabel>
       </DropdownMenuContent>
     </DropdownMenu>
   );
