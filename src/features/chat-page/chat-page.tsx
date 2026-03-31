@@ -68,7 +68,7 @@ const ChatMessages = memo(function ChatMessages({ profilePicture }: { profilePic
             </div>
           </div>
         )}
-        {messages.map((m, mIndex) => {
+        {messages.filter(m => m.role !== 'tool' && m.role !== 'function').map((m, mIndex) => {
           const role = (m.role === 'user' || m.role === 'assistant' || m.role === 'system') ? m.role : 'assistant';
           const avatarSrc = role === 'user'
             ? (profilePicture || '/user-icon.png')
