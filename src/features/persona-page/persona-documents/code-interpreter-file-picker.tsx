@@ -139,7 +139,7 @@ export function CodeInterpreterFilePicker({
     try {
       setShowPicker(true);
 
-      const documentLimit = Number(process.env.NEXT_PUBLIC_MAX_PERSONA_CI_DOCUMENT_LIMIT) || 5;
+      const documentLimit = Number(process.env.NEXT_PUBLIC_MAX_PERSONA_CI_DOCUMENT_LIMIT) || 25;
 
       // Filter for Code Interpreter supported extensions
       const filters = CODE_INTERPRETER_SUPPORTED_EXTENSIONS.map(

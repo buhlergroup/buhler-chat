@@ -200,7 +200,7 @@ export const UpdateOrAddPersonaCIDocuments = async (
   sharePointFiles: DocumentMetadata[],
   currentCIDocuments: string[]
 ): Promise<ServerActionResponse<string[]>> => {
-  const documentLimit = Number(process.env.MAX_PERSONA_CI_DOCUMENT_LIMIT) || 5;
+  const documentLimit = Number(process.env.MAX_PERSONA_CI_DOCUMENT_LIMIT) || 25;
 
   if (sharePointFiles.length > documentLimit) {
     return {
