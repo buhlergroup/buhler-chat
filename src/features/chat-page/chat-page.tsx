@@ -69,6 +69,8 @@ const ChatMessages = memo(function ChatMessages({ profilePicture }: { profilePic
           </div>
         )}
         {messages.map((m, mIndex) => {
+          // Tool/function messages are rendered via toolHistory on the assistant message — skip them
+          if (m.role === 'tool' || m.role === 'function') return null;
           const role = (m.role === 'user' || m.role === 'assistant' || m.role === 'system') ? m.role : 'assistant';
           const avatarSrc = role === 'user'
             ? (profilePicture || '/user-icon.png')
@@ -111,10 +113,7 @@ const ChatMessages = memo(function ChatMessages({ profilePicture }: { profilePic
                     })}
                   </div>
                 )}
-                {/* Tool role messages are already rendered via toolHistory on the assistant message above */}
-                {(m.role === 'assistant' || m.role === 'user' || m.role === 'system') && (
-                  <RichResponse content={m.content} />
-                )}
+                <RichResponse content={m.content} />
                 </MessageContent>
                 {(m.role === 'assistant' || m.role === 'user') && (
                   <div className="flex group-[.is-user]:justify-end group-[.is-assistant]:justify-start px-0.5">
