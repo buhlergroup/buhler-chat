@@ -215,7 +215,7 @@ export function SharePointFilePicker({
         selection: {
           mode: "multiple",
           enablePersistence: true,
-          maximumCount: documentLimit || 10,
+          maximumCount: documentLimit || 25,
         },
       };
 
