@@ -369,13 +369,23 @@ export async function POST(req: Request) {
   // Creating the container BEFORE the first model call puts the id in the
   // definition from turn 1 onwards. If creation fails we keep the old
   // bootstrap-then-harvest path, which still works.
-  if (effectiveToolsSafe.codeInterpreter && !ctx.thread.codeInterpreterContainerId) {
+  // Runs on EVERY code-interpreter turn, not only the first. The guard here
+  // used to be `&& !ctx.thread.codeInterpreterContainerId`, which meant a
+  // thread that once had a container never checked it again — so once Azure
+  // reclaimed it, every later turn declared a dead id and failed on
+  // "Container is expired." with no way out. ensureCodeInterpreterContainer
+  // now validates a stored id and replaces it only when it has really gone,
+  // so the steady state is still one container per thread and one stable tool
+  // definition.
+  if (effectiveToolsSafe.codeInterpreter) {
     const containerId = await ensureCodeInterpreterContainer({
       threadId: ctx.thread.id,
       existingContainerId: ctx.thread.codeInterpreterContainerId,
       fileIds: requestedCiFileIds,
     });
-    if (containerId) {
+    // Nothing to do when the id is unchanged: it is already on the thread and
+    // already persisted. Only a new or replaced container needs a write.
+    if (containerId && containerId !== ctx.thread.codeInterpreterContainerId) {
       // Persist BEFORE using it. The id has to survive to the next turn even
       // if the model never calls the tool this turn — otherwise turn 2 mints
       // another container and changes the definition again, which is the

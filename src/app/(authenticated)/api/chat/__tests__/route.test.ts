@@ -283,19 +283,50 @@ describe("/api/chat route (AI SDK v6)", () => {
       expect(mockUpdateContainer).toHaveBeenCalledWith("t1", "cntr_precreated", "");
     });
 
-    it("reuses the thread's existing container without creating another", async () => {
+    it("revalidates the stored container each turn and writes nothing when it is unchanged", async () => {
+      // The guard here used to skip the check entirely once a thread had a
+      // container, so a reclaimed one was never replaced and every later turn
+      // failed on "Container is expired.". The check now runs every turn; an
+      // unchanged id still costs no Cosmos write and still gives the seam the
+      // same string, so the tool definition stays byte-stable.
       mockLoadThreadContext.mockResolvedValue({
         ...structuredClone(ciCtx),
         thread: { ...ciCtx.thread, codeInterpreterContainerId: "cntr_existing" },
       });
+      mockEnsureContainer.mockResolvedValue("cntr_existing");
 
       await POST(makeRequest({ message: "again", id: "t1", codeInterpreterEnabled: true }));
 
-      expect(mockEnsureContainer).not.toHaveBeenCalled();
+      expect(mockEnsureContainer).toHaveBeenCalledWith(
+        expect.objectContaining({
+          threadId: "t1",
+          existingContainerId: "cntr_existing",
+        }),
+      );
+      expect(mockUpdateContainer).not.toHaveBeenCalled();
       expect(mockResolveProvider).toHaveBeenCalledWith(
         expect.objectContaining({
           thread: expect.objectContaining({
             codeInterpreterContainerId: "cntr_existing",
+          }),
+        }),
+      );
+    });
+
+    it("persists and declares a replacement when the stored container has expired", async () => {
+      mockLoadThreadContext.mockResolvedValue({
+        ...structuredClone(ciCtx),
+        thread: { ...ciCtx.thread, codeInterpreterContainerId: "cntr_dead" },
+      });
+      mockEnsureContainer.mockResolvedValue("cntr_fresh");
+
+      await POST(makeRequest({ message: "again", id: "t1", codeInterpreterEnabled: true }));
+
+      expect(mockUpdateContainer).toHaveBeenCalledWith("t1", "cntr_fresh", "");
+      expect(mockResolveProvider).toHaveBeenCalledWith(
+        expect.objectContaining({
+          thread: expect.objectContaining({
+            codeInterpreterContainerId: "cntr_fresh",
           }),
         }),
       );
