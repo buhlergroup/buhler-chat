@@ -35,7 +35,6 @@ import {
  */
 function CompactionRow(props: {
   text: string;
-  running?: boolean;
   summaryText?: string;
   summaryModel?: string;
 }) {
@@ -52,11 +51,7 @@ function CompactionRow(props: {
         className="flex items-center gap-3 rounded-md bg-muted/60 px-4 py-2 text-muted-foreground text-sm"
         data-testid="compaction-notice"
       >
-        {props.running ? (
-          <Loader size={14} />
-        ) : (
-          <FoldVerticalIcon className="size-4 shrink-0" />
-        )}
+        <FoldVerticalIcon className="size-4 shrink-0" />
         <span className="flex-1">{props.text}</span>
         {hasSummary && (
           <CollapsibleTrigger className="flex shrink-0 items-center gap-1 text-xs transition-colors hover:text-foreground">
@@ -86,14 +81,12 @@ function CompactionRow(props: {
 
 /**
  * Renders a `data-compaction` part streamed with the turn it happened on.
- * Handles both phases: "running" while the summariser is working, "done" once
- * the trim is complete. The AI SDK reconciles the two by part id, so one row
- * changes in place rather than two rows appearing.
+ *
+ * One phase only. The trim runs in `loadThreadContext`, before the stream
+ * opens, so the outcome is known by the time the first frame is written; there
+ * is no interval during which a spinner could be shown.
  */
 export function CompactionNotice({ data }: { data: CompactionData }) {
-  if (data.status === "running") {
-    return <CompactionRow running text={compactionNoticeText(data)} />;
-  }
   return (
     <CompactionRow
       text={compactionNoticeText(data)}

@@ -1,8 +1,8 @@
 import { describe, it, expect } from "vitest";
 import type { ModelMessage } from "ai";
+import { compareByCodepoint } from "../tools/stabilize-toolset";
 import {
   buildSystemMessage,
-  sortFunctionTools,
   withAnthropicPromptCache,
   withPromptCacheBreakpoint,
 } from "./prompt-builder";
@@ -118,57 +118,6 @@ describe("buildSystemMessage", () => {
 
 });
 
-describe("sortFunctionTools", () => {
-  it("produces the same array regardless of input order", () => {
-    const a = [{ name: "search_documents" }, { name: "call_sub_agent" }, { name: "search_company_content" }];
-    const b = [{ name: "call_sub_agent" }, { name: "search_company_content" }, { name: "search_documents" }];
-    const c = [{ name: "search_company_content" }, { name: "search_documents" }, { name: "call_sub_agent" }];
-
-    const sortedA = sortFunctionTools(a);
-    const sortedB = sortFunctionTools(b);
-    const sortedC = sortFunctionTools(c);
-
-    expect(JSON.stringify(sortedA)).toBe(JSON.stringify(sortedB));
-    expect(JSON.stringify(sortedA)).toBe(JSON.stringify(sortedC));
-  });
-
-  it("orders by codepoint, not by locale", () => {
-    // A locale-aware comparison puts "apple" before "Banana"; codepoint order
-    // puts every capital first. The distinction matters because localeCompare
-    // is the pod's ICU build talking: two replicas could order the same tool
-    // set differently and neither would match the other's cached prefix.
-    const sorted = sortFunctionTools([
-      { name: "apple" },
-      { name: "Banana" },
-      { name: "Zebra" },
-      { name: "zebra" },
-    ]);
-    expect(sorted.map((t) => t.name)).toEqual(["Banana", "Zebra", "apple", "zebra"]);
-  });
-
-  it("does not mutate the input", () => {
-    const original = [{ name: "z" }, { name: "a" }];
-    const snapshot = JSON.stringify(original);
-    sortFunctionTools(original);
-    expect(JSON.stringify(original)).toBe(snapshot);
-  });
-
-  it("preserves all other fields on each tool entry", () => {
-    const tools = [
-      { name: "b", description: "desc-b", strict: true as const, parameters: { type: "object" } },
-      { name: "a", description: "desc-a", strict: true as const, parameters: { type: "object" } },
-    ];
-    const sorted = sortFunctionTools(tools);
-    expect(sorted[0]).toEqual(tools[1]);
-    expect(sorted[1]).toEqual(tools[0]);
-  });
-
-  it("handles tools with missing/empty names without throwing", () => {
-    const tools = [{ name: "z" }, { name: undefined }, { name: "a" }];
-    expect(() => sortFunctionTools(tools as any)).not.toThrow();
-  });
-});
-
 describe("withAnthropicPromptCache", () => {
   const EPHEMERAL = { type: "ephemeral" };
   const userMsgs: ModelMessage[] = [
@@ -270,8 +219,12 @@ describe("byte-for-byte invariant (the cache contract)", () => {
     // was flagging it.
     const sys1 = buildSystemMessage({ staticSystemPrompt, personaMessage, documentHint: "" });
     const sys2 = buildSystemMessage({ staticSystemPrompt, personaMessage, documentHint: "" });
-    const sortedTools1 = sortFunctionTools(toolsRequest1);
-    const sortedTools2 = sortFunctionTools(toolsRequest2);
+    // The live path orders tools with stabilizeToolset's comparator; sort with
+    // the same one here so this asserts the shipped ordering, not a helper.
+    const byName = (a: { name: string }, b: { name: string }) =>
+      compareByCodepoint(a.name, b.name);
+    const sortedTools1 = [...toolsRequest1].sort(byName);
+    const sortedTools2 = [...toolsRequest2].sort(byName);
 
     // System message is byte-identical
     expect(Buffer.from(sys1).equals(Buffer.from(sys2))).toBe(true);

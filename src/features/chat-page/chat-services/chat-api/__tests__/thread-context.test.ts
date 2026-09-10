@@ -416,6 +416,57 @@ describe("chat-page.unit.thread-context.002 — the token budget trims once and 
     expect(ctx.compaction!.summaryModel).toBeUndefined();
   });
 
+  it("maps a summary row that recorded no outcome to unknown, not to off", async () => {
+    // A row written before `summaryOutcome` existed, with the summariser ON.
+    // Reading it as "off" told the user the feature was disabled while it was
+    // running — the exact misdiagnosis this reason code was added to remove.
+    process.env.HISTORY_TOKEN_BUDGET = "10000";
+    summaryEnabled = true;
+    mockRecordCompaction.mockImplementationOnce(async (input: any) => ({
+      id: `summary-${input.threadId}`,
+      type: "CHAT_HISTORY_SUMMARY",
+      threadId: input.threadId,
+      userId: "user-hash",
+      isDeleted: false,
+      createdAt: new Date("2026-09-07"),
+      role: "system",
+      kind: "summary",
+      content: "",
+      coversThroughMessageId: input.coversThroughMessageId,
+      coversMessageCount: 6,
+      model: "",
+      estimatedTokens: 0,
+      // No summaryOutcome at all: the legacy shape.
+    }));
+    mockEnsureThread.mockResolvedValue(measured(20_000));
+    mockFindHistory.mockResolvedValue({
+      status: "OK",
+      response: makeTurns(40, 500),
+    });
+
+    const ctx = await loadThreadContext(makeUserPrompt());
+
+    expect(ctx.compaction!.summaryOutcome).toBe("unknown");
+    expect(ctx.compaction!.summaryText).toBeUndefined();
+    expect(ctx.compaction!.summaryModel).toBeUndefined();
+  });
+
+  it("still reports off when the summariser really is off (negative)", async () => {
+    // The counterpart: with the flag off, "off" is the truth and must survive
+    // — the fix must not turn every outcome into "unknown".
+    process.env.HISTORY_TOKEN_BUDGET = "10000";
+    summaryEnabled = false;
+    mockEnsureThread.mockResolvedValue(measured(20_000));
+    mockFindHistory.mockResolvedValue({
+      status: "OK",
+      response: makeTurns(40, 500),
+    });
+
+    const ctx = await loadThreadContext(makeUserPrompt());
+
+    expect(ctx.compaction!.summaryOutcome).toBe("off");
+  });
+
   it("does not present an earlier summary as this block's when the summariser failed", async () => {
     // The defect this reason code exists for. The row can carry text from an
     // EARLIER trim while THIS trim failed; showing it would tell the user the
@@ -521,17 +572,47 @@ describe("chat-page.unit.thread-context.002 — the token budget trims once and 
     ).toHaveLength(1);
   });
 
-  it("falls back to the all-steps roll-up for a row written before lastPromptTokens", async () => {
-    // Old rows carry only `lastInputTokens`. It is exact for a single-step
-    // turn and overstates a multi-step one, so the fallback errs towards
-    // compacting — the safe direction.
+  it("never compacts a row written before lastPromptTokens, however big its roll-up", async () => {
+    // Old rows carry only `lastInputTokens`, the all-steps roll-up. That sums
+    // one prompt per step, so it overstates a multi-step turn by roughly the
+    // number of steps — compacting on it is the defect this branch removes,
+    // and there is no reason old threads should keep it. No measurement means
+    // no compaction, full stop; the next turn records one and decides then.
     process.env.HISTORY_TOKEN_BUDGET = "10000";
     summaryEnabled = true;
     const legacy = makeThread("thread-001", 20_000) as unknown as {
       usage: Record<string, unknown>;
     };
     delete legacy.usage.lastPromptTokens;
+    // Far over the budget on the roll-up alone, which must not be consulted.
+    legacy.usage.lastInputTokens = 900_000;
     mockEnsureThread.mockResolvedValue({ status: "OK", response: legacy });
+    mockFindHistory.mockResolvedValue({
+      status: "OK",
+      response: makeTurns(40, 500),
+    });
+
+    const ctx = await loadThreadContext(makeUserPrompt());
+
+    expect(ctx.compaction).toBeUndefined();
+    expect(mockRecordCompaction).not.toHaveBeenCalled();
+    expect(
+      logDebug.mock.calls.filter((c) =>
+        String(c[0]).includes("no measured prompt size yet"),
+      ),
+    ).toHaveLength(1);
+  });
+
+  it("compacts on the very next turn, once that turn has a measurement", async () => {
+    // The sequel to the test above: the legacy turn recorded nothing, so it
+    // was let through; the turn after it has a real measured prompt size and
+    // is decided on that number like any other.
+    process.env.HISTORY_TOKEN_BUDGET = "10000";
+    summaryEnabled = true;
+    mockEnsureThread.mockResolvedValue({
+      status: "OK",
+      response: makeThread("thread-001", 20_000),
+    });
     mockFindHistory.mockResolvedValue({
       status: "OK",
       response: makeTurns(40, 500),

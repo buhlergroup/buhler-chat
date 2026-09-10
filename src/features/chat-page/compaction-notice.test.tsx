@@ -6,13 +6,26 @@ import { CompactionMarker, CompactionNotice } from "./compaction-notice";
 // The divider is the only thing that tells a user the model can no longer
 // quote turns they can still scroll to, so these pin the words on screen.
 
-describe("chat-page.unit.compaction-notice.001 — while it runs", () => {
-  it("shows the running line and a spinner, with nothing to expand", () => {
-    render(<CompactionNotice data={{ status: "running", turnsToTrim: 4 }} />);
-    expect(screen.getByText("Compacting older messages…")).toBeInTheDocument();
-    // The Loader's inline SVG carries a title; a spinner is the whole point of
-    // the running state.
-    expect(screen.getByTitle("Loader")).toBeInTheDocument();
+describe("chat-page.unit.compaction-notice.001 — a row that recorded no reason", () => {
+  it("states the compaction and claims nothing about a summary", () => {
+    // A summary row written before `summaryOutcome` existed. This used to map
+    // to "off" and print "no summary, feature off" on threads whose
+    // summariser was on and working — the same misdiagnosis the reason code
+    // was added to remove. The honest line names the compaction and stops.
+    render(
+      <CompactionNotice
+        data={{
+          status: "done",
+          trimmedTurns: 12,
+          summaryOutcome: "unknown",
+          durationMs: 0,
+        }}
+      />,
+    );
+    expect(screen.getByText("Compacted 12 older turns")).toBeInTheDocument();
+    expect(screen.queryByText(/feature off/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/failed|timed out|deployment/)).not.toBeInTheDocument();
+    // Nothing to expand: an unknown outcome never carries summary text.
     expect(screen.queryByText("Show summary")).not.toBeInTheDocument();
   });
 });

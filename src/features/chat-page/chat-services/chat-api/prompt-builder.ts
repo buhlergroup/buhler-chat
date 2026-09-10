@@ -12,7 +12,6 @@
 // can be locked down by tests in prompt-builder.test.ts.
 
 import type { ModelMessage, SystemModelMessage } from "ai";
-import { compareByCodepoint } from "../tools/stabilize-toolset";
 
 export interface PromptBuilderInputs {
   staticSystemPrompt: string;
@@ -62,24 +61,6 @@ export function buildSystemMessage(inputs: PromptBuilderInputs): string {
     trailingStaticBlock = "",
   } = inputs;
   return `${staticSystemPrompt}\n\n${personaMessage}${trailingStaticBlock}${documentHint}`;
-}
-
-/**
- * Sort function-typed tools by name. The Responses API treats the tools array
- * as part of the request body that participates in the cache key, so its order
- * must be deterministic regardless of which conditional branches/extensions
- * registered each tool.
- *
- * Codepoint comparison, NOT `localeCompare`: a locale-aware comparison is the
- * pod's ICU build talking, so the same tool set could order differently on two
- * replicas and neither would match the other's cached prefix. This used
- * localeCompare, which is what stabilize-toolset.ts was written to remove from
- * the live path — left here it was a loaded gun for the next caller.
- *
- * Returns a new array; does not mutate input.
- */
-export function sortFunctionTools<T extends { name?: string }>(tools: readonly T[]): T[] {
-  return [...tools].sort((a, b) => compareByCodepoint(a?.name || "", b?.name || ""));
 }
 
 /**

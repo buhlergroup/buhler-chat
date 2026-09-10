@@ -6,7 +6,6 @@ import {
   compactionMarkerPlacement,
   compactionMarkerText,
   compactionNoticeText,
-  compactionRunningPart,
   formatTokenCount,
   isCompactionDataPart,
   threadCompactionMarker,
@@ -16,17 +15,23 @@ import {
 // Everything here is pure: no stream, no Cosmos, no React.
 
 describe("chat-page.unit.compaction-part.001 — the part shape", () => {
-  it("gives both phases the same id, so the second write replaces the first", () => {
-    const running = compactionRunningPart({ turnsToTrim: 4 });
+  it("carries the wire type and the stable id, so a second write replaces the first", () => {
     const done = compactionDonePart({
       trimmedTurns: 4,
       summaryOutcome: "ok",
       durationMs: 900,
     });
-    expect(running.type).toBe(COMPACTION_DATA_PART_TYPE);
-    expect(running.type).toBe("data-compaction");
-    expect(running.id).toBe(COMPACTION_PART_ID);
-    expect(done.id).toBe(running.id);
+    const again = compactionDonePart(
+      { trimmedTurns: 4, summaryOutcome: "ok", durationMs: 900 },
+      { tokensBefore: 184_000, tokensAfter: 96_000 },
+    );
+    expect(done.type).toBe(COMPACTION_DATA_PART_TYPE);
+    expect(done.type).toBe("data-compaction");
+    expect(done.id).toBe(COMPACTION_PART_ID);
+    // Same id on both writes is what makes the second an update rather than a
+    // second divider. There is no "running" phase to reconcile with: the trim
+    // is already done before the stream opens.
+    expect(again.id).toBe(done.id);
   });
 
   it("omits every field it has no value for, rather than sending undefined", () => {
@@ -125,10 +130,6 @@ describe("chat-page.unit.compaction-part.002 — the copy", () => {
     // Each reason code gets its own line. A boolean could not tell "the
     // operator turned it off" from "the summariser 404'd", and the live defect
     // that prompted these codes was invisible for exactly that reason.
-    expect(
-      compactionNoticeText({ status: "running", turnsToTrim: 3 }),
-    ).toBe("Compacting older messages…");
-
     const done = {
       status: "done" as const,
       trimmedTurns: 12,
@@ -170,6 +171,12 @@ describe("chat-page.unit.compaction-part.002 — the copy", () => {
     expect(
       compactionNoticeText({ ...done, summaryOutcome: "no-deployment" }),
     ).toBe("Trimmed 12 older turns (no summarizer deployment)");
+    // A row that recorded no reason gets no reason clause. It must not borrow
+    // "feature off": that claimed a configuration choice on threads whose
+    // summariser was on, which is the misdiagnosis these codes exist to stop.
+    expect(compactionNoticeText({ ...done, summaryOutcome: "unknown" })).toBe(
+      "Compacted 12 older turns (34,012 → 17,565 tokens)",
+    );
   });
 
   it("keeps the singular singular", () => {

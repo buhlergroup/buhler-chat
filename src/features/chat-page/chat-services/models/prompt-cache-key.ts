@@ -74,16 +74,17 @@ export function toolsetSignature(toolNames: readonly string[]): string {
 }
 
 /**
- * Deterministic shard for a user. Reads the leading hex of the user's hashed
- * id (a SHA-256 hex digest); falls back to an FNV hash for any other shape so
- * a non-hex subject id still shards evenly instead of all landing on 0.
+ * Deterministic shard for a user, from an FNV hash of the subject key.
+ *
+ * One path, deliberately. There used to be a fast path that read the leading
+ * hex of a bare SHA-256 digest, but the only caller passes the rate-limit
+ * subject — `user:<digest>` — which never matches a leading-hex pattern, so
+ * the fast path was unreachable in production and only its fallback ever ran.
+ * Hashing every shape gives an even spread and one behaviour to reason about.
  */
 export function shardForUser(userKey: string, shards: number): number {
   const buckets = shards >= 1 ? shards : DEFAULT_PROMPT_CACHE_KEY_SHARDS;
-  const leadingHex = /^[0-9a-f]{8}/i.exec(userKey ?? "")?.[0];
-  const value = leadingHex
-    ? Number.parseInt(leadingHex, 16)
-    : Number.parseInt(toolsetSignature([userKey ?? ""]), 16);
+  const value = Number.parseInt(toolsetSignature([userKey ?? ""]), 16);
   return value % buckets;
 }
 

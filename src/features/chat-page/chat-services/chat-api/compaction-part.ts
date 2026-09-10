@@ -34,13 +34,6 @@ export const COMPACTION_DATA_PART_TYPE = "data-compaction" as const;
  */
 export const COMPACTION_PART_ID = "compaction" as const;
 
-/** Written when a trim has been decided and the summariser is still running. */
-export interface CompactionRunningData {
-  status: "running";
-  /** Turns the plan will drop. */
-  turnsToTrim: number;
-}
-
 /**
  * Why the dropped turns have, or have not, a summary standing in for them.
  *
@@ -60,7 +53,17 @@ export type SummaryOutcome =
   /** The summariser outran `HISTORY_SUMMARY_TIMEOUT_MS`. */
   | "timeout"
   /** No candidate deployment resolved to a model this app can call. */
-  | "no-deployment";
+  | "no-deployment"
+  /**
+   * The row predates `summaryOutcome`, so no reason was ever recorded.
+   *
+   * This is NOT a failure and must not be rendered as one. Mapping it to "off"
+   * reproduced the exact defect this type exists to remove: the transcript
+   * claimed "no summary, feature off" on a thread whose summariser was on and
+   * working. The honest answer for a row that never recorded a reason is to
+   * state the compaction and stop, so the notice carries no reason clause.
+   */
+  | "unknown";
 
 /**
  * Written once the trim (and the summary, if enabled) is complete.
@@ -121,7 +124,13 @@ export interface CompactionDoneData {
   summaryText?: string;
 }
 
-export type CompactionData = CompactionRunningData | CompactionDoneData;
+/**
+ * The compaction part has one shape. The trim happens in `loadThreadContext`,
+ * before the stream exists, so the fact is already known when the first frame
+ * is written — there was never a "running" phase to render, and the one that
+ * was declared here could not be reached from the route.
+ */
+export type CompactionData = CompactionDoneData;
 
 /** The part as it goes on the wire and onto the message. */
 export interface CompactionDataPart {
@@ -151,16 +160,6 @@ export interface HistoryCompactionOutcome {
   summaryText?: string;
   /** Newest row the summary covers through — the divider's anchor on reload. */
   coversThroughMessageId?: string;
-}
-
-export function compactionRunningPart(input: {
-  turnsToTrim: number;
-}): CompactionDataPart {
-  return {
-    type: COMPACTION_DATA_PART_TYPE,
-    id: COMPACTION_PART_ID,
-    data: { status: "running", turnsToTrim: input.turnsToTrim },
-  };
 }
 
 /**
@@ -332,11 +331,15 @@ function tokenClause(data: CompactionDoneData): string {
 }
 
 export function compactionNoticeText(data: CompactionData): string {
-  if (data.status === "running") return "Compacting older messages…";
   const tokens = tokenClause(data);
   switch (data.summaryOutcome) {
     case "ok":
       return `Compacted ${turnLabel(data.trimmedTurns)} into a summary${tokens}`;
+    // No reason was recorded, so state the compaction and claim nothing about
+    // a summary. Inventing "feature off" here is what made the original defect
+    // invisible.
+    case "unknown":
+      return `Compacted ${turnLabel(data.trimmedTurns)}${tokens}`;
     case "off":
       return `Trimmed ${turnLabel(data.trimmedTurns)} (no summary, feature off)`;
     case "failed":

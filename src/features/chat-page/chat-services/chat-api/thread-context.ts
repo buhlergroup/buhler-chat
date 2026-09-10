@@ -382,11 +382,14 @@ async function compactHistory(input: {
 
   // The reason code comes from the writer, which is the only place that knows
   // whether the summariser was off, absent, slow or broken. A row written
-  // before outcomes existed has none; treat that as "off" rather than invent a
-  // failure. Note a row can carry text from an EARLIER trim while this trim
-  // failed — so the text is only shown when this trim itself succeeded.
+  // before outcomes existed has none, and that is "unknown" — NOT "off".
+  // Mapping it to "off" put "no summary, feature off" in the transcript of
+  // threads whose summariser was on and working, which is the same class of
+  // misdiagnosis this reason code was added to remove. Note a row can carry
+  // text from an EARLIER trim while this trim failed — so the text is only
+  // shown when this trim itself succeeded.
   const summaryContent = recorded?.content?.trim() ?? "";
-  const summaryOutcome: SummaryOutcome = recorded?.summaryOutcome ?? "off";
+  const summaryOutcome: SummaryOutcome = recorded?.summaryOutcome ?? "unknown";
   const summarised = summaryOutcome === "ok" && summaryContent.length > 0;
   const compaction: HistoryCompactionOutcome = {
     trimmedTurns: plan.droppedTurnCount,
@@ -644,9 +647,11 @@ export async function loadThreadContext(
   //
   // The whole thread, not `TOP 30`. The old row cap made the prompt prefix
   // move on every turn past row 30 — see the header comment in
-  // history-budget.ts for the measured cost. What limits the prompt now is an
-  // estimated-token budget with turn-boundary cuts and hysteresis, so the
-  // prefix holds still for dozens of turns at a time.
+  // history-budget.ts for the measured cost. What limits the prompt now is the
+  // provider's own size for the previous request's last prompt, compared
+  // against the budget: over it, the eligible history is compacted in one
+  // block, so the prefix then holds still for dozens of turns at a time.
+  // Nothing is estimated.
   const historyResponse = await FindAllChatMessagesForCurrentUser(thread.id);
   const allRows = historyResponse.status === "OK" ? historyResponse.response : [];
   if (historyResponse.status !== "OK") {
@@ -667,16 +672,17 @@ export async function loadThreadContext(
     // this is that request's real prompt size — read here BEFORE this turn
     // overwrites it.
     //
-    // `lastPromptTokens` is the last step's own input. Rows written before
-    // that field existed only have `lastInputTokens`, the all-steps roll-up:
-    // exact for a single-step turn, and an OVERSTATEMENT of a multi-step one
-    // by roughly the number of steps. Falling back to it keeps old threads
-    // working and errs towards trimming, which is the safe direction.
+    // `lastPromptTokens` is the last step's own input, and it is the ONLY
+    // figure allowed to trigger a compaction. There is deliberately no
+    // fallback to `lastInputTokens`: that is the all-steps roll-up, which sums
+    // one prompt per step and so overstates a multi-step turn by roughly the
+    // number of steps. Compacting on it is the defect this branch exists to
+    // remove, and doing it only to old threads would have been the same bug
+    // with a smaller blast radius. No measurement means no compaction; the
+    // next turn writes one and decides on its own number.
     ...(typeof thread.usage?.lastPromptTokens === "number"
       ? { threadUsageLastPromptTokens: thread.usage.lastPromptTokens }
-      : typeof thread.usage?.lastInputTokens === "number"
-        ? { threadUsageLastPromptTokens: thread.usage.lastInputTokens }
-        : {}),
+      : {}),
   });
 
   const history = await resolveHistoryFileRefs(

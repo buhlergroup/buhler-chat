@@ -100,8 +100,9 @@ export interface ChatHistorySummaryModel {
   coversMessageCount: number;
   /**
    * Why the LAST trim on this thread has, or has not, a summary. Absent on a
-   * row written before outcomes existed, which reads as "unknown" rather than
-   * as any particular failure.
+   * row written before outcomes existed; the reader maps that to the
+   * `"unknown"` outcome, which renders as a plain "Compacted N older turns"
+   * with no reason clause — never as a failure and never as "feature off".
    */
   summaryOutcome?: SummaryOutcome;
   /**
