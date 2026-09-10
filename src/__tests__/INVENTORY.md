@@ -223,7 +223,7 @@ This is the largest feature folder with complex state management and streaming.
   - `UpdateChatThreadReasoningEffort(threadId, effort)` → Change reasoning effort
   - `AddExtensionToChatThread(threadId, extensionId)` → Attach extension
   - `RemoveExtensionFromChatThread(threadId, extensionId)` → Detach extension
-  - `UpdateChatThreadUsage(threadId, usage)` → Track token usage
+  - `UpdateChatThreadUsage(threadId, inputTokens, outputTokens, cachedTokens, costUsd, cacheWriteTokens, lastPromptTokens)` → Track token usage. The first five are TURN TOTALS (summed over every step of the turn — what was billed); `lastPromptTokens` is the different quantity, the size of the turn's LAST prompt, which is what the context row and the compaction decision read
   - `EnsureChatThreadOperation(threadId)` → Validates thread ownership
 
 **Chat Messages:**
@@ -328,14 +328,14 @@ This is the largest feature folder with complex state management and streaming.
   - **Tests:** `chat-page/compaction-notice.test.tsx` (Vitest + testing-library)
 
 **History Budget & Summarisation (with tests):**
-- `chat-services/chat-api/history-budget.ts` — Pure. Deterministic token estimate, turn segmentation, watermark, and the trim plan (trim only over budget, then to 60 % in one block, cutting only at turn boundaries, never the newest two turns)
-  - `estimateTextTokens` / `estimateMessageTokens` / `estimateHistoryTokens`
-  - `splitIntoTurns(messages)` — A turn opens at every user row
-  - `applyHistoryWatermark(messages, coversThroughMessageId)` — Makes a trim stick instead of sliding forward a turn per turn
-  - `planHistoryTrim(messages, options)` — The trim decision
+- `chat-services/chat-api/history-budget.ts` — Pure. Turn segmentation, watermark, and the compaction decision. **Nothing is estimated:** the decision has ONE input, the provider's measured size of the previous request's last prompt (`ThreadUsage.lastPromptTokens` — the LAST step's `inputTokens`, never the all-steps roll-up). Over budget compacts the history and the thread starts again; there is no target, no per-turn token accounting and no tokenizer heuristic anywhere in the path
+  - `estimateTextTokens` — the only estimator left, and it decides nothing: the summary writer stamps an informational size on the row it persists
+  - `splitIntoTurns(messages)` — A turn opens at every user row; carries the index span and no token figure
+  - `applyHistoryWatermark(messages, coversThroughMessageId)` — Makes a compaction stick instead of sliding forward a turn per turn
+  - `planHistoryTrim(messages, { budget, minKeptTurns, measuredPromptTokens })` — The compaction decision. `measuredPromptTokens > budget` → drop everything before the newest `minKeptTurns` turns. Self-correcting: the next request measures the result, so a compaction that was not enough simply compacts again
   - `resolveHistoryBudget(input)` — The whole budget decision, with the source of every number for logging: base budget (env `HISTORY_TOKEN_BUDGET` > per-model `historyTokenBudget` > 256 000 default) bounded by the model guard (`longContextThresholdTokens − reserve`, else 60 % of `contextWindow`, else none)
-  - `resolveHistoryTokenBudget` / `resolveHistoryTrimTargetRatio` / `resolveHistoryLongContextReserve` / `resolveHistoryProtectedTurns` — The effective budget only, the trim ratio (`HISTORY_TRIM_TARGET_RATIO`, default 0.6), the reserve (`HISTORY_LONG_CONTEXT_RESERVE`, default 16 000), and the protected-turn count (`HISTORY_PROTECTED_TURNS`, **default 0** — every persisted turn is eligible; the current user message is not in these rows at all)
-  - `planHistoryTrim` also declines a trim it cannot make worthwhile: `skipReason` `"cannot-reach-target"` (the floor it cannot remove is over target) or `"no-reduction"` (the replacement summary costs as much as the turns), and takes the trim decision from the provider's real `inputTokens` when the thread has one (`triggerSource`)
+  - `resolveHistoryTokenBudget` / `resolveHistoryLongContextReserve` / `resolveHistoryProtectedTurns` — The effective budget only, the reserve (`HISTORY_LONG_CONTEXT_RESERVE`, default 16 000), and the protected-turn count (`HISTORY_PROTECTED_TURNS`, **default 0** — every persisted turn is eligible; the current user message is not in these rows at all)
+  - `skipReason` says why a thread was left alone: `"no-measurement"` (a first turn, or a row written before `lastPromptTokens` — nothing is compacted and no summariser call is spent), `"under-budget"` (the ordinary case), `"nothing-droppable"` (over budget with no history to compact — an oversized current message cannot be helped, because the current turn is never droppable)
   - **Tests:** `chat-services/chat-api/history-budget.test.ts` (Vitest)
 - `chat-services/chat-api/history-summary.ts` — Pure. Row shape, summariser prompt, replay text
   - **Tests:** `chat-services/chat-api/history-summary.test.ts` (Vitest)
@@ -1214,7 +1214,7 @@ src/__tests__/
 | Reasoning effort | `features/chat-page/chat-services/models/reasoning-effort.ts` | `resolveReasoningEffort()`, `parseReasoningEffortOverrides()` |
 | Tool order | `features/chat-page/chat-services/tools/stabilize-toolset.ts` | `stabilizeToolset()`, `compareByCodepoint()` |
 | Code-interpreter container | `features/chat-page/chat-services/code-interpreter-container.ts` | `ensureCodeInterpreterContainer()` |
-| Usage / cost | `features/chat-page/chat-services/chat-api/usage-data.ts` | `computeTokenCostUsd()`, `computeRequestUsage()` |
+| Usage / cost | `features/chat-page/chat-services/chat-api/usage-data.ts` | `computeTokenCostUsd()`, `computeRequestUsage()` — keeps TURN TOTALS (billing, the cache split) apart from `lastPromptTokens` (the context figure) and carries `stepCount` |
 | AI Search | `features/chat-page/chat-services/azure-ai-search/azure-ai-search.ts` | `SimpleSearch()`, `InsertChatDocumentWithEmbedding()` |
 | Cosmos | `features/common/services/cosmos.ts` | `HistoryContainer()`, `ConfigContainer()` |
 

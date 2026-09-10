@@ -28,8 +28,9 @@ const upsertSpy = vi.fn(async (_row: unknown) => ({
 vi.mock("../../chat-message-service", () => ({
   UpsertChatMessage: (row: unknown) => upsertSpy(row),
 }));
+const updateUsageSpy = vi.fn(async (..._args: unknown[]) => undefined);
 vi.mock("../../chat-thread-service", () => ({
-  UpdateChatThreadUsage: vi.fn(async () => undefined),
+  UpdateChatThreadUsage: (...args: unknown[]) => updateUsageSpy(...args),
 }));
 vi.mock("@/features/common/services/usage-service", () => ({
   IncrementUsage: vi.fn(async () => undefined),
@@ -176,6 +177,87 @@ describe("streamText.onEnd — background completion", () => {
     const roles = upsertSpy.mock.calls.map((c) => (c[0] as { role?: string }).role);
     expect(roles).toContain("assistant");
     expect(roles.filter((r) => r === "tool" || r === "function")).toHaveLength(1);
+  });
+
+  const usageModelConfig = {
+    id: "gpt-test",
+    deploymentName: "gpt-test",
+    pricing: {
+      inputPerMillion: 1,
+      cachedInputPerMillion: 0,
+      outputPerMillion: 2,
+    },
+  } as unknown as Parameters<typeof persistAssistantFromFinishEvent>[0]["modelConfig"];
+
+  /** The 7th positional argument of UpdateChatThreadUsage. */
+  const persistedPromptTokens = () =>
+    updateUsageSpy.mock.calls.at(-1)?.[6];
+  /** The 2nd — the TURN TOTAL input, which bills the turn. */
+  const persistedTurnInput = () => updateUsageSpy.mock.calls.at(-1)?.[1];
+
+  it("chat-page.unit.persist.steps.001: persists the LAST step's prompt size beside the billed roll-up", async () => {
+    // `event.usage` is the all-steps sum ("When there are multiple steps, the
+    // usage is the sum of all step usages"). `event.steps.at(-1).usage` is the
+    // size of the last prompt sent. Both are persisted, apart.
+    updateUsageSpy.mockClear();
+    await persistAssistantFromFinishEvent({
+      threadId: "thread-steps-3",
+      messageId: "msg-S3",
+      event: {
+        text: "Done.",
+        toolResults: [],
+        usage: { inputTokens: 99_000, outputTokens: 750 },
+        steps: [
+          { usage: { inputTokens: 30_000, outputTokens: 200 }, content: [], toolResults: [] },
+          { usage: { inputTokens: 34_000, outputTokens: 150 }, content: [], toolResults: [] },
+          { usage: { inputTokens: 35_000, outputTokens: 400 }, content: [], toolResults: [] },
+        ],
+      } as unknown as Parameters<typeof persistAssistantFromFinishEvent>[0]["event"],
+      modelConfig: usageModelConfig,
+    });
+
+    expect(persistedTurnInput()).toBe(99_000);
+    expect(persistedPromptTokens()).toBe(35_000);
+  });
+
+  it("chat-page.unit.persist.steps.002: persists one number twice for a single-step turn", async () => {
+    updateUsageSpy.mockClear();
+    await persistAssistantFromFinishEvent({
+      threadId: "thread-steps-1",
+      messageId: "msg-S1",
+      event: {
+        text: "Done.",
+        toolResults: [],
+        usage: { inputTokens: 17_527, outputTokens: 400 },
+        steps: [
+          { usage: { inputTokens: 17_527, outputTokens: 400 }, content: [], toolResults: [] },
+        ],
+      } as unknown as Parameters<typeof persistAssistantFromFinishEvent>[0]["event"],
+      modelConfig: usageModelConfig,
+    });
+
+    expect(persistedTurnInput()).toBe(17_527);
+    expect(persistedPromptTokens()).toBe(17_527);
+  });
+
+  it("chat-page.unit.persist.steps.003: persists nothing for the prompt size when there are no steps (negative)", async () => {
+    // A sentinel row, or an abort before the first step finished. Leaving the
+    // field absent is what lets a reader know to fall back to the roll-up
+    // rather than trust a fabricated zero.
+    updateUsageSpy.mockClear();
+    await persistAssistantFromFinishEvent({
+      threadId: "thread-steps-0",
+      messageId: "msg-S0",
+      event: {
+        text: "Done.",
+        toolResults: [],
+        usage: { inputTokens: 5, outputTokens: 2 },
+      } as unknown as Parameters<typeof persistAssistantFromFinishEvent>[0]["event"],
+      modelConfig: usageModelConfig,
+    });
+
+    expect(persistedTurnInput()).toBe(5);
+    expect(persistedPromptTokens()).toBeUndefined();
   });
 
   const truncatingModelConfig = {

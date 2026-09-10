@@ -122,6 +122,12 @@ vi.mock("ai", async () => {
         consumeStream: mockConsumeStream,
         toUIMessageStream: mockToUIMessageStream,
         usage: Promise.resolve({ inputTokens: 10, outputTokens: 20 }),
+        // `finalStep` carries the LAST step's own usage. The compaction notice
+        // quotes prompt sizes, so it reads this and never the all-steps
+        // roll-up on `usage` — which on a 2-step turn is twice a prompt.
+        finalStep: Promise.resolve({
+          usage: { inputTokens: 10, outputTokens: 20 },
+        }),
       };
     }),
     convertToModelMessages: vi.fn(async () => []),
@@ -542,8 +548,7 @@ describe("/api/chat route (AI SDK v6)", () => {
     // contract with the component that renders it.
     const COMPACTION = {
       trimmedTurns: 12,
-      estimatedTokensBefore: 184_000,
-      estimatedTokensAfter: 96_000,
+      measuredPromptTokens: 284_000,
       summaryOutcome: "ok",
       summaryModel: "gpt-5.6-terra",
       durationMs: 4210,
@@ -577,7 +582,7 @@ describe("/api/chat route (AI SDK v6)", () => {
       // The mocked streamText reports inputTokens 10 as this request's usage,
       // and the context carries 34,012 as the previous request's.
       const body = await postAndReadStream(COMPACTION, {
-        previousRequestInputTokens: 34_012,
+        previousRequestPromptTokens: 34_012,
       });
       const parts = compactionFrames(body);
 
@@ -597,9 +602,9 @@ describe("/api/chat route (AI SDK v6)", () => {
         durationMs: 4210,
         summaryText: "FACTS: the user prefers metric units.",
       });
-      // The plan's own estimates never reach the wire.
-      expect(body).not.toContain("184000");
-      expect(body).not.toContain("96000");
+      // The plan's own trigger figure never reaches the wire: what the user
+      // sees is the pair of real prompt sizes either side of the trim.
+      expect(body).not.toContain("284000");
 
       // Second write: the real numbers.
       expect(parts[1].data).toMatchObject({
@@ -633,8 +638,7 @@ describe("/api/chat route (AI SDK v6)", () => {
       // summariser that was called and broke.
       const body = await postAndReadStream({
         trimmedTurns: 3,
-        estimatedTokensBefore: 90_000,
-        estimatedTokensAfter: 50_000,
+        measuredPromptTokens: 90_000,
         summaryOutcome: "failed",
         durationMs: 12,
       });
@@ -642,6 +646,96 @@ describe("/api/chat route (AI SDK v6)", () => {
       expect(frame.data.summaryOutcome).toBe("failed");
       expect(frame.data.summaryText).toBeUndefined();
       expect(frame.data.summaryModel).toBeUndefined();
+    });
+  });
+
+  describe("message metadata — turn totals vs the last prompt", () => {
+    // `toUIMessageStream({ messageMetadata })` is called for EVERY stream part.
+    // `finish` carries only the ALL-STEPS roll-up (`totalUsage`); the per-step
+    // input is on each `finish-step` part (`TextStreamFinishStepPart.usage` in
+    // ai/dist/index.d.ts). So the route catches the step value as it goes past
+    // and emits once, on `finish`.
+    async function metadataCallback() {
+      await POST(makeRequest({ message: "hello", id: "t1" }));
+      const options = mockToUIMessageStream.mock.calls.at(-1)?.[0] as {
+        messageMetadata: (o: { part: unknown }) => unknown;
+      };
+      expect(options?.messageMetadata).toBeTypeOf("function");
+      return options.messageMetadata;
+    }
+
+    const finishStep = (inputTokens: number, outputTokens: number) => ({
+      type: "finish-step" as const,
+      usage: { inputTokens, outputTokens },
+    });
+
+    const finish = (u: Record<string, unknown>) => ({
+      type: "finish" as const,
+      totalUsage: u,
+    });
+
+    it("api.chat.usage.001: a 3-step turn bills the sum and reports the last prompt", async () => {
+      const messageMetadata = await metadataCallback();
+
+      // Steps arrive in order. None of them may emit metadata: a non-undefined
+      // return on a part that is not start/finish makes the SDK enqueue an
+      // extra message-metadata chunk.
+      expect(messageMetadata({ part: finishStep(30_000, 200) })).toBeUndefined();
+      expect(messageMetadata({ part: finishStep(34_000, 150) })).toBeUndefined();
+      expect(messageMetadata({ part: finishStep(35_000, 400) })).toBeUndefined();
+
+      const meta = messageMetadata({
+        part: finish({
+          inputTokens: 99_000,
+          outputTokens: 750,
+          inputTokenDetails: { cacheReadTokens: 60_000, cacheWriteTokens: 20_000 },
+        }),
+      }) as { usage: Record<string, number> };
+
+      // Turn totals: what was billed.
+      expect(meta.usage.inputTokens).toBe(99_000);
+      expect(meta.usage.outputTokens).toBe(750);
+      expect(meta.usage.cachedTokens).toBe(60_000);
+      expect(meta.usage.cacheWriteTokens).toBe(20_000);
+      expect(meta.usage.stepCount).toBe(3);
+
+      // Last prompt: what the context row shows. The LAST step's input, not
+      // the largest and not the sum.
+      expect(meta.usage.lastPromptTokens).toBe(35_000);
+    });
+
+    it("api.chat.usage.002: a 1-step turn reports the same number for both", async () => {
+      const messageMetadata = await metadataCallback();
+      messageMetadata({ part: finishStep(17_527, 400) });
+      const meta = messageMetadata({
+        part: finish({ inputTokens: 17_527, outputTokens: 400 }),
+      }) as { usage: Record<string, number> };
+
+      expect(meta.usage.inputTokens).toBe(17_527);
+      expect(meta.usage.lastPromptTokens).toBe(17_527);
+      expect(meta.usage.stepCount).toBe(1);
+    });
+
+    it("api.chat.usage.003: falls back to the roll-up when no step part carried a number", async () => {
+      const messageMetadata = await metadataCallback();
+      const meta = messageMetadata({
+        part: finish({ inputTokens: 17_527, outputTokens: 400 }),
+      }) as { usage: Record<string, number> };
+
+      expect(meta.usage.lastPromptTokens).toBe(17_527);
+      expect(meta.usage.stepCount).toBe(1);
+    });
+
+    it("api.chat.usage.004: emits nothing for any other part (negative)", async () => {
+      const messageMetadata = await metadataCallback();
+      for (const part of [
+        { type: "start" },
+        { type: "text-delta", text: "hi" },
+        { type: "tool-call" },
+        { type: "start-step" },
+      ]) {
+        expect(messageMetadata({ part })).toBeUndefined();
+      }
     });
   });
 

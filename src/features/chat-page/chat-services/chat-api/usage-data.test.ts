@@ -77,6 +77,129 @@ describe("computeRequestUsage", () => {
   });
 });
 
+describe("chat-page.unit.usage-data.steps — turn totals vs the last prompt", () => {
+  // AI SDK 7 sums step usage over a turn ("When there are multiple steps, the
+  // usage is the sum of all step usages"). That sum is what was BILLED. It is
+  // not the size of the prompt, and the panel's context row and the history
+  // budget both mean the prompt.
+  const step = (input: number, output: number) => ({ input, output });
+
+  it("chat-page.unit.usage-data.steps.001: a 3-step turn bills the sum and reports the last prompt", () => {
+    // Three calls over one growing conversation: 30k, then 34k, then 35k. The
+    // provider billed 99,000 input tokens; the biggest prompt it ever saw was
+    // 35,000, and that last one is the only one still in context.
+    const steps = [step(30_000, 200), step(34_000, 150), step(35_000, 400)];
+    const turnInput = steps.reduce((n, x) => n + x.input, 0);
+    const turnOutput = steps.reduce((n, x) => n + x.output, 0);
+    const lastPromptTokens = steps[steps.length - 1].input;
+
+    const u = computeRequestUsage({
+      inputTokens: turnInput,
+      outputTokens: turnOutput,
+      cachedTokens: 60_000,
+      cacheWriteTokens: 20_000,
+      lastPromptTokens,
+      stepCount: steps.length,
+      modelConfig,
+    });
+
+    // TURN TOTALS: unchanged, and they bill the turn.
+    expect(u.inputTokens).toBe(99_000);
+    expect(u.outputTokens).toBe(750);
+    expect(u.totalTokens).toBe(99_750);
+    expect(u.stepCount).toBe(3);
+
+    // LAST PROMPT: the context figure, ~1/3 of the roll-up.
+    expect(u.lastPromptTokens).toBe(35_000);
+    expect(u.contextUsagePercent).toBeCloseTo(3.5, 6);
+    // The defect: the roll-up would have claimed 9.9 % of the window for a
+    // conversation that never filled more than 3.5 % of it.
+    expect((99_000 / 1_000_000) * 100).toBeCloseTo(9.9, 6);
+
+    // Cost is billed off the totals, not off the last prompt.
+    expect(u.costUsd).toBeCloseTo(
+      computeTokenCostUsd({
+        inputTokens: 99_000,
+        outputTokens: 750,
+        cachedTokens: 60_000,
+        cacheWriteTokens: 20_000,
+        pricing: modelConfig.pricing,
+      }),
+      12,
+    );
+  });
+
+  it("chat-page.unit.usage-data.steps.002: a 1-step turn reports one number twice", () => {
+    // The single-step case is where the two quantities coincide. Nothing about
+    // a plain turn changes.
+    const u = computeRequestUsage({
+      inputTokens: 17_527,
+      outputTokens: 400,
+      cachedTokens: 12_400,
+      cacheWriteTokens: 5_100,
+      lastPromptTokens: 17_527,
+      stepCount: 1,
+      modelConfig,
+    });
+    expect(u.inputTokens).toBe(u.lastPromptTokens);
+    expect(u.stepCount).toBe(1);
+    expect(u.contextUsagePercent).toBeCloseTo(1.7527, 6);
+  });
+
+  it("chat-page.unit.usage-data.steps.003: falls back to the roll-up when no step usage reached it", () => {
+    // A caller with no step information (an abort before the first step
+    // finished, a sentinel row). The fallback is EXACT for one step and
+    // overstates a multi-step turn, which is why it is a fallback.
+    const u = computeRequestUsage({
+      inputTokens: 17_527,
+      outputTokens: 0,
+      cachedTokens: 0,
+      modelConfig,
+    });
+    expect(u.lastPromptTokens).toBe(17_527);
+    expect(u.stepCount).toBe(1);
+  });
+
+  it("chat-page.unit.usage-data.steps.004: keeps the cache identity on the turn totals", () => {
+    // reads + writes + plain = the turn's input total. It holds per step, and
+    // sums are linear, so it holds for the roll-up — which is what the panel's
+    // cache row shows, because those are cost facts about the whole turn.
+    const u = computeRequestUsage({
+      inputTokens: 99_000,
+      outputTokens: 750,
+      cachedTokens: 60_000,
+      cacheWriteTokens: 20_000,
+      lastPromptTokens: 35_000,
+      stepCount: 3,
+      modelConfig,
+    });
+    const plain = u.inputTokens - u.cachedTokens - u.cacheWriteTokens;
+    expect(plain).toBe(19_000);
+    expect(u.cachedTokens + u.cacheWriteTokens + plain).toBe(u.inputTokens);
+  });
+
+  it("chat-page.unit.usage-data.steps.005: ignores an unusable step count or prompt size (negative)", () => {
+    for (const bad of [0, -1, Number.NaN]) {
+      const u = computeRequestUsage({
+        inputTokens: 1_000,
+        outputTokens: 0,
+        cachedTokens: 0,
+        stepCount: bad,
+        modelConfig,
+      });
+      expect(u.stepCount).toBe(1);
+    }
+    const nan = computeRequestUsage({
+      inputTokens: 1_000,
+      outputTokens: 0,
+      cachedTokens: 0,
+      lastPromptTokens: Number.NaN,
+      modelConfig,
+    });
+    expect(nan.lastPromptTokens).toBe(1_000);
+  });
+});
+
 describe("computeTokenCostUsd", () => {
   // GPT-5.6-shaped pricing: writes are surcharged at 1.25x uncached input.
   const solPricing = {

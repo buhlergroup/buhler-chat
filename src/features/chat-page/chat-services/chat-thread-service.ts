@@ -627,13 +627,24 @@ export const RemoveAttachedFile = async (
   }
 };
 
+/**
+ * Accumulate a finished turn onto the thread's usage counters.
+ *
+ * `inputTokens` / `outputTokens` / `cachedTokens` / `cacheWriteTokens` are the
+ * TURN TOTALS — the sum over every step of the turn, which is what was billed.
+ * `lastPromptTokens` is the different quantity: the real `inputTokens` of the
+ * turn's LAST step, i.e. how big the last prompt was. A tool turn bills
+ * several prompts and only ever sends one at a time, so the two must not be
+ * confused; the context row and the history budget read the latter.
+ */
 export const UpdateChatThreadUsage = async (
   chatThreadId: string,
   inputTokens: number,
   outputTokens: number,
   cachedTokens: number,
   costUsd: number,
-  cacheWriteTokens: number = 0
+  cacheWriteTokens: number = 0,
+  lastPromptTokens?: number
 ): Promise<ServerActionResponse<ChatThreadModel>> => {
   try {
     const response = await FindChatThreadForCurrentUser(chatThreadId);
@@ -656,6 +667,13 @@ export const UpdateChatThreadUsage = async (
         lastOutputTokens: outputTokens,
         lastCachedTokens: cachedTokens,
         lastCacheWriteTokens: cacheWriteTokens,
+        // Only written when the caller could actually read step usage. Left
+        // absent otherwise, so a reader knows to fall back rather than trust a
+        // fabricated zero.
+        ...(typeof lastPromptTokens === "number" &&
+        Number.isFinite(lastPromptTokens)
+          ? { lastPromptTokens }
+          : {}),
       };
       return await UpsertChatThread(chatThread);
     }

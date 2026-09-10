@@ -4,29 +4,26 @@ import {
   CONTEXT_WINDOW_GUARD_RATIO,
   DEFAULT_HISTORY_TOKEN_BUDGET,
   HISTORY_LONG_CONTEXT_RESERVE,
-  HISTORY_TRIM_TARGET_RATIO,
-  IMAGE_TOKEN_ESTIMATE,
   MIN_KEPT_TURNS,
   applyHistoryWatermark,
-  estimateHistoryTokens,
-  estimateMessageTokens,
   estimateTextTokens,
   planHistoryTrim,
   resolveHistoryBudget,
   resolveHistoryProtectedTurns,
   resolveHistoryLongContextReserve,
   resolveHistoryTokenBudget,
-  resolveHistoryTrimTargetRatio,
   splitIntoTurns,
   type BudgetMessage,
 } from "./history-budget";
 
-// These tests pin the two properties that make the token budget an
-// improvement on the `TOP 30` row cap it replaced:
+// These tests pin the properties that make the measured budget an improvement
+// on the `TOP 30` row cap it replaced:
 //
-//   - a trim lands on a turn boundary, so history is never cut mid-turn; and
-//   - a trim goes to 60 % of budget in ONE block, so the prompt prefix stays
-//     byte-stable for the many turns it takes to climb back to 100 %.
+//   - ONE input decides: the provider's measured size of the previous
+//     request's last prompt. Nothing is estimated;
+//   - over budget compacts the history and the thread starts again, so the
+//     prompt prefix is byte-stable for the many turns it takes to grow back;
+//   - a cut lands on a turn boundary, so history is never cut mid-turn.
 //
 // Everything here is a pure function; there is no Cosmos, no model, no clock.
 
@@ -49,7 +46,11 @@ function row(
   };
 }
 
-/** A user + assistant pair costing roughly `tokens` estimated tokens. */
+/**
+ * A user + assistant pair. `tokens` only shapes how much text the rows carry;
+ * nothing in the decision reads it any more — the plan is driven purely by the
+ * measured prompt size the caller passes in.
+ */
 function turn(tokens: number): BudgetMessage[] {
   const chars = Math.floor((tokens * CHARS_PER_TOKEN) / 2);
   return [row("user", chars), row("assistant", chars)];
@@ -64,16 +65,16 @@ function turns(count: number, tokens: number): BudgetMessage[] {
 
 // ---------------------------------------------------------------------------
 
-describe("chat-page.unit.history-budget.001 — estimateTextTokens / estimateMessageTokens are deterministic", () => {
+describe("chat-page.unit.history-budget.001 — estimateTextTokens is deterministic", () => {
+  // The one estimator left in the module, and it decides NOTHING: the summary
+  // writer stamps an informational size on the row it persists. The trim path
+  // runs on the provider's measured prompt size only.
   it("returns the same number for the same input, every call", () => {
-    const message = row("user", 4001, {
-      reasoningContent: "y".repeat(400),
-      multiModalImages: ["blob://t/a.png", "blob://t/b.png"],
-    });
-    const first = estimateMessageTokens(message);
-    const runs = Array.from({ length: 25 }, () => estimateMessageTokens(message));
-    expect(new Set(runs).size).toBe(1);
-    expect(runs[0]).toBe(first);
+    const text = "x".repeat(4001);
+    const first = estimateTextTokens(text);
+    expect(Array.from({ length: 25 }, () => estimateTextTokens(text))).toEqual(
+      Array.from({ length: 25 }, () => first),
+    );
   });
 
   it("uses chars/4 rounded up, so a non-empty string is never free", () => {
@@ -83,60 +84,7 @@ describe("chat-page.unit.history-budget.001 — estimateTextTokens / estimateMes
     expect(estimateTextTokens("abcd")).toBe(1);
     expect(estimateTextTokens("abcde")).toBe(2);
     expect(estimateTextTokens("x".repeat(4000))).toBe(1000);
-  });
-
-  it("counts content + reasoning + a flat cost per image", () => {
-    const message: BudgetMessage = {
-      id: "m",
-      role: "assistant",
-      content: "x".repeat(400),
-      reasoningContent: "y".repeat(80),
-      multiModalImages: ["a", "b"],
-    };
-    expect(estimateMessageTokens(message)).toBe(
-      100 + 20 + 2 * IMAGE_TOKEN_ESTIMATE,
-    );
-  });
-
-  it("charges an image by count, not by URL length", () => {
-    // A persisted image is either a short blob:// ref or a huge inline data:
-    // URL. Both cost the model about the same, so the estimate must not track
-    // the string — otherwise the same picture changes the budget depending on
-    // how it happens to be stored.
-    const shortRef = estimateMessageTokens({
-      id: "a",
-      role: "user",
-      multiModalImages: ["blob://t/a.png"],
-    });
-    const dataUrl = estimateMessageTokens({
-      id: "b",
-      role: "user",
-      multiModalImages: [`data:image/png;base64,${"A".repeat(500_000)}`],
-    });
-    expect(shortRef).toBe(IMAGE_TOKEN_ESTIMATE);
-    expect(dataUrl).toBe(IMAGE_TOKEN_ESTIMATE);
-  });
-
-  it("counts a tool row's persisted JSON (arguments and result) via its content", () => {
-    const args = JSON.stringify({ query: "z".repeat(200) });
-    const result = JSON.stringify({ rows: "w".repeat(800) });
-    const toolRow: BudgetMessage = {
-      id: "t1",
-      role: "tool",
-      content: JSON.stringify({ name: "search_documents", arguments: args, result }),
-    };
-    expect(estimateMessageTokens(toolRow)).toBe(
-      Math.ceil(toolRow.content!.length / CHARS_PER_TOKEN),
-    );
-    // Sanity: the tool payload dominates, so it cannot have been ignored.
-    expect(estimateMessageTokens(toolRow)).toBeGreaterThan(250);
-  });
-
-  it("estimateHistoryTokens is the sum over rows and is order-independent", () => {
-    const rows = [row("user", 100), row("assistant", 240), row("tool", 60)];
-    const total = estimateHistoryTokens(rows);
-    expect(total).toBe(rows.reduce((s, r) => s + estimateMessageTokens(r), 0));
-    expect(estimateHistoryTokens([...rows].reverse())).toBe(total);
+    expect(CHARS_PER_TOKEN).toBe(4);
   });
 });
 
@@ -176,79 +124,125 @@ describe("chat-page.unit.history-budget.002 — splitIntoTurns cuts on user rows
     expect(splitIntoTurns([])).toEqual([]);
   });
 
-  it("carries each turn's estimated tokens", () => {
-    const rows = turn(500);
-    const [only] = splitIntoTurns(rows);
-    expect(only.estimatedTokens).toBe(estimateHistoryTokens(rows));
+  it("carries the index span of each turn, and nothing else", () => {
+    // No token figure on a turn any more: sizing a turn needs a tokenizer we
+    // do not have, and the decision no longer asks the question.
+    const rows = [...turn(500), ...turn(500)];
+    const [first, second] = splitIntoTurns(rows);
+    expect([first.startIndex, first.endIndex]).toEqual([0, 1]);
+    expect([second.startIndex, second.endIndex]).toEqual([2, 3]);
   });
 });
 
-describe("chat-page.unit.history-budget.003 — no trim while under budget", () => {
-  it("returns the input untouched and reports trimmed:false", () => {
-    const rows = turns(20, 100); // ~2,000 tokens
-    const plan = planHistoryTrim(rows, { budget: 10_000 });
+describe("chat-page.unit.history-budget.003 — one measured number decides", () => {
+  it("does nothing when the thread has no measured prompt size yet", () => {
+    // A thread's first turn, or a row written before `lastPromptTokens`
+    // existed. Nothing to compare against, so nothing is compacted and no
+    // summariser call is spent.
+    const rows = turns(80, 1_000);
+    const plan = planHistoryTrim(rows, { budget: 12_000 });
     expect(plan.trimmed).toBe(false);
+    expect(plan.skipReason).toBe("no-measurement");
     expect(plan.dropped).toEqual([]);
-    expect(plan.kept).toHaveLength(rows.length);
     expect(plan.kept.map((m) => m.id)).toEqual(rows.map((m) => m.id));
+    expect(plan.measuredPromptTokens).toBeUndefined();
     expect(plan.coversThroughMessageId).toBeUndefined();
-    expect(plan.targetUnreachable).toBe(false);
   });
 
-  it("does not trim at exactly the budget (the trigger is strictly above)", () => {
-    const rows = turns(4, 250); // 4 x 250 = 1,000 tokens exactly
-    expect(estimateHistoryTokens(rows)).toBe(1000);
-    expect(planHistoryTrim(rows, { budget: 1000 }).trimmed).toBe(false);
-    expect(planHistoryTrim(rows, { budget: 999 }).trimmed).toBe(true);
+  it("keeps an old persisted row without the new field from compacting", () => {
+    // `thread-context` falls back to `lastInputTokens` when the row predates
+    // `lastPromptTokens`, so this shape only reaches the plan when the row has
+    // no usage at all. Either way: no number, no compaction.
+    const rows = turns(80, 1_000);
+    for (const measuredPromptTokens of [undefined, 0, -1, Number.NaN]) {
+      const plan = planHistoryTrim(rows, {
+        budget: 12_000,
+        ...(measuredPromptTokens === undefined ? {} : { measuredPromptTokens }),
+      });
+      expect(plan.trimmed).toBe(false);
+      expect(plan.skipReason).toBe("no-measurement");
+    }
   });
 
-  it("counts an existing summary towards the budget", () => {
-    const rows = turns(4, 250); // 1,000 tokens
-    expect(planHistoryTrim(rows, { budget: 1200 }).trimmed).toBe(false);
+  it("does nothing while the measured prompt is at or under budget", () => {
+    const rows = turns(20, 100);
+    const plan = planHistoryTrim(rows, {
+      budget: 10_000,
+      measuredPromptTokens: 9_999,
+    });
+    expect(plan.trimmed).toBe(false);
+    expect(plan.skipReason).toBe("under-budget");
+    expect(plan.measuredPromptTokens).toBe(9_999);
+    expect(plan.kept.map((m) => m.id)).toEqual(rows.map((m) => m.id));
+  });
+
+  it("does not compact at exactly the budget (the trigger is strictly above)", () => {
+    const rows = turns(4, 250);
     expect(
-      planHistoryTrim(rows, { budget: 1200, existingSummaryTokens: 500 }).trimmed,
+      planHistoryTrim(rows, { budget: 1_000, measuredPromptTokens: 1_000 })
+        .trimmed,
+    ).toBe(false);
+    expect(
+      planHistoryTrim(rows, { budget: 1_000, measuredPromptTokens: 1_001 })
+        .trimmed,
     ).toBe(true);
   });
 
-  it("does not trim an empty history", () => {
-    const plan = planHistoryTrim([], { budget: 10 });
+  it("ignores the size of the rows entirely — only the measurement counts", () => {
+    // Two threads, wildly different in length, same measurement. The plan is
+    // identical, because the rows never get a token figure of their own.
+    const small = planHistoryTrim(turns(2, 10), {
+      budget: 1_000,
+      measuredPromptTokens: 5_000,
+    });
+    const large = planHistoryTrim(turns(200, 5_000), {
+      budget: 1_000,
+      measuredPromptTokens: 5_000,
+    });
+    expect(small.trimmed).toBe(true);
+    expect(large.trimmed).toBe(true);
+    expect(small.kept).toEqual([]);
+    expect(large.kept).toEqual([]);
+  });
+
+  it("does not compact an empty history", () => {
+    const plan = planHistoryTrim([], {
+      budget: 10,
+      measuredPromptTokens: 10_000,
+    });
     expect(plan.trimmed).toBe(false);
+    expect(plan.skipReason).toBe("nothing-droppable");
     expect(plan.kept).toEqual([]);
   });
 });
 
-describe("chat-page.unit.history-budget.004 — one-block trim to the 60% target, on a turn boundary", () => {
+describe("chat-page.unit.history-budget.004 — over budget compacts the history and starts again", () => {
   const budget = 10_000;
-  const rows = turns(40, 500); // 20,000 tokens, well over budget
+  const rows = turns(40, 500);
+  const overBudget = { budget, measuredPromptTokens: 20_000 };
 
-  it("drops a single contiguous block from the front", () => {
-    const plan = planHistoryTrim(rows, { budget });
+  it("hands the whole history to the summariser by default", () => {
+    // MIN_KEPT_TURNS is 0 and the current user turn is not in these rows, so
+    // "compact and start again" is literal: the thread carries on from the
+    // summary plus the question being answered.
+    const plan = planHistoryTrim(rows, overBudget);
     expect(plan.trimmed).toBe(true);
+    expect(plan.kept).toEqual([]);
+    expect(plan.dropped.map((m) => m.id)).toEqual(rows.map((m) => m.id));
+    expect(plan.droppedTurnCount).toBe(40);
+    expect(plan.keptTurnCount).toBe(0);
+    expect(plan.measuredPromptTokens).toBe(20_000);
+  });
+
+  it("cuts at a turn boundary when a tail is protected", () => {
+    const plan = planHistoryTrim(rows, { ...overBudget, minKeptTurns: 3 });
+    expect(plan.trimmed).toBe(true);
+    expect(plan.kept[0].role).toBe("user");
+    expect(plan.dropped[plan.dropped.length - 1].role).toBe("assistant");
     // dropped ++ kept must reconstruct the input exactly, in order.
     expect([...plan.dropped, ...plan.kept].map((m) => m.id)).toEqual(
       rows.map((m) => m.id),
     );
-  });
-
-  it("lands at or under the 60% target", () => {
-    const plan = planHistoryTrim(rows, { budget });
-    expect(plan.target).toBe(budget * HISTORY_TRIM_TARGET_RATIO);
-    expect(plan.estimatedTokensAfter).toBeLessThanOrEqual(plan.target);
-    expect(estimateHistoryTokens(plan.kept)).toBeLessThanOrEqual(plan.target);
-  });
-
-  it("does not overshoot — it keeps as much as the target allows", () => {
-    const plan = planHistoryTrim(rows, { budget });
-    // Putting the oldest kept turn back must break the target, otherwise the
-    // trim cut deeper than it needed to.
-    const oneTurnBack = estimateHistoryTokens(plan.kept) + 500;
-    expect(oneTurnBack).toBeGreaterThan(plan.target);
-  });
-
-  it("cuts at a turn boundary: the first kept row is a user row", () => {
-    const plan = planHistoryTrim(rows, { budget });
-    expect(plan.kept[0].role).toBe("user");
-    expect(plan.dropped[plan.dropped.length - 1].role).toBe("assistant");
   });
 
   it("never separates a tool row from the turn that produced it", () => {
@@ -256,66 +250,71 @@ describe("chat-page.unit.history-budget.004 — one-block trim to the 60% target
     for (let i = 0; i < 20; i++) {
       withTools.push(row("user", 800), row("tool", 800), row("assistant", 800));
     }
-    const plan = planHistoryTrim(withTools, { budget: 4_000 });
+    const plan = planHistoryTrim(withTools, {
+      budget: 4_000,
+      measuredPromptTokens: 40_000,
+      minKeptTurns: 4,
+    });
     expect(plan.trimmed).toBe(true);
     expect(plan.kept[0].role).toBe("user");
-    // Every kept tool row is preceded, within the kept slice, by a user row.
     plan.kept.forEach((message, index) => {
       if (message.role === "tool") expect(index).toBeGreaterThan(0);
     });
   });
 
   it("reports the newest dropped row as the watermark", () => {
-    const plan = planHistoryTrim(rows, { budget });
+    const plan = planHistoryTrim(rows, { ...overBudget, minKeptTurns: 3 });
     expect(plan.coversThroughMessageId).toBe(
       plan.dropped[plan.dropped.length - 1].id,
     );
   });
-
-  it("leaves room for the replacement summary when one is reserved", () => {
-    const withReserve = planHistoryTrim(rows, {
-      budget,
-      summaryReserveTokens: 1_500,
-    });
-    expect(
-      estimateHistoryTokens(withReserve.kept) + 1_500,
-    ).toBeLessThanOrEqual(withReserve.target);
-  });
 });
 
-describe("chat-page.unit.history-budget.005 — hysteresis: a trim is followed by many quiet turns", () => {
-  it("does not trim again after a few small turns are added", () => {
+describe("chat-page.unit.history-budget.005 — hysteresis: a compaction is followed by many quiet turns", () => {
+  it("does nothing on the turns after a compaction, and needs no arithmetic to know", () => {
+    // The next request measures the new prompt for us. After a compaction the
+    // prompt is the developer message, the summary and the current turn, so
+    // the measurement drops far under budget and stays there for as long as it
+    // takes to grow back. That is the whole hysteresis — no target, no ratio.
     const budget = 10_000;
-    const plan = planHistoryTrim(turns(40, 500), { budget });
+    const plan = planHistoryTrim(turns(40, 500), {
+      budget,
+      measuredPromptTokens: 20_000,
+      minKeptTurns: 2,
+    });
     expect(plan.trimmed).toBe(true);
 
-    // Simulate the next few turns: the retained rows plus new small turns.
-    // (In the real path the retained span comes from the watermark, which is
-    // what test .007 covers.)
     let retained = plan.kept;
+    let measured = 3_000; // what the provider reports after the compaction
     for (let i = 0; i < 4; i++) {
       retained = [...retained, ...turn(300)];
-      const next = planHistoryTrim(retained, { budget });
+      measured += 600;
+      const next = planHistoryTrim(retained, {
+        budget,
+        measuredPromptTokens: measured,
+      });
       expect(next.trimmed).toBe(false);
+      expect(next.skipReason).toBe("under-budget");
       expect(next.kept.map((m) => m.id)).toEqual(retained.map((m) => m.id));
     }
   });
 
-  it("takes many turns to trim again, and the count follows the 40% gap", () => {
+  it("compacts again, and only again, once the measurement passes the budget", () => {
     const budget = 10_000;
-    const turnTokens = 250;
-    let retained = planHistoryTrim(turns(60, turnTokens), { budget }).kept;
-
+    let retained = turns(4, 250);
     let quietTurns = 0;
+    let measured = 3_000;
     for (let i = 0; i < 500; i++) {
-      retained = [...retained, ...turn(turnTokens)];
-      if (planHistoryTrim(retained, { budget }).trimmed) break;
+      retained = [...retained, ...turn(250)];
+      measured += 500;
+      if (planHistoryTrim(retained, { budget, measuredPromptTokens: measured }).trimmed) {
+        break;
+      }
       quietTurns++;
     }
-
-    // The gap between the 100% trigger and the 60% target is 4,000 tokens
-    // here, i.e. ~16 turns of 250. The old row cap re-cut on EVERY turn.
-    expect(quietTurns).toBeGreaterThan(10);
+    // 3,000 -> 10,000 at 500 a turn: 14 quiet turns. The old row cap re-cut on
+    // EVERY turn.
+    expect(quietTurns).toBe(14);
   });
 });
 
@@ -329,7 +328,10 @@ describe("chat-page.unit.history-budget.006 — no persisted turn is protected b
     expect(resolveHistoryProtectedTurns()).toBe(0);
 
     const rows: BudgetMessage[] = [...turn(100), ...turn(100), ...turn(15_000)];
-    const plan = planHistoryTrim(rows, { budget: 12_000 });
+    const plan = planHistoryTrim(rows, {
+      budget: 12_000,
+      measuredPromptTokens: 15_400,
+    });
 
     expect(plan.trimmed).toBe(true);
     // The 15k turn is the newest AND the reason the thread is over budget.
@@ -337,7 +339,6 @@ describe("chat-page.unit.history-budget.006 — no persisted turn is protected b
     // instead, added a summary, and the prompt grew.
     expect(plan.kept).toEqual([]);
     expect(plan.droppedTurnCount).toBe(3);
-    expect(plan.estimatedTokensAfter).toBeLessThan(plan.estimatedTokensBefore);
   });
 
   it("restores the old shape when HISTORY_PROTECTED_TURNS asks for it", () => {
@@ -352,21 +353,26 @@ describe("chat-page.unit.history-budget.006 — no persisted turn is protected b
 
     const rows = turns(30, 1_000);
     const lastFourIds = rows.slice(-4).map((m) => m.id); // 2 turns x 2 rows
-    const plan = planHistoryTrim(rows, { budget: 2_000, minKeptTurns: 2 });
+    const plan = planHistoryTrim(rows, {
+      budget: 2_000,
+      measuredPromptTokens: 30_000,
+      minKeptTurns: 2,
+    });
     expect(plan.kept.map((m) => m.id).slice(-4)).toEqual(lastFourIds);
     expect(plan.dropped.map((m) => m.id)).not.toContain(lastFourIds[0]);
   });
 
-  it("honours an explicit minKeptTurns when they fit under the target", () => {
-    // 20 turns x 1,000 tokens = 20,000. Budget 12,000 -> target 7,200, and
-    // five protected turns are 5,000, so the cut can reach the target with
-    // them intact.
+  it("keeps exactly the newest minKeptTurns turns", () => {
     const rows = turns(20, 1_000);
     const newestFiveTurnIds = rows.slice(-10).map((m) => m.id);
-    const plan = planHistoryTrim(rows, { budget: 12_000, minKeptTurns: 5 });
+    const plan = planHistoryTrim(rows, {
+      budget: 12_000,
+      measuredPromptTokens: 20_000,
+      minKeptTurns: 5,
+    });
 
     expect(plan.trimmed).toBe(true);
-    expect(splitIntoTurns(plan.kept).length).toBeGreaterThanOrEqual(5);
+    expect(splitIntoTurns(plan.kept)).toHaveLength(5);
     // The protected turns are all still there, verbatim.
     expect(plan.kept.map((m) => m.id).slice(-10)).toEqual(newestFiveTurnIds);
     for (const id of newestFiveTurnIds) {
@@ -375,102 +381,78 @@ describe("chat-page.unit.history-budget.006 — no persisted turn is protected b
   });
 });
 
-describe("chat-page.unit.history-budget.012 — a trim that cannot help is not taken", () => {
-  it("declines when the floor a trim cannot remove is already over target", () => {
-    // Protected turns + the replacement summary's allowance + the static
-    // prefix. If that is over target, the best possible cut still leaves the
-    // thread over budget, so trimming would delete context and spend a model
-    // call for nothing. This is the guard the "compacted 17k -> 19k" loop
-    // needed.
-    const rows: BudgetMessage[] = [...turn(100), ...turn(100), ...turn(15_000)];
+describe("chat-page.unit.history-budget.012 — a compaction that cannot help is not taken", () => {
+  it("declines when every turn is protected, so nothing can be compacted", () => {
+    const rows: BudgetMessage[] = [...turn(100), ...turn(15_000)];
     const plan = planHistoryTrim(rows, {
       budget: 12_000,
+      measuredPromptTokens: 15_100,
       minKeptTurns: 2,
-      summaryReserveTokens: 2_000,
     });
 
     expect(plan.trimmed).toBe(false);
+    expect(plan.skipReason).toBe("nothing-droppable");
     expect(plan.dropped).toEqual([]);
-    expect(plan.skipReason).toBe("cannot-reach-target");
-    expect(plan.targetUnreachable).toBe(true);
     // Nothing was dropped, so the caller must not spend a summariser call.
     expect(plan.droppedTurnCount).toBe(0);
   });
 
-  it("declines when the summary would cost as much as the turns it replaces", () => {
-    // The shape from the live defect: the PROVIDER says the last prompt was
-    // 5,000 tokens (over the 700 budget, so a trim is triggered), but the
-    // history this module can actually drop is only 400 estimated tokens —
-    // less than the 400-token summary that would replace it. Dropping both
-    // turns would delete context and leave the prompt the same size.
-    const rows = turns(2, 200); // 2 turns x 200 tokens = 400 estimated
-    const plan = planHistoryTrim(rows, {
-      budget: 700, // target 420
-      summaryReserveTokens: 400,
-      measuredTokensBefore: 5_000,
+  it("declines for a single oversized current message with no history behind it", () => {
+    // The current user turn is never in these rows, so a compaction cannot
+    // help it. Saying so is better than dropping context and pretending.
+    const plan = planHistoryTrim([], {
+      budget: 12_000,
+      measuredPromptTokens: 600_000,
     });
-
     expect(plan.trimmed).toBe(false);
-    expect(plan.skipReason).toBe("no-reduction");
-    expect(plan.dropped).toEqual([]);
-  });
-
-  it("never reports a post-trim estimate above the pre-trim one", () => {
-    // The invariant the notice claims on screen. Swept across shapes and
-    // budgets, including the ones that used to grow the prompt.
-    for (const summaryReserveTokens of [0, 500, 1_500, 2_000]) {
-      for (const budget of [500, 2_000, 12_000, 80_000]) {
-        for (const rows of [
-          turns(4, 400),
-          turns(30, 1_000),
-          [...turn(100), ...turn(100), ...turn(15_000)],
-          [...turn(60_000), ...turn(100)],
-        ]) {
-          const plan = planHistoryTrim(rows, {
-            budget,
-            summaryReserveTokens,
-          });
-          if (!plan.trimmed) continue;
-          expect(plan.estimatedTokensAfter).toBeLessThan(
-            plan.estimatedTokensBefore,
-          );
-        }
-      }
-    }
+    expect(plan.skipReason).toBe("nothing-droppable");
   });
 });
 
-describe("chat-page.unit.history-budget.013 — the real prompt size decides whether to trim", () => {
-  it("prefers the provider's number over the estimate", () => {
-    // 10 turns x 1,000 = 10,000 estimated tokens, i.e. UNDER the 12,000
-    // budget. The estimate alone would not trim; the provider's 17,565 does.
-    const rows = turns(10, 1_000);
+describe("chat-page.unit.history-budget.013 — the measured prompt size is the only trigger", () => {
+  it("does not compact a thread the aggregation only made look over budget", () => {
+    // The live defect, from the dev container log of 2026-09-10T06:54:11Z:
+    //
+    //   triggerTokens 285,647   budget 256,000   -> WARN, over budget
+    //
+    // 285,647 was the ALL-STEPS sum of a 2-step turn (the panel showed reads
+    // 135,637 + writes 138,958 + plain 6, and `plain 6` is 2 x the same 3
+    // uncacheable tail tokens). The real last prompt was about half of it, so
+    // the thread was never over budget and nothing should happen at all.
+    const rows = turns(13, 11_000);
     const plan = planHistoryTrim(rows, {
-      budget: 12_000,
-      measuredTokensBefore: 17_565,
+      budget: 256_000,
+      measuredPromptTokens: 142_800,
     });
-    // The estimate says "fits"; the provider says the last prompt was 17.5k.
-    // The provider wins: what costs money is the real prompt.
-    expect(plan.triggerSource).toBe("measured");
-    expect(plan.triggerTokens).toBe(17_565);
-    expect(plan.trimmed).toBe(true);
+    expect(plan.trimmed).toBe(false);
+    expect(plan.skipReason).toBe("under-budget");
+    expect(plan.dropped).toEqual([]);
+    expect(plan.coversThroughMessageId).toBeUndefined();
+    // And the old roll-up would have compacted it.
+    expect(
+      planHistoryTrim(rows, { budget: 256_000, measuredPromptTokens: 285_647 })
+        .trimmed,
+    ).toBe(true);
   });
 
-  it("falls back to the estimate for a thread with no usage yet", () => {
-    const rows = turns(80, 1_000); // 20,000 estimated tokens, over budget
-    const plan = planHistoryTrim(rows, { budget: 12_000 });
-    expect(plan.triggerSource).toBe("estimated");
-    expect(plan.triggerTokens).toBe(plan.estimatedTokensBefore);
+  it("compacts a thread whose last prompt really is over budget", () => {
+    const rows = turns(13, 11_000);
+    const plan = planHistoryTrim(rows, {
+      budget: 256_000,
+      measuredPromptTokens: 300_000,
+    });
     expect(plan.trimmed).toBe(true);
+    expect(plan.measuredPromptTokens).toBe(300_000);
+    expect(plan.kept).toEqual([]);
+    expect(plan.dropped.map((m) => m.id)).toEqual(rows.map((m) => m.id));
   });
 
-  it("ignores an unusable measured value (negative)", () => {
-    const rows = turns(4, 400);
-    for (const measuredTokensBefore of [0, -1, Number.NaN]) {
-      const plan = planHistoryTrim(rows, { budget: 12_000, measuredTokensBefore });
-      expect(plan.triggerSource).toBe("estimated");
-      expect(plan.trimmed).toBe(false);
-    }
+  it("floors a fractional measurement rather than carrying it through", () => {
+    const plan = planHistoryTrim(turns(4, 100), {
+      budget: 1_000,
+      measuredPromptTokens: 1_200.9,
+    });
+    expect(plan.measuredPromptTokens).toBe(1_200);
   });
 });
 
@@ -512,16 +494,25 @@ describe("chat-page.unit.history-budget.007 — applyHistoryWatermark makes a tr
     // turn, i.e. the same sliding window as `TOP 30`.
     const budget = 10_000;
     const initial = turns(40, 500);
-    const firstPlan = planHistoryTrim(initial, { budget });
+    const firstPlan = planHistoryTrim(initial, {
+      budget,
+      measuredPromptTokens: 20_000,
+      minKeptTurns: 2,
+    });
     const watermark = firstPlan.coversThroughMessageId;
     expect(watermark).toBeDefined();
 
     let fullThread = initial;
     const retainedHeadIds: string[] = [];
+    let measured = 3_000;
     for (let i = 0; i < 5; i++) {
       fullThread = [...fullThread, ...turn(200)];
+      measured += 400;
       const { retained } = applyHistoryWatermark(fullThread, watermark);
-      const plan = planHistoryTrim(retained, { budget });
+      const plan = planHistoryTrim(retained, {
+        budget,
+        measuredPromptTokens: measured,
+      });
       expect(plan.trimmed).toBe(false);
       retainedHeadIds.push(plan.kept[0].id);
     }
@@ -684,59 +675,28 @@ describe("chat-page.unit.history-budget.010 - long-context guard", () => {
 
 });
 
-describe("chat-page.unit.history-budget.011 - the trim follows the effective budget", () => {
-  it("trims to 60 % of the EFFECTIVE budget, not of the configured one", () => {
-    // Configured 900k, guarded down to 76,800 by a 128k window: the trim has
-    // to land on 60 % of 76,800, otherwise the hysteresis is measured against
-    // a budget the model never had.
+describe("chat-page.unit.history-budget.011 - the compaction follows the effective budget", () => {
+  it("compares the measurement with the EFFECTIVE budget, not the configured one", () => {
+    // Configured 900k, guarded down to 76,800 by a 128k window. A 90k prompt
+    // is under the configured budget and over the effective one, and the
+    // effective one is what the model actually had.
     const budget = resolveHistoryTokenBudget({
       envBudget: "900000",
       contextWindow: 128_000,
     });
     expect(budget).toBe(76_800);
 
-    const rows = turns(400, 800); // ~80k estimated tokens, over the guard
+    const rows = turns(40, 800);
     const plan = planHistoryTrim(rows, {
       budget,
-      targetRatio: resolveHistoryTrimTargetRatio(),
+      measuredPromptTokens: 90_000,
     });
     expect(plan.trimmed).toBe(true);
     expect(plan.budget).toBe(76_800);
-    expect(plan.target).toBe(46_080); // 76,800 x 0.6
-    expect(estimateHistoryTokens(plan.kept)).toBeLessThanOrEqual(46_080);
-  });
-});
+    expect(plan.kept).toEqual([]);
 
-describe("chat-page.unit.history-budget.009 — resolveHistoryTrimTargetRatio", () => {
-  it("defaults to 0.6, i.e. a trim lands at 60% of budget", () => {
-    expect(HISTORY_TRIM_TARGET_RATIO).toBe(0.6);
-    expect(resolveHistoryTrimTargetRatio()).toBe(0.6);
-    expect(resolveHistoryTrimTargetRatio({})).toBe(0.6);
-  });
-
-  it("honours an env override inside the open interval (0, 1)", () => {
-    expect(resolveHistoryTrimTargetRatio({ envRatio: "0.5" })).toBe(0.5);
-    expect(resolveHistoryTrimTargetRatio({ envRatio: "0.75" })).toBe(0.75);
-  });
-
-  it("ignores a ratio that would remove the hysteresis or the history", () => {
-    // 1.0 lands the trim exactly on the trigger, so the next turn trims again
-    // and the prefix moves every turn — the behaviour being removed. 0 throws
-    // away everything droppable for no cache benefit.
-    for (const envRatio of ["1", "1.0", "1.5", "0", "-0.2", "abc", "", "NaN"]) {
-      expect(resolveHistoryTrimTargetRatio({ envRatio })).toBe(
-        HISTORY_TRIM_TARGET_RATIO,
-      );
-    }
-  });
-
-  it("feeds through to the plan's target", () => {
-    const rows = turns(40, 500);
-    const plan = planHistoryTrim(rows, {
-      budget: 10_000,
-      targetRatio: resolveHistoryTrimTargetRatio({ envRatio: "0.4" }),
-    });
-    expect(plan.target).toBe(4_000);
-    expect(estimateHistoryTokens(plan.kept)).toBeLessThanOrEqual(4_000);
+    expect(
+      planHistoryTrim(rows, { budget, measuredPromptTokens: 70_000 }).trimmed,
+    ).toBe(false);
   });
 });

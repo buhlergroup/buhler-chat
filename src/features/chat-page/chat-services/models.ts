@@ -721,9 +721,29 @@ export interface ThreadUsage {
   // Most-recent turn's token counts. Persisted so a reloaded thread can show
   // the same "Last input/output" the header showed live, instead of 0.
   // Optional for backward compatibility with rows written before this existed.
+  /**
+   * TURN TOTAL input tokens of the most recent turn: the sum over every step,
+   * which is what was billed. NOT the size of the last prompt — see
+   * `lastPromptTokens`.
+   */
   lastInputTokens?: number;
   lastOutputTokens?: number;
   lastCachedTokens?: number;
+  /**
+   * LAST-STEP PROMPT SIZE of the most recent turn: the real `inputTokens` of
+   * that turn's final step, i.e. how big the last prompt actually was.
+   *
+   * Kept apart from `lastInputTokens` because AI SDK 7 rolls step usage up
+   * ("When there are multiple steps, the usage is the sum of all step usages")
+   * and a tool turn therefore bills several prompts while only ever sending
+   * one at a time. This is the field the context row shows and the history
+   * budget compares against.
+   *
+   * Absent on rows written before it existed. Readers fall back to
+   * `lastInputTokens`, which is exact for a single-step turn and OVERSTATES a
+   * multi-step one by roughly the number of steps.
+   */
+  lastPromptTokens?: number;
   /**
    * Cache WRITE tokens of the most recent turn. Persisted alongside the reads
    * so the header's cache row survives a reload: without it a reloaded thread
@@ -942,8 +962,11 @@ export type AzureChatCompletionReasoning = {
 };
 
 export interface UsageDataResponse {
+  /** TURN TOTAL: summed over every step of the last request. */
   inputTokens: number;
+  /** TURN TOTAL: summed over every step of the last request. */
   outputTokens: number;
+  /** TURN TOTAL: summed over every step of the last request. */
   cachedTokens: number;
   /**
    * Input tokens the provider WROTE into the prompt cache this turn. Optional
@@ -955,7 +978,20 @@ export interface UsageDataResponse {
   costUsd: number;
   threadTotalCostUsd: number;
   threadTotalTokens: number;
+  /**
+   * LAST-STEP PROMPT SIZE of the last request — the real size of the last
+   * prompt sent, which is what the context row means by "context". Optional so
+   * a thread seeded from a row written before it existed still renders; those
+   * readers fall back to `inputTokens`, which overstates a multi-step turn.
+   */
+  lastPromptTokens?: number;
+  /**
+   * Model calls the last request made. Present on the live path; absent for a
+   * thread seeded from persisted usage, because it is not persisted.
+   */
+  stepCount?: number;
   contextWindowSize: number;
+  /** Share of the context window the LAST PROMPT filled. */
   contextUsagePercent: number;
   model: string;
 }

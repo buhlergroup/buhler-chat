@@ -917,6 +917,27 @@ export async function POST(req: Request) {
   // chunks, and the model stream is merged into it. Today that is the
   // compaction notice; anything else the turn needs to tell the user goes the
   // same way.
+  // Two different quantities have to reach the header, and only one of them is
+  // on the terminal `finish` part.
+  //
+  //   TURN TOTALS       `finish.totalUsage` — the all-steps roll-up. The SDK
+  //                     is explicit: "When there are multiple steps, the usage
+  //                     is the sum of all step usages". That sum is what was
+  //                     billed, so cost and the cache split come from it.
+  //   LAST PROMPT SIZE  the LAST `finish-step` part's own `usage.inputTokens`.
+  //                     `TextStreamFinishStepPart` carries per-step usage
+  //                     (ai/dist/index.d.ts, the `finish-step` member of
+  //                     `TextStreamPart`); the `finish` part carries only the
+  //                     roll-up. So the step value has to be caught as it goes
+  //                     past — hence these two counters.
+  //
+  // `messageMetadata` is invoked for EVERY part (the SDK's own transform calls
+  // it before `toUIMessageChunk`), and a non-undefined return on a part that is
+  // not `start`/`finish` makes the SDK enqueue an extra `message-metadata`
+  // chunk. So: capture on `finish-step`, and emit ONLY on `finish`.
+  let lastStepInputTokens: number | undefined;
+  let stepCount = 0;
+
   const modelStream = result.toUIMessageStream({
     // Ship the turn's token usage on the assistant message metadata so the
     // header's live usage display updates every turn (the chat session's
@@ -924,6 +945,13 @@ export async function POST(req: Request) {
     // inputTokens/outputTokens for both Azure (Responses) and Anthropic
     // (Messages) before it reaches us. Fires on the terminal `finish` part.
     messageMetadata: ({ part }): ChatMessageMetadata | undefined => {
+      if (part.type === "finish-step") {
+        stepCount += 1;
+        // Last one wins: steps arrive in order, so after the final
+        // `finish-step` this holds the size of the last prompt sent.
+        lastStepInputTokens = part.usage?.inputTokens ?? lastStepInputTokens;
+        return undefined;
+      }
       if (part.type !== "finish") return undefined;
       const u = part.totalUsage;
       return {
@@ -932,6 +960,12 @@ export async function POST(req: Request) {
           outputTokens: u.outputTokens ?? 0,
           cachedTokens: u.inputTokenDetails?.cacheReadTokens ?? 0,
           cacheWriteTokens: u.inputTokenDetails?.cacheWriteTokens ?? 0,
+          // Undefined when no `finish-step` carried a number; computeRequestUsage
+          // then falls back to the roll-up, which is exact for one step.
+          ...(typeof lastStepInputTokens === "number"
+            ? { lastPromptTokens: lastStepInputTokens }
+            : {}),
+          ...(stepCount > 0 ? { stepCount } : {}),
           modelConfig,
         }),
       };
@@ -955,9 +989,12 @@ export async function POST(req: Request) {
         //                goes into the prompt this very turn replays), so the
         //                fact is known immediately. The token counts are not.
         //   at the end   the same line with the provider's REAL numbers:
-        //                "(34,012 → 17,565 tokens)". `tokensAfter` IS this
-        //                request's inputTokens, which does not exist until the
-        //                request finishes.
+        //                "(34,012 → 17,565 tokens)". `tokensAfter` IS the size
+        //                of this request's LAST prompt (the final step's
+        //                inputTokens), which does not exist until the request
+        //                finishes. Both ends are prompt sizes, never the
+        //                billed all-steps sum — a trim shrinks the prompt, and
+        //                a roll-up would report it growing on a tool turn.
         //
         // No estimate is ever shown. A number in the header that later
         // disagrees with the provider's own accounting is worse than no number
@@ -977,20 +1014,27 @@ export async function POST(req: Request) {
         if (!ctx.compaction) return;
         // Awaiting AFTER the merge is what keeps the stream open long enough
         // to write again: createUIMessageStream closes when this callback's
-        // promise settles and the merged stream is done. `usage` resolves
+        // promise settles and the merged stream is done. `finalStep` resolves
         // at the model's finish event.
+        //
+        // `finalStep`, NOT `result.usage`. Both ends of this notice are PROMPT
+        // SIZES — "the prompt went from 34,012 to 17,565" — and `result.usage`
+        // is the all-steps roll-up, which on a tool turn adds up several
+        // prompts and would claim the trim made the prompt bigger.
+        // `StreamTextResult.finalStep` is a `PromiseLike<StepResult>` and
+        // `StepResult` carries its own per-step `usage` (ai/dist/index.d.ts).
         try {
-          const usage = await result.usage;
-          const tokensAfter = usage?.inputTokens ?? 0;
+          const finalStep = await result.finalStep;
+          const tokensAfter = finalStep?.usage?.inputTokens ?? 0;
           if (tokensAfter <= 0) return;
           writer.write(
             compactionDonePart(ctx.compaction, {
               // The previous request's real prompt size, read at load time
               // before this turn overwrote it. Absent on a thread's first
               // turn, in which case the notice shows only what it is now.
-              ...(typeof ctx.previousRequestInputTokens === "number" &&
-              ctx.previousRequestInputTokens > 0
-                ? { tokensBefore: ctx.previousRequestInputTokens }
+              ...(typeof ctx.previousRequestPromptTokens === "number" &&
+              ctx.previousRequestPromptTokens > 0
+                ? { tokensBefore: ctx.previousRequestPromptTokens }
                 : {}),
               tokensAfter,
             }),
@@ -998,15 +1042,15 @@ export async function POST(req: Request) {
           logInfo("/api/chat completed the compaction notice", {
             threadId: ctx.thread.id,
             turnId: ctx.turnId,
-            realTokensBefore: ctx.previousRequestInputTokens,
+            realTokensBefore: ctx.previousRequestPromptTokens,
             realTokensAfter: tokensAfter,
           });
           // Same numbers onto the compaction row, so the divider a reloaded
           // page draws says what the live notice said. Fails soft inside.
           await recordHistoryCompactionRealUsage({
             threadId: ctx.thread.id,
-            ...(typeof ctx.previousRequestInputTokens === "number"
-              ? { realTokensBefore: ctx.previousRequestInputTokens }
+            ...(typeof ctx.previousRequestPromptTokens === "number"
+              ? { realTokensBefore: ctx.previousRequestPromptTokens }
               : {}),
             realTokensAfter: tokensAfter,
           });

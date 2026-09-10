@@ -13,6 +13,17 @@
  * the invoice) is worse than a number that is a turn old. While a response is
  * in flight the panel simply keeps showing the previous real values.
  *
+ * ## Turn totals vs the last prompt
+ *
+ * A turn can be several model calls (steps): tool call, tool result, model
+ * again. AI SDK 7 sums step usage over the turn, and that sum is what the
+ * provider billed — so input, output, the cache split and the cost are all
+ * "last request, all steps". The context row is the other quantity: the size
+ * of the LAST prompt alone, which is the only one still standing in the
+ * model's context. On a 3-step turn the totals are about three times the
+ * context figure, which is correct and looks wrong — so the panel labels both,
+ * and shows the step count when there was more than one.
+ *
  * The context row therefore answers "what did the last prompt actually cost in
  * context", and the compaction notice in the transcript is what tells the user
  * a trim happened. The two now agree, because both quote the same provider
@@ -62,8 +73,19 @@ export const TokenUsageDisplay: FC = () => {
   );
   const hasCacheRow = lastUsageData.inputTokens > 0;
 
+  // The size of the LAST prompt, which is what "context" means here. Absent on
+  // a thread seeded from a row written before it was persisted; the turn total
+  // then stands in, exact for a single-step turn and an overstatement of a
+  // multi-step one.
+  const lastPromptTokens =
+    lastUsageData.lastPromptTokens ?? lastUsageData.inputTokens;
+  // Only shown when it is greater than 1, and only the live path knows it: it
+  // is what explains totals several times the size of the context figure.
+  const stepCount = lastUsageData.stepCount ?? 1;
+  const isMultiStep = stepCount > 1;
+
   // Context ring data
-  const hasContext = lastUsageData.contextWindowSize > 0 && lastUsageData.inputTokens > 0;
+  const hasContext = lastUsageData.contextWindowSize > 0 && lastPromptTokens > 0;
   const percent = hasContext ? Math.min(lastUsageData.contextUsagePercent, 100) : 0;
   const radius = 6;
   const circumference = 2 * Math.PI * radius;
@@ -101,7 +123,7 @@ export const TokenUsageDisplay: FC = () => {
       </DropdownMenuTrigger>
       <DropdownMenuContent side="bottom" align="start" className="w-56">
         <DropdownMenuLabel className="font-normal pb-2">
-          <p className="text-sm font-semibold tracking-tight mb-2">Thread Usage <span className="text-[10px] font-normal text-muted-foreground">(last request)</span></p>
+          <p className="text-sm font-semibold tracking-tight mb-2">Thread Usage <span className="text-[10px] font-normal text-muted-foreground" data-testid="totals-scope">(last request, all steps)</span></p>
           <div className="space-y-1.5 text-xs">
             <div className="flex justify-between">
               {/* Cumulative input + output across every request of this
@@ -111,12 +133,20 @@ export const TokenUsageDisplay: FC = () => {
               <span className="text-muted-foreground">Thread usage so far</span>
               <span className="tabular-nums">{formatTokenCount(lastUsageData.threadTotalTokens)}</span>
             </div>
+            {isMultiStep && (
+              /* Why the rows below are bigger than the context row: the turn
+                 called the model more than once, and every call is billed. */
+              <div className="flex justify-between" data-testid="step-count-row">
+                <span className="text-muted-foreground">Model calls</span>
+                <span className="tabular-nums">{stepCount} steps</span>
+              </div>
+            )}
             <div className="flex justify-between">
-              <span className="text-muted-foreground">Last input</span>
+              <span className="text-muted-foreground">Input (all steps)</span>
               <span className="tabular-nums">{formatTokenCount(lastUsageData.inputTokens)}</span>
             </div>
             <div className="flex justify-between">
-              <span className="text-muted-foreground">Last output</span>
+              <span className="text-muted-foreground">Output (all steps)</span>
               <span className="tabular-nums">{formatTokenCount(lastUsageData.outputTokens)}</span>
             </div>
             {hasCacheRow && (
@@ -124,7 +154,7 @@ export const TokenUsageDisplay: FC = () => {
                 {/* The three buckets of the last request's input, in one row.
                     Reads are billed at ~0.1x, writes at 1.25x, plain at 1x —
                     so this row is where the prompt-cache work shows up. */}
-                <span className="text-muted-foreground">Cache</span>
+                <span className="text-muted-foreground">Cache (all steps)</span>
                 <span className="tabular-nums text-right">
                   reads {formatTokenCount(cacheReads)}
                   {knowsWrites && <> · writes {formatTokenCount(cacheWrites)}</>}
@@ -169,7 +199,7 @@ export const TokenUsageDisplay: FC = () => {
                   />
                 </div>
                 <div className="mt-1 text-[10px] text-muted-foreground tabular-nums">
-                  {formatTokenCount(lastUsageData.inputTokens)} of{" "}
+                  {formatTokenCount(lastPromptTokens)} of{" "}
                   {formatTokens(lastUsageData.contextWindowSize)} ·{" "}
                   {percent.toFixed(1)} %
                 </div>
@@ -181,7 +211,9 @@ export const TokenUsageDisplay: FC = () => {
         <DropdownMenuLabel className="font-normal py-1.5">
           <p className="text-[10px] text-muted-foreground/60 leading-tight">
             Token counts are the provider&apos;s, for the last completed
-            request. Costs are estimates only. No charges are applied.
+            request. Input, output, cache and cost are the totals of all steps
+            of that request. Context is the size of the last prompt alone.
+            Costs are estimates only. No charges are applied.
           </p>
         </DropdownMenuLabel>
       </DropdownMenuContent>

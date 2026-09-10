@@ -178,7 +178,25 @@ function persistedToolTurn(question: string, answer: string) {
   ];
 }
 
-/** A turn sized to roughly `tokens` estimated tokens, for the budget cases. */
+/**
+ * A thread whose previous request measured `tokens`. That measurement is the
+ * ONE input to the compaction decision — nothing is estimated from the rows.
+ */
+function measuredThread(tokens: number): ChatThreadModel {
+  return makeThread({
+    usage: {
+      totalInputTokens: tokens,
+      totalOutputTokens: 0,
+      totalCachedTokens: 0,
+      totalCostUsd: 0,
+      lastUpdated: "2026-01-01T00:00:00.000Z",
+      lastInputTokens: tokens,
+      lastPromptTokens: tokens,
+    },
+  } as unknown as Partial<ChatThreadModel>);
+}
+
+/** A turn sized to roughly `tokens` characters-worth of text. */
 function bigTurn(tokens: number) {
   const chars = Math.floor((tokens * CHARS_PER_TOKEN) / 2);
   return [makeRow("user", "u".repeat(chars)), makeRow("assistant", "a".repeat(chars))];
@@ -238,6 +256,7 @@ beforeEach(() => {
   rowSeq = 0;
   clock = Date.parse("2026-09-07T10:00:00.000Z");
   delete process.env.HISTORY_TOKEN_BUDGET;
+  delete process.env.HISTORY_PROTECTED_TURNS;
   mockFindDocuments.mockResolvedValue({ status: "OK", response: [] });
 });
 
@@ -443,10 +462,13 @@ describe("history.append-only.004 — compaction is the only sanctioned rewrite"
     // Turn n fits the budget. Turn n+1 does not, so a block of the oldest
     // turns is replaced by one summary item.
     const rows: unknown[] = [];
-    for (let i = 0; i < 20; i++) rows.push(...bigTurn(500)); // ~10,000 tokens
+    for (let i = 0; i < 20; i++) rows.push(...bigTurn(500));
 
+    // A tail is protected so a compaction still leaves history behind to
+    // compare against; with the default 0 the whole history would go.
+    process.env.HISTORY_PROTECTED_TURNS = "5";
     process.env.HISTORY_TOKEN_BUDGET = "20000";
-    const turnN = await buildModelInput(rows, "question n");
+    const turnN = await buildModelInput(rows, "question n", measuredThread(10_000));
     expect(mockRecordCompaction).not.toHaveBeenCalled();
     const summaryInN = turnN.filter(
       (m) => typeof m.content === "string" && m.content.includes(SUMMARY_REPLAY_PREFIX),
@@ -458,6 +480,7 @@ describe("history.append-only.004 — compaction is the only sanctioned rewrite"
     const turnNPlus1 = await buildModelInput(
       [...rows, ...persistedTurn("question n", "answer n")],
       "question n+1",
+      measuredThread(10_000),
     );
     expect(mockRecordCompaction).toHaveBeenCalledTimes(1);
 
@@ -491,8 +514,9 @@ describe("history.append-only.004 — compaction is the only sanctioned rewrite"
     const rows: unknown[] = [];
     for (let i = 0; i < 20; i++) rows.push(...bigTurn(500));
     process.env.HISTORY_TOKEN_BUDGET = "6000";
+    process.env.HISTORY_PROTECTED_TURNS = "5";
 
-    const input = await buildModelInput(rows, "question");
+    const input = await buildModelInput(rows, "question", measuredThread(10_000));
     expect(input[0].role).toBe("system"); // developer
     expect(input[1].role).toBe("user"); // the replayed summary
     expect(input[2].role).toBe("user"); // the oldest surviving turn
@@ -502,17 +526,28 @@ describe("history.append-only.004 — compaction is the only sanctioned rewrite"
     const rows: unknown[] = [];
     for (let i = 0; i < 20; i++) rows.push(...bigTurn(500));
     process.env.HISTORY_TOKEN_BUDGET = "6000";
+    process.env.HISTORY_PROTECTED_TURNS = "5";
 
     // The compacting turn.
     let allRows = rows;
-    const compacted = await buildModelInput(allRows, "question 0");
+    const compacted = await buildModelInput(
+      allRows,
+      "question 0",
+      measuredThread(10_000),
+    );
     expect(mockRecordCompaction).toHaveBeenCalledTimes(1);
 
-    // The turns after it must be pure appends again.
+    // The turns after it must be pure appends again. The compaction shrank the
+    // prompt, so the measurement the next turn reads is under budget — which
+    // is exactly what the provider reported, not something computed here.
     let previous = compacted;
     for (let i = 0; i < 3; i++) {
       allRows = [...allRows, ...persistedTurn(`question ${i}`, `answer ${i}`)];
-      const next = await buildModelInput(allRows, `question ${i + 1}`);
+      const next = await buildModelInput(
+        allRows,
+        `question ${i + 1}`,
+        measuredThread(3_000),
+      );
       expectExactPrefix(previous, next);
       previous = next;
     }
@@ -525,8 +560,9 @@ describe("history.append-only.004 — compaction is the only sanctioned rewrite"
     const rows: unknown[] = [];
     for (let i = 0; i < 20; i++) rows.push(...bigTurn(500));
     process.env.HISTORY_TOKEN_BUDGET = "6000";
+    process.env.HISTORY_PROTECTED_TURNS = "5";
 
-    const input = await buildModelInput(rows, "question");
+    const input = await buildModelInput(rows, "question", measuredThread(10_000));
 
     expect(mockRecordCompaction).toHaveBeenCalledTimes(1);
     const hasSummary = input.some(
@@ -737,7 +773,10 @@ describe("history.append-only.007 — the compaction row never enters the histor
     for (let i = 0; i < 20; i++) rows.push(...bigTurn(500));
     process.env.HISTORY_TOKEN_BUDGET = "6000";
 
-    mockEnsureThread.mockResolvedValue({ status: "OK", response: makeThread() });
+    mockEnsureThread.mockResolvedValue({
+      status: "OK",
+      response: measuredThread(10_000),
+    });
     mockFindHistory.mockResolvedValue({ status: "OK", response: rows });
     const ctx = await loadThreadContext(prompt("question"));
 

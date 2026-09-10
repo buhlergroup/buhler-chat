@@ -155,15 +155,32 @@ export function withTruncationNotice(text: string): string {
 // ---------------------------------------------------------------------------
 
 export interface UsagePayload {
+  /**
+   * TURN TOTAL input tokens: the sum over every step of the turn, which is
+   * what the provider billed. NOT the size of the last prompt — a tool turn
+   * sends one prompt per step and this adds them all up. See
+   * `lastPromptTokens`.
+   */
   inputTokens: number;
+  /** TURN TOTAL output tokens, summed over every step. */
   outputTokens: number;
+  /** TURN TOTAL cache reads, summed over every step. */
   cachedTokens?: number;
   /**
    * Input tokens the provider WROTE into the prompt cache this turn. GPT-5.6
    * bills these at 1.25x the uncached input rate, so they need their own
    * bucket in the cost formula instead of being folded into plain input.
+   * A TURN TOTAL, like the fields above.
    */
   cacheWriteTokens?: number;
+  /**
+   * LAST-STEP PROMPT SIZE: the real `inputTokens` of the turn's final step.
+   * Persisted next to the totals so the context row and the history budget
+   * read a prompt size instead of a billed sum. Absent when the caller has no
+   * step information (a sentinel row, or an abort before any step finished);
+   * nothing is then persisted and readers fall back to `lastInputTokens`.
+   */
+  lastPromptTokens?: number;
 }
 
 export interface PersistPayload {
@@ -357,6 +374,9 @@ export async function persistThread({
     cachedTokens,
     cacheWriteTokens,
     costUsd,
+    // The two are equal on a single-step turn and diverge on a tool turn; a
+    // log line that shows only the roll-up cannot tell the two apart.
+    lastPromptTokens: usage.lastPromptTokens,
     rowCount: rows.length,
   });
 
@@ -372,6 +392,10 @@ export async function persistThread({
       costUsd,
       // Persisted too, so the header's cache row is whole after a reload.
       cacheWriteTokens,
+      // The last step's own prompt size, kept apart from the billed roll-up
+      // above: it is what the next turn's over-budget check compares against
+      // and what the context row shows after a reload.
+      usage.lastPromptTokens,
     );
     if (usageRes.status !== "OK") {
       logWarn("UpdateChatThreadUsage returned non-OK", {
@@ -796,6 +820,24 @@ export async function persistAssistantFromFinishEvent<TOOLS extends ToolSet>({
   const cachedTokens = usageDetails.inputTokenDetails?.cacheReadTokens;
   const cacheWriteTokens = usageDetails.inputTokenDetails?.cacheWriteTokens;
 
+  // The turn's LAST prompt size, which is a different quantity from every
+  // number above. `event.usage` is the all-steps roll-up (the SDK's own words:
+  // "When there are multiple steps, the usage is the sum of all step usages"),
+  // so on a 3-step tool turn it reports three prompts' worth of input for a
+  // conversation that never exceeded one prompt. `StepResult` carries its own
+  // `usage`, and the last step's `inputTokens` IS the size of the last prompt
+  // sent — the only one of the three that is still in the model's context.
+  //
+  // Left undefined when there are no steps to read (a sentinel row, or an
+  // abort before the first step finished): nothing is then persisted, and the
+  // reader's fallback to `lastInputTokens` applies.
+  const lastStepUsage = (
+    event as {
+      steps?: ReadonlyArray<{ usage?: { inputTokens?: number } }>;
+    }
+  ).steps?.at(-1)?.usage;
+  const lastPromptTokens = lastStepUsage?.inputTokens;
+
   await persistThread({
     threadId,
     turnId,
@@ -807,6 +849,7 @@ export async function persistAssistantFromFinishEvent<TOOLS extends ToolSet>({
       outputTokens: usageDetails.outputTokens ?? 0,
       cachedTokens,
       cacheWriteTokens,
+      ...(typeof lastPromptTokens === "number" ? { lastPromptTokens } : {}),
     },
     personaId,
     turnShape: deriveTurnShape(event.steps),

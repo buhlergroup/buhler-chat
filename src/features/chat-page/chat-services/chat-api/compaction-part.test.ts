@@ -20,8 +20,6 @@ describe("chat-page.unit.compaction-part.001 — the part shape", () => {
     const running = compactionRunningPart({ turnsToTrim: 4 });
     const done = compactionDonePart({
       trimmedTurns: 4,
-      estimatedTokensBefore: 300_000,
-      estimatedTokensAfter: 150_000,
       summaryOutcome: "ok",
       durationMs: 900,
     });
@@ -34,8 +32,6 @@ describe("chat-page.unit.compaction-part.001 — the part shape", () => {
   it("omits every field it has no value for, rather than sending undefined", () => {
     const done = compactionDonePart({
       trimmedTurns: 2,
-      estimatedTokensBefore: 90_000,
-      estimatedTokensAfter: 50_000,
       summaryOutcome: "off",
       durationMs: 11,
       coversThroughMessageId: "m9",
@@ -60,8 +56,6 @@ describe("chat-page.unit.compaction-part.001 — the part shape", () => {
   it("takes the real numbers on the second write, under the same id", () => {
     const outcome = {
       trimmedTurns: 2,
-      estimatedTokensBefore: 90_000,
-      estimatedTokensAfter: 50_000,
       summaryOutcome: "ok" as const,
       durationMs: 11,
     };
@@ -82,8 +76,6 @@ describe("chat-page.unit.compaction-part.001 — the part shape", () => {
     const done = compactionDonePart(
       {
         trimmedTurns: 1,
-        estimatedTokensBefore: 90_000,
-        estimatedTokensAfter: 50_000,
         summaryOutcome: "ok",
         durationMs: 11,
       },
@@ -96,8 +88,6 @@ describe("chat-page.unit.compaction-part.001 — the part shape", () => {
   it("carries the summary inline when there is one", () => {
     const done = compactionDonePart({
       trimmedTurns: 12,
-      estimatedTokensBefore: 184_000,
-      estimatedTokensAfter: 96_000,
       summaryOutcome: "ok",
       summaryModel: "gpt-5.6-terra",
       durationMs: 4210,

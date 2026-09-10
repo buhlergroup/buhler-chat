@@ -16,33 +16,59 @@
  * re-billing a large share of the traffic at the cache-write rate (1.25x).
  *
  * The fix has two halves. The loader now reads the WHOLE thread (see
- * `FindAllChatMessagesForCurrentUser`), and this module caps the result by
- * ESTIMATED TOKENS rather than by row count, with two properties the row cap
- * did not have:
+ * `FindAllChatMessagesForCurrentUser`), and this module compacts it when the
+ * provider says the prompt has grown past the budget, with two properties the
+ * row cap did not have:
  *
  *   1. **Turn-boundary cuts.** A cut only ever lands where a user message
  *      starts, so the surviving history is always a whole number of turns and
  *      never a dangling tool result with no call.
- *   2. **Hysteresis.** Nothing is trimmed until the estimate exceeds the
- *      budget, and when a trim does happen it goes all the way down to 60 % of
- *      the budget in one block. The prefix then stays byte-identical for the
- *      many turns it takes to climb back from 60 % to 100 %, instead of shifting
- *      on every single turn. This is the whole point: one big cache miss every
- *      few dozen turns beats a small one every turn.
+ *   2. **Hysteresis.** Nothing happens until the measured prompt exceeds the
+ *      budget, and when a compaction does happen the history starts again from
+ *      a summary. The prefix then stays byte-identical for the many turns it
+ *      takes to grow back to the budget, instead of shifting on every single
+ *      turn. This is the whole point: one big cache miss every few dozen turns
+ *      beats a small one every turn.
+ *
+ * ## One number, from the provider. Nothing is estimated.
+ *
+ * There is no token estimator anywhere in this decision. Guessing was never
+ * necessary: the provider reports the size of the prompt it received, and the
+ * app persists that figure per thread (`ThreadUsage.lastPromptTokens` — the
+ * LAST step's `inputTokens`, not the all-steps roll-up, which sums one prompt
+ * per step of a tool turn).
+ *
+ * So the whole decision is:
+ *
+ *   measured last prompt > budget   ->  compact the history and start again
+ *   anything else                   ->  do nothing
+ *
+ * "Compact and start again" is literal: the history up to the newest
+ * `minKeptTurns` turns is handed to the summariser and leaves the prompt, and
+ * the thread carries on from the summary. There is no target to hit, no
+ * per-turn token accounting, and no attempt to work out which turn is
+ * responsible for how many tokens — that question needs a tokenizer we do not
+ * have, and its answer would only ever be a guess.
+ *
+ * It is also self-correcting, which is why it needs no arithmetic. The next
+ * request measures the new prompt for us. If the compaction was not enough,
+ * the next turn is over budget again and compacts again; if it was enough, the
+ * thread is quiet for the dozens of turns it takes to grow back.
+ *
+ * With no measurement (a thread's first turn, or a row written before the
+ * field existed) NOTHING happens and no summariser call is spent. There is
+ * nothing to compare, and an oversized first message could not be helped
+ * anyway: the current user turn is never droppable.
+ *
+ * `estimateTextTokens` survives at the bottom of this file for one reason —
+ * the summary writer stamps an informational size on the row it persists.
+ * Nothing decides anything with it.
  *
  * ## Contract
  *
  * Everything here is pure and deterministic: same input, same output, in any
- * process, on any pod, under any locale. The trim decision feeds a cache key,
- * so a non-deterministic estimator would defeat its own purpose.
- *
- * The estimator is deliberately a heuristic (see `estimateTextTokens`) and NOT
- * a real tokenizer. It is used to decide whether to drop a block of history,
- * not to bill anyone. A real BPE pass over an 80k-token thread on every turn
- * would cost more latency than the trim saves, and — because tokenizer
- * versions differ between models — it would not even be deterministic across
- * the model picker. What matters is that the same thread always yields the same
- * number.
+ * process, on any pod, under any locale. The compaction decision feeds a cache
+ * key, so a non-deterministic one would defeat its own purpose.
  */
 
 // ---------------------------------------------------------------------------
@@ -101,31 +127,12 @@ export const HISTORY_LONG_CONTEXT_RESERVE = 16_000;
 export const CONTEXT_WINDOW_GUARD_RATIO = 0.6;
 
 /**
- * Default fraction of the budget a trim lands on. The gap between 1.0
- * (trigger) and this value (target) IS the hysteresis: a thread has to grow
- * back through 40 % of the budget before the prefix moves again.
- *
- * Overridable per environment via `HISTORY_TRIM_TARGET_RATIO`; see
- * `resolveHistoryTrimTargetRatio`.
- */
-export const HISTORY_TRIM_TARGET_RATIO = 0.6;
-
-/**
- * Characters per token. Roughly right for English prose and for the JSON that
- * tool rows carry; it over-counts CJK and under-counts long base64 runs. Both
- * are acceptable — see the note on determinism above.
+ * Characters per token, for the ONE thing left that estimates anything: the
+ * informational size stamped on a persisted summary row. Not used to decide
+ * anything — see `estimateTextTokens`.
  */
 export const CHARS_PER_TOKEN = 4;
 
-/**
- * Flat cost charged for one image part. Real cost depends on the resolution
- * the provider tiles the image at, which we do not know at this point (the URL
- * may still be a `blob://` reference). 1,000 is in the right order of
- * magnitude for a typical screenshot and — critically — does not depend on the
- * URL string, so re-uploading the same image under a longer blob name cannot
- * change the estimate.
- */
-export const IMAGE_TOKEN_ESTIMATE = 1_000;
 
 /**
  * Persisted turns that are never trimmed, counted from the newest end of the
@@ -146,9 +153,10 @@ export const IMAGE_TOKEN_ESTIMATE = 1_000;
  * compacted and the prompt grew. Protecting turns from a COST cut is a
  * contradiction: the expensive turn is exactly the one that has to go.
  *
- * What replaces the protection is honesty about reachability — see
- * `planHistoryTrim`, which now declines to trim at all when the cut cannot get
- * under the target, instead of trimming something and pretending.
+ * With compact-and-start-again there is nothing left to get wrong here: the
+ * whole history goes into the summary, so a big newest turn is summarised
+ * along with everything else rather than pushing a small old turn out and
+ * leaving the prompt bigger than before.
  *
  * Overridable via `HISTORY_PROTECTED_TURNS` for an environment that wants the
  * old shape back; see `resolveHistoryProtectedTurns`.
@@ -186,7 +194,6 @@ export interface HistoryTurn<T extends BudgetMessage = BudgetMessage> {
   /** Index into the input array of this turn's last row (inclusive). */
   endIndex: number;
   messages: T[];
-  estimatedTokens: number;
   /**
    * True for a leading block of rows that precede the thread's first user
    * message (a stray system row, or tool rows orphaned by an old bug). It is
@@ -196,65 +203,50 @@ export interface HistoryTurn<T extends BudgetMessage = BudgetMessage> {
 }
 
 export interface TrimPlanOptions {
-  /** Estimated-token ceiling. Above this, and only above this, we trim. */
+  /**
+   * Measured-token ceiling on the prompt. Above this, and only above this, the
+   * history is compacted.
+   */
   budget?: number;
-  /** Trim target as a fraction of `budget`. */
-  targetRatio?: number;
-  /** Newest PERSISTED turns that are never trimmed. Default 0. */
+  /**
+   * Newest PERSISTED turns that survive a compaction. Default 0 — the current
+   * user turn is not in these rows, so 0 still means "the question being
+   * answered survives".
+   */
   minKeptTurns?: number;
   /**
-   * Estimated tokens the prompt spends on things this module cannot drop: the
-   * developer message and the tool definitions. Counted into the reachability
-   * check, so a trim is not attempted when even an empty history would stay
-   * over target. Zero when the caller does not know it.
-   */
-  staticPrefixTokens?: number;
-  /**
-   * The provider's REAL `inputTokens` for this thread's previous request, when
-   * one has been recorded.
+   * THE input to the decision: the provider's measured size of the LAST prompt
+   * of this thread's previous request (its final step's `inputTokens`).
    *
-   * This decides WHETHER to trim, in place of the estimate. The estimator is a
-   * chars/4 heuristic; the real number is what the prompt actually cost, and
-   * on a thread with a big pasted turn the two can differ enough to matter.
-   * The estimate still decides HOW MUCH to drop, because only it can be
-   * apportioned across turns.
+   * Deliberately the LAST STEP's input and not the turn's billed roll-up. AI
+   * SDK 7 sums step usage over a turn, so a 3-step tool turn reports about
+   * three prompts' worth of input for a conversation that never exceeded one
+   * prompt. Measured on dev: a thread reported 285,647 against a 256,000
+   * budget while its real prompt was about half that, and compacted a thread
+   * that was never over budget.
    *
-   * Note the deliberate asymmetry of units: the real figure covers the whole
-   * prompt (developer message, summary and history), while the budget nominally
-   * bounds the history alone. That makes the trigger slightly eager, which is
-   * the intent — what costs money is the whole prompt.
+   * Absent on a thread's first turn, and on a thread whose last row predates
+   * the field. Nothing is then compacted — there is nothing to compare, and a
+   * compaction could not help an oversized first message anyway, because the
+   * current user turn is never droppable.
    */
-  measuredTokensBefore?: number;
-  /**
-   * Tokens the summary already persisted for this thread occupies in today's
-   * prompt. Counted towards the budget because it is really there.
-   */
-  existingSummaryTokens?: number;
-  /**
-   * Tokens to hold back for the summary that will REPLACE the existing one
-   * after this trim. Zero when summarisation is disabled.
-   */
-  summaryReserveTokens?: number;
+  measuredPromptTokens?: number;
 }
 
 export interface TrimPlan<T extends BudgetMessage = BudgetMessage> {
-  /** False when the history fitted; `kept` is then the input, untouched. */
+  /** False when nothing was compacted; `kept` is then the input, untouched. */
   trimmed: boolean;
   /** Rows to send to the model, oldest-first. */
   kept: T[];
   /** Rows the summariser should stand in for, oldest-first. */
   dropped: T[];
-  /** `existingSummaryTokens` + every row in the input. */
-  estimatedTokensBefore: number;
-  /** Which number answered "is this thread over budget?". */
-  triggerSource: "measured" | "estimated";
-  /** The figure that was compared against `budget`. */
-  triggerTokens: number;
-  /** What the prompt's history section is expected to cost after the trim. */
-  estimatedTokensAfter: number;
+  /**
+   * The measurement this decision was made from, or undefined when the thread
+   * had none. Undefined always means `trimmed: false`.
+   */
+  measuredPromptTokens?: number;
+  /** The ceiling the measurement was compared with. */
   budget: number;
-  /** The absolute token figure `targetRatio` resolved to. */
-  target: number;
   droppedTurnCount: number;
   keptTurnCount: number;
   /**
@@ -263,26 +255,22 @@ export interface TrimPlan<T extends BudgetMessage = BudgetMessage> {
    */
   coversThroughMessageId?: string;
   /**
-   * Set when the target cannot be reached: what may not be dropped (protected
-   * turns, the replacement summary's allowance, the static prefix) already
-   * exceeds it. The caller should log it; there is no correct automatic
-   * response beyond trusting the model's context window.
-   */
-  targetUnreachable: boolean;
-  /**
-   * Why an over-budget thread was left alone. Undefined when the thread fitted
-   * or when it was trimmed.
+   * Why a thread was left alone. Undefined when it was compacted.
    *
-   *   "cannot-reach-target"  the cut could not get under target, so nothing was
-   *                          dropped and no summariser call was spent.
-   *   "no-reduction"         the cut WOULD have landed under target, but the
-   *                          replacement summary costs as much as the turns it
-   *                          replaces, so the prompt would not have shrunk.
+   *   "no-measurement"    the thread has no recorded prompt size yet, so there
+   *                       is nothing to compare and nothing is done. A first
+   *                       turn, or a row written before `lastPromptTokens`.
+   *   "under-budget"      the measured prompt is at or under budget. The
+   *                       ordinary outcome for almost every turn.
+   *   "nothing-droppable" over budget, but there is no history to compact —
+   *                       an empty thread, or every turn protected by
+   *                       `minKeptTurns`. A single oversized message cannot be
+   *                       helped here: the current turn is never droppable.
    *
-   * Both are silent for the user: there is nothing to show, because nothing
-   * happened.
+   * All three are silent for the user: nothing happened, so there is nothing
+   * to show.
    */
-  skipReason?: "cannot-reach-target" | "no-reduction";
+  skipReason?: "no-measurement" | "under-budget" | "nothing-droppable";
 }
 
 // ---------------------------------------------------------------------------
@@ -292,6 +280,11 @@ export interface TrimPlan<T extends BudgetMessage = BudgetMessage> {
 /**
  * Deterministic token estimate for a text blob: `ceil(length / 4)`.
  *
+ * NOT part of the trim decision or of the trim sizing any more — both run on
+ * the provider's measured prompt size, distributed by weight (see the module
+ * header). The one remaining caller is the summary writer, which stamps a size
+ * on the `CHAT_HISTORY_SUMMARY` row it persists; that figure is informational.
+ *
  * `ceil` rather than `round` so that any non-empty string costs at least one
  * token — a row can never be free, which keeps the accumulation strictly
  * monotonic in the number of rows.
@@ -299,43 +292,6 @@ export interface TrimPlan<T extends BudgetMessage = BudgetMessage> {
 export function estimateTextTokens(text: string | undefined | null): number {
   if (!text) return 0;
   return Math.ceil(text.length / CHARS_PER_TOKEN);
-}
-
-/**
- * Estimated tokens for one persisted row.
- *
- * `content` covers prose AND the JSON blob on `role: "tool"` rows, which is
- * where tool arguments, tool results and any text extracted from an attached
- * document actually live once persisted — so those are counted by counting
- * `content`, with no special-casing needed.
- *
- * Images are the one thing that must NOT be counted by string length: a
- * persisted image is either a `blob://` reference (a few dozen characters for
- * something that costs ~1,000 tokens) or an inline `data:` URL (hundreds of
- * kilobytes of base64 for the same ~1,000 tokens). Length is meaningless in
- * both directions, so each image part costs a flat `IMAGE_TOKEN_ESTIMATE`.
- *
- * Deleted rows cost nothing: they are dropped before the model sees them.
- */
-export function estimateMessageTokens(message: BudgetMessage): number {
-  let tokens = estimateTextTokens(message.content);
-  tokens += estimateTextTokens(message.reasoningContent);
-
-  const images =
-    message.multiModalImages ??
-    (message.multiModalImage ? [message.multiModalImage] : []);
-  tokens += images.length * IMAGE_TOKEN_ESTIMATE;
-
-  return tokens;
-}
-
-/** Estimated tokens for a whole run of rows. */
-export function estimateHistoryTokens(
-  messages: readonly BudgetMessage[],
-): number {
-  let total = 0;
-  for (const message of messages) total += estimateMessageTokens(message);
-  return total;
 }
 
 // ---------------------------------------------------------------------------
@@ -366,7 +322,6 @@ export function splitIntoTurns<T extends BudgetMessage>(
         startIndex: index,
         endIndex: index,
         messages: [],
-        estimatedTokens: 0,
         // Only a block that opens without a user row is a preamble.
         isPreamble: !startsNewTurn,
       };
@@ -375,7 +330,6 @@ export function splitIntoTurns<T extends BudgetMessage>(
 
     current.messages.push(message);
     current.endIndex = index;
-    current.estimatedTokens += estimateMessageTokens(message);
   });
 
   return turns;
@@ -610,159 +564,70 @@ export function resolveHistoryProtectedTurns(input?: {
   return MIN_KEPT_TURNS;
 }
 
-/**
- * Resolve the trim target as a fraction of the budget. `HISTORY_TRIM_TARGET_RATIO`
- * overrides the module default.
- *
- * Only a value strictly between 0 and 1 is honoured. At 1.0 there would be no
- * hysteresis left — the trim would land exactly on the trigger, so the next
- * turn would trim again and the prefix would move every turn, which is the
- * behaviour this module exists to remove. At 0 the trim would drop everything
- * it is allowed to drop, throwing away context for no cache benefit. Both are
- * treated as a misconfiguration and ignored.
- */
-export function resolveHistoryTrimTargetRatio(input?: {
-  envRatio?: string;
-}): number {
-  const parsed = Number(input?.envRatio);
-  if (Number.isFinite(parsed) && parsed > 0 && parsed < 1) return parsed;
-  return HISTORY_TRIM_TARGET_RATIO;
-}
-
 // ---------------------------------------------------------------------------
 // The plan
 // ---------------------------------------------------------------------------
 
 /**
- * Work out which turns to drop, if any.
+ * Decide whether to compact this thread's history, and hand back the two
+ * halves if so.
  *
- * The shape of the decision:
+ * The whole decision:
  *
- *   over budget?           estimatedTokensBefore > budget
- *   how far to cut?        down to `target` (= budget x targetRatio), minus
- *                          whatever the replacement summary will occupy
- *   where can we cut?      only at a turn boundary, and never into the newest
- *                          `minKeptTurns` PERSISTED turns (default 0 — the
- *                          current user message is not in these rows, so it
- *                          survives regardless)
- *   is it worth it?        only if the target is reachable at all, and only if
- *                          the result is actually smaller than the input
+ *   is there a number?   `measuredPromptTokens`. Without it nothing happens
+ *                        and no summariser call is spent.
+ *   over budget?         measuredPromptTokens > budget
+ *   what goes?           everything before the newest `minKeptTurns` turns.
+ *                        Not a computed amount — the history is compacted and
+ *                        the thread starts again from the summary.
  *
- * Turns are dropped oldest-first, stopping as soon as the remainder is at or
- * under target, so exactly one contiguous block leaves at the front.
+ * No target, no per-turn token accounting, no estimator. The next request
+ * measures the result for us: still over budget means compact again, under
+ * means quiet for as long as it takes to grow back.
+ *
+ * The cut lands on a turn boundary, so a tool result is never separated from
+ * the assistant message that called it.
  */
 export function planHistoryTrim<T extends BudgetMessage>(
   messages: readonly T[],
   options: TrimPlanOptions = {},
 ): TrimPlan<T> {
   const budget = options.budget ?? DEFAULT_HISTORY_TOKEN_BUDGET;
-  const targetRatio = options.targetRatio ?? HISTORY_TRIM_TARGET_RATIO;
   const minKeptTurns = options.minKeptTurns ?? MIN_KEPT_TURNS;
-  const existingSummaryTokens = options.existingSummaryTokens ?? 0;
-  const summaryReserveTokens = options.summaryReserveTokens ?? 0;
-  const staticPrefixTokens = options.staticPrefixTokens ?? 0;
-
-  const historyTokens = estimateHistoryTokens(messages);
-  const estimatedTokensBefore = historyTokens + existingSummaryTokens;
-  const target = Math.floor(budget * targetRatio);
-
-  // Real if we have it, estimated otherwise. See `measuredTokensBefore`.
-  const measured = options.measuredTokensBefore;
-  const hasMeasured =
-    typeof measured === "number" && Number.isFinite(measured) && measured > 0;
-  const triggerSource: TrimPlan<T>["triggerSource"] = hasMeasured
-    ? "measured"
-    : "estimated";
-  const triggerTokens = hasMeasured ? Math.floor(measured) : estimatedTokensBefore;
-
   const turns = splitIntoTurns(messages);
 
-  if (triggerTokens <= budget) {
-    return {
-      trimmed: false,
-      kept: [...messages],
-      dropped: [],
-      estimatedTokensBefore,
-      estimatedTokensAfter: estimatedTokensBefore,
-      budget,
-      target,
-      droppedTurnCount: 0,
-      keptTurnCount: turns.length,
-      targetUnreachable: false,
-      triggerSource,
-      triggerTokens,
-    };
-  }
+  const rawMeasured = options.measuredPromptTokens;
+  const hasMeasured =
+    typeof rawMeasured === "number" &&
+    Number.isFinite(rawMeasured) &&
+    rawMeasured > 0;
+  const measured = hasMeasured ? Math.floor(rawMeasured as number) : 0;
 
-  // Room the surviving turns get, once the replacement summary has taken its
-  // cut of the target.
-  const historyTarget = Math.max(0, target - summaryReserveTokens);
-  const maxDroppableTurns = Math.max(0, turns.length - minKeptTurns);
-
-  const skipped = (
+  const untouched = (
     skipReason: NonNullable<TrimPlan<T>["skipReason"]>,
   ): TrimPlan<T> => ({
     trimmed: false,
     kept: [...messages],
     dropped: [],
-    estimatedTokensBefore,
-    estimatedTokensAfter: estimatedTokensBefore,
+    ...(hasMeasured ? { measuredPromptTokens: measured } : {}),
     budget,
-    target,
     droppedTurnCount: 0,
     keptTurnCount: turns.length,
-    targetUnreachable: true,
     skipReason,
-    triggerSource,
-    triggerTokens,
   });
 
-  // ── Reachability, BEFORE dropping anything ──────────────────────────────
-  //
-  // What a trim cannot remove: the protected turns, the allowance for the
-  // summary that replaces the dropped block, and the static prefix. If that
-  // floor is already above target, the best possible cut still leaves the
-  // thread over budget — so trimming would delete context, spend a summariser
-  // call, and change nothing that matters.
-  //
-  // This is the guard the "compacted 17k → 19k" loop needed. With two
-  // protected turns holding a 15k paste, every single turn dropped the newest
-  // small turn, wrote a fresh summary, and came out BIGGER — over and over,
-  // because the watermark advanced but the floor never moved.
-  const protectedTokens = turns
-    .slice(Math.max(0, turns.length - minKeptTurns))
-    .reduce((sum, turn) => sum + turn.estimatedTokens, 0);
-  const minimumReachable =
-    protectedTokens + summaryReserveTokens + staticPrefixTokens;
-  if (minimumReachable > target) return skipped("cannot-reach-target");
+  // No measurement, no decision. A thread's first turn, or a row written
+  // before `lastPromptTokens` existed.
+  if (!hasMeasured) return untouched("no-measurement");
 
-  let droppedTurnCount = 0;
-  let remainingHistoryTokens = historyTokens;
-  while (
-    droppedTurnCount < maxDroppableTurns &&
-    remainingHistoryTokens > historyTarget
-  ) {
-    remainingHistoryTokens -= turns[droppedTurnCount].estimatedTokens;
-    droppedTurnCount++;
-  }
+  if (measured <= budget) return untouched("under-budget");
 
-  // Nothing droppable at all (every turn protected). Same answer as an
-  // unreachable target, and the caller must not spend a summariser call on an
-  // empty block.
-  if (droppedTurnCount === 0) return skipped("cannot-reach-target");
-
-  const estimatedTokensAfter = remainingHistoryTokens + summaryReserveTokens;
-
-  // ── The prompt must actually get smaller ────────────────────────────────
-  //
-  // A trim swaps turns for a summary, and the summary is not free. Dropping
-  // 1,800 tokens of turns to add a 2,000-token summary is a net loss that also
-  // costs a model call and some of the user's context. The invariant the rest
-  // of the system relies on — and what the notice claims on screen — is that
-  // tokensAfter is lower than tokensBefore.
-  if (estimatedTokensAfter >= estimatedTokensBefore) {
-    return skipped("no-reduction");
-  }
+  // Over budget. Everything except the protected tail goes to the summariser.
+  const droppedTurnCount = Math.max(0, turns.length - minKeptTurns);
+  // Nothing to compact: an empty thread, or every turn protected. A single
+  // oversized message cannot be helped here — the current user turn is not in
+  // these rows, so it is never droppable.
+  if (droppedTurnCount === 0) return untouched("nothing-droppable");
 
   const cutIndex =
     droppedTurnCount < turns.length
@@ -775,15 +640,10 @@ export function planHistoryTrim<T extends BudgetMessage>(
     trimmed: true,
     kept: [...kept],
     dropped: [...dropped],
-    estimatedTokensBefore,
-    estimatedTokensAfter,
+    measuredPromptTokens: measured,
     budget,
-    target,
     droppedTurnCount,
     keptTurnCount: turns.length - droppedTurnCount,
     coversThroughMessageId: dropped[dropped.length - 1]?.id,
-    targetUnreachable: remainingHistoryTokens > historyTarget,
-    triggerSource,
-    triggerTokens,
   };
 }

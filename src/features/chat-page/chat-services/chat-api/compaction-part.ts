@@ -68,8 +68,9 @@ export type SummaryOutcome =
  * ## Why the token counts are optional
  *
  * They are REAL provider numbers, not estimates, and the real number for this
- * turn does not exist until the turn finishes: `tokensAfter` is this request's
- * `usage.inputTokens`. So the part is written twice under one id — first
+ * turn does not exist until the turn finishes: `tokensAfter` is the size of
+ * this request's LAST prompt (its final step's `usage.inputTokens`). So the
+ * part is written twice under one id — first
  * without counts ("Compacted 2 older turns into a summary"), then again at
  * stream end with them ("… (34,012 → 17,565 tokens)"). The AI SDK reconciles
  * data parts by `(type, id)`, so the line fills in rather than duplicating.
@@ -78,16 +79,30 @@ export type SummaryOutcome =
  * rejected: a number in the header that later disagrees with the provider's
  * own accounting is worse than no number for a few seconds.
  *
- * `tokensBefore` is the PREVIOUS request's real `inputTokens` for this thread.
- * On the first turn there is no previous request, so it stays absent and the
- * line shows only what the prompt is now.
+ * `tokensBefore` is the size of the PREVIOUS request's last prompt for this
+ * thread. On the first turn there is no previous request, so it stays absent
+ * and the line shows only what the prompt is now.
+ *
+ * ## Why both ends are prompt sizes and never the billed total
+ *
+ * AI SDK 7 sums step usage over a turn ("When there are multiple steps, the
+ * usage is the sum of all step usages"). A tool turn therefore BILLS several
+ * prompts while never sending more than one at a time. This notice claims the
+ * prompt got smaller, so both ends must be single-prompt sizes; feeding it the
+ * roll-up would let a 3-step turn report a trim that made the prompt grow.
  */
 export interface CompactionDoneData {
   status: "done";
   trimmedTurns: number;
-  /** Previous request's real `inputTokens`. Absent on a thread's first turn. */
+  /**
+   * Size of the previous request's LAST prompt. Absent on a thread's first
+   * turn.
+   */
   tokensBefore?: number;
-  /** This request's real `inputTokens`. Absent until the turn finishes. */
+  /**
+   * Size of this request's LAST prompt (its final step's `inputTokens`).
+   * Absent until the turn finishes.
+   */
   tokensAfter?: number;
   /**
    * Whether anything stands in for the dropped turns, and if not, why. The
@@ -123,11 +138,13 @@ export interface CompactionDataPart {
 export interface HistoryCompactionOutcome {
   trimmedTurns: number;
   /**
-   * The trim decision's own estimates. Logged and used for the trim maths;
-   * NEVER shown to the user, who sees the provider's real numbers instead.
+   * The measured prompt size that triggered this compaction — the provider's
+   * figure for the previous request's last prompt. Logged; the user sees the
+   * pair of real prompt sizes either side of the trim instead, which the route
+   * assembles once THIS turn finishes. Absent when the plan had no
+   * measurement, which cannot happen on a compacting turn.
    */
-  estimatedTokensBefore: number;
-  estimatedTokensAfter: number;
+  measuredPromptTokens?: number;
   summaryOutcome: SummaryOutcome;
   summaryModel?: string;
   durationMs: number;
@@ -186,9 +203,9 @@ export interface ThreadCompactionMarker {
   coversThroughMessageId: string;
   summaryText?: string;
   summaryModel?: string;
-  /** Real `inputTokens` of the request before the trim, if it was recorded. */
+  /** Real last-prompt size before the trim, if it was recorded. */
   realTokensBefore?: number;
-  /** Real `inputTokens` of the request after the trim. */
+  /** Real last-prompt size after the trim. */
   realTokensAfter?: number;
 }
 

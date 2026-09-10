@@ -3,8 +3,9 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 // ── Logger ────────────────────────────────────────────────────────────────────
 const logInfo = vi.fn();
 const logWarn = vi.fn();
+const logDebug = vi.fn();
 vi.mock("@/features/common/services/logger", () => ({
-  logDebug: vi.fn(),
+  logDebug: (...a: unknown[]) => logDebug(...(a as [])),
   logInfo: (...a: unknown[]) => logInfo(...(a as [])),
   logError: vi.fn(),
   logWarn: (...a: unknown[]) => logWarn(...(a as [])),
@@ -107,13 +108,25 @@ beforeEach(() => {
   delete process.env.HISTORY_PROTECTED_TURNS;
   mockFindSummary.mockClear();
   mockRecordCompaction.mockClear();
+  logInfo.mockClear();
+  logWarn.mockClear();
+  logDebug.mockClear();
 });
 
 // ---------------------------------------------------------------------------
 // Fixtures
 // ---------------------------------------------------------------------------
 
-function makeThread(id = "thread-001"): ChatThreadModel {
+/**
+ * A thread row. `lastPromptTokens` is the ONE input to the compaction
+ * decision: the provider's measured size of this thread's previous last
+ * prompt. Omitted means "no usage recorded yet", i.e. a first turn, and then
+ * nothing is ever compacted.
+ */
+function makeThread(
+  id = "thread-001",
+  lastPromptTokens?: number,
+): ChatThreadModel {
   return {
     id,
     createdAt: new Date("2026-01-01"),
@@ -126,7 +139,25 @@ function makeThread(id = "thread-001"): ChatThreadModel {
     extension: [],
     personaDocumentIds: [],
     attachedFiles: [],
+    ...(typeof lastPromptTokens === "number"
+      ? {
+          usage: {
+            totalInputTokens: lastPromptTokens,
+            totalOutputTokens: 0,
+            totalCachedTokens: 0,
+            totalCostUsd: 0,
+            lastUpdated: "2026-01-01T00:00:00.000Z",
+            lastInputTokens: lastPromptTokens,
+            lastPromptTokens,
+          },
+        }
+      : {}),
   } as unknown as ChatThreadModel;
+}
+
+/** A thread whose previous last prompt measured `tokens`. */
+function measured(tokens: number): { status: string; response: ChatThreadModel } {
+  return { status: "OK", response: makeThread("thread-001", tokens) };
 }
 
 function makeUserPrompt(threadId = "thread-001"): UserPrompt {
@@ -308,15 +339,19 @@ describe("chat-page.unit.thread-context.002 — the token budget trims once and 
     // change removes.
     process.env.HISTORY_TOKEN_BUDGET = "10000";
     summaryEnabled = true;
-    const rows = makeTurns(40, 500); // ~20,000 estimated tokens
-    mockEnsureThread.mockResolvedValue({ status: "OK", response: makeThread() });
+    const rows = makeTurns(40, 500);
+    mockEnsureThread.mockResolvedValue(measured(20_000));
     mockFindHistory.mockResolvedValue({ status: "OK", response: rows });
 
     const first = await loadThreadContext(makeUserPrompt());
     expect(mockRecordCompaction).toHaveBeenCalledTimes(1);
 
     // Second turn: the same rows come back from Cosmos (a trim deletes
-    // nothing) plus a new turn. The persisted watermark must absorb them.
+    // nothing) plus a new turn. The persisted watermark must absorb them —
+    // and the measurement the previous turn recorded is now the SMALL prompt
+    // the compaction produced, which is what stops a second compaction. No
+    // arithmetic in this module had to predict that; the provider measured it.
+    mockEnsureThread.mockResolvedValue(measured(2_500));
     mockFindHistory.mockResolvedValue({
       status: "OK",
       response: [...rows, ...makeTurns(1, 200)],
@@ -339,15 +374,17 @@ describe("chat-page.unit.thread-context.002 — the token budget trims once and 
     // data-compaction part.
     process.env.HISTORY_TOKEN_BUDGET = "10000";
     summaryEnabled = true;
-    const rows = makeTurns(40, 500); // ~20,000 estimated tokens
-    mockEnsureThread.mockResolvedValue({ status: "OK", response: makeThread() });
+    const rows = makeTurns(40, 500);
+    mockEnsureThread.mockResolvedValue(measured(20_000));
     mockFindHistory.mockResolvedValue({ status: "OK", response: rows });
 
     const ctx = await loadThreadContext(makeUserPrompt());
 
     expect(ctx.compaction).toBeDefined();
     expect(ctx.compaction!.trimmedTurns).toBeGreaterThan(0);
-    expect(ctx.compaction!.estimatedTokensAfter).toBeLessThan(ctx.compaction!.estimatedTokensBefore);
+    // The measurement that triggered it, carried for the log. No estimate of
+    // the result: the next request measures that for us.
+    expect(ctx.compaction!.measuredPromptTokens).toBe(20_000);
     expect(ctx.compaction!.summaryOutcome).toBe("ok");
     expect(ctx.compaction!.summaryText).toContain("the earlier turns said things");
     expect(ctx.compaction!.summaryModel).toBe("gpt-5.6-terra");
@@ -365,7 +402,7 @@ describe("chat-page.unit.thread-context.002 — the token budget trims once and 
     // from a trim taken while the feature was on.
     process.env.HISTORY_TOKEN_BUDGET = "10000";
     summaryEnabled = false;
-    mockEnsureThread.mockResolvedValue({ status: "OK", response: makeThread() });
+    mockEnsureThread.mockResolvedValue(measured(20_000));
     mockFindHistory.mockResolvedValue({
       status: "OK",
       response: makeTurns(40, 500),
@@ -401,7 +438,7 @@ describe("chat-page.unit.thread-context.002 — the token budget trims once and 
       estimatedTokens: 10,
       summaryOutcome: "failed",
     }));
-    mockEnsureThread.mockResolvedValue({ status: "OK", response: makeThread() });
+    mockEnsureThread.mockResolvedValue(measured(20_000));
     mockFindHistory.mockResolvedValue({
       status: "OK",
       response: makeTurns(40, 500),
@@ -414,53 +451,96 @@ describe("chat-page.unit.thread-context.002 — the token budget trims once and 
     expect(ctx.compaction!.summaryModel).toBeUndefined();
   });
 
-  it("logs an unreachable target at INFO on a small configured budget, WARN on the default", async () => {
-    // "Cannot reach target" now means the floor a trim cannot remove — the
-    // protected turns plus the summary's own allowance — is already above the
-    // target. With a deliberately small budget that happens routinely, and
-    // warning on every turn would train people to ignore the log. On the
-    // shipped default it means a genuine misconfiguration, worth a warning.
-    const unreachable = (calls: typeof logInfo.mock.calls) =>
+  it("logs nothing-droppable at INFO on a small configured budget, WARN on the default", async () => {
+    // Over budget with no history left that may be compacted. With a
+    // deliberately small budget and protected turns that happens routinely,
+    // and warning on every turn would train people to ignore the log. On the
+    // shipped default it means one turn is genuinely enormous.
+    const nothing = (calls: typeof logInfo.mock.calls) =>
       calls.filter((c) =>
-        String(c[0]).includes("trim cannot reach target"),
+        String(c[0]).includes("nothing can be compacted"),
       );
 
-    // Budget 1000 -> target 600, while the replacement summary alone is
-    // allowed 1500. No cut can get under it.
+    // Every turn protected, so there is nothing to hand the summariser.
     summaryEnabled = true;
     process.env.HISTORY_TOKEN_BUDGET = "1000";
-    mockEnsureThread.mockResolvedValue({ status: "OK", response: makeThread() });
+    process.env.HISTORY_PROTECTED_TURNS = "6";
+    mockEnsureThread.mockResolvedValue(measured(5_000));
     mockFindHistory.mockResolvedValue({ status: "OK", response: makeTurns(6, 800) });
 
     await loadThreadContext(makeUserPrompt());
 
-    expect(unreachable(logInfo.mock.calls)).toHaveLength(1);
-    expect(unreachable(logWarn.mock.calls)).toHaveLength(0);
-    expect(unreachable(logInfo.mock.calls)[0][1]).toMatchObject({
+    expect(nothing(logInfo.mock.calls)).toHaveLength(1);
+    expect(nothing(logWarn.mock.calls)).toHaveLength(0);
+    expect(nothing(logInfo.mock.calls)[0][1]).toMatchObject({
       budgetSource: "env",
-      skipReason: "cannot-reach-target",
+      skipReason: "nothing-droppable",
+      measuredPromptTokens: 5_000,
     });
-    // And no summariser call was spent on a trim that could not help.
+    // And no summariser call was spent on a compaction that could not help.
     expect(mockRecordCompaction).not.toHaveBeenCalled();
 
-    // The shipped default budget, with turns protected by configuration: the
-    // protected turns alone are over target, and that is a warning.
+    // The shipped default budget: a single turn over 256k with nothing behind
+    // it. That is a warning.
     logInfo.mockClear();
     logWarn.mockClear();
     delete process.env.HISTORY_TOKEN_BUDGET;
-    process.env.HISTORY_PROTECTED_TURNS = "2";
-    mockFindHistory.mockResolvedValue({
-      status: "OK",
-      response: makeTurns(2, 2_000_000),
-    });
+    delete process.env.HISTORY_PROTECTED_TURNS;
+    mockEnsureThread.mockResolvedValue(measured(600_000));
+    mockFindHistory.mockResolvedValue({ status: "OK", response: [] });
 
     await loadThreadContext(makeUserPrompt());
 
-    expect(unreachable(logWarn.mock.calls)).toHaveLength(1);
-    expect(unreachable(logInfo.mock.calls)).toHaveLength(0);
-    expect(unreachable(logWarn.mock.calls)[0][1]).toMatchObject({
+    expect(nothing(logWarn.mock.calls)).toHaveLength(1);
+    expect(nothing(logInfo.mock.calls)).toHaveLength(0);
+    expect(nothing(logWarn.mock.calls)[0][1]).toMatchObject({
       budgetSource: "default",
     });
+  });
+
+  it("does nothing, and says so at DEBUG, when the thread has no measurement yet", async () => {
+    // A thread's first turn, or a row written before `lastPromptTokens`
+    // existed. Nothing to compare against, so no compaction and no summariser
+    // call — however big the history looks.
+    process.env.HISTORY_TOKEN_BUDGET = "1000";
+    summaryEnabled = true;
+    mockEnsureThread.mockResolvedValue({ status: "OK", response: makeThread() });
+    mockFindHistory.mockResolvedValue({
+      status: "OK",
+      response: makeTurns(40, 500),
+    });
+
+    const ctx = await loadThreadContext(makeUserPrompt());
+
+    expect(ctx.compaction).toBeUndefined();
+    expect(mockRecordCompaction).not.toHaveBeenCalled();
+    expect(
+      logDebug.mock.calls.filter((c) =>
+        String(c[0]).includes("no measured prompt size yet"),
+      ),
+    ).toHaveLength(1);
+  });
+
+  it("falls back to the all-steps roll-up for a row written before lastPromptTokens", async () => {
+    // Old rows carry only `lastInputTokens`. It is exact for a single-step
+    // turn and overstates a multi-step one, so the fallback errs towards
+    // compacting — the safe direction.
+    process.env.HISTORY_TOKEN_BUDGET = "10000";
+    summaryEnabled = true;
+    const legacy = makeThread("thread-001", 20_000) as unknown as {
+      usage: Record<string, unknown>;
+    };
+    delete legacy.usage.lastPromptTokens;
+    mockEnsureThread.mockResolvedValue({ status: "OK", response: legacy });
+    mockFindHistory.mockResolvedValue({
+      status: "OK",
+      response: makeTurns(40, 500),
+    });
+
+    const ctx = await loadThreadContext(makeUserPrompt());
+
+    expect(ctx.compaction).toBeDefined();
+    expect(ctx.compaction!.measuredPromptTokens).toBe(20_000);
   });
 
   it("reports nothing when the thread fitted (negative)", async () => {
@@ -480,7 +560,7 @@ describe("chat-page.unit.thread-context.002 — the token budget trims once and 
   it("passes the newest dropped row as the watermark", async () => {
     process.env.HISTORY_TOKEN_BUDGET = "10000";
     const rows = makeTurns(40, 500);
-    mockEnsureThread.mockResolvedValue({ status: "OK", response: makeThread() });
+    mockEnsureThread.mockResolvedValue(measured(20_000));
     mockFindHistory.mockResolvedValue({ status: "OK", response: rows });
 
     await loadThreadContext(makeUserPrompt());
@@ -496,8 +576,9 @@ describe("chat-page.unit.thread-context.002 — the token budget trims once and 
 
   it("cuts at a turn boundary, so the oldest surviving row is a user row", async () => {
     process.env.HISTORY_TOKEN_BUDGET = "10000";
+    process.env.HISTORY_PROTECTED_TURNS = "3";
     const rows = makeTurns(40, 500);
-    mockEnsureThread.mockResolvedValue({ status: "OK", response: makeThread() });
+    mockEnsureThread.mockResolvedValue(measured(20_000));
     mockFindHistory.mockResolvedValue({ status: "OK", response: rows });
 
     const ctx = await loadThreadContext(makeUserPrompt());
@@ -532,7 +613,7 @@ describe("chat-page.unit.thread-context.007 — one compaction, not a loop", () 
   it("compacts exactly ONCE across five consecutive loads", async () => {
     process.env.HISTORY_TOKEN_BUDGET = "12000";
     summaryEnabled = true;
-    mockEnsureThread.mockResolvedValue({ status: "OK", response: makeThread() });
+    mockEnsureThread.mockResolvedValue(measured(15_400));
 
     const rows = pasteThread();
     mockFindHistory.mockResolvedValue({ status: "OK", response: rows });
@@ -541,13 +622,13 @@ describe("chat-page.unit.thread-context.007 — one compaction, not a loop", () 
     expect(first.compaction).toBeDefined();
     expect(mockRecordCompaction).toHaveBeenCalledTimes(1);
     // The point of protecting nothing: the expensive turn is the one that goes.
-    expect(first.compaction!.estimatedTokensAfter).toBeLessThanOrEqual(
-      Math.floor(12_000 * 0.6),
-    );
+    expect(first.compaction!.trimmedTurns).toBe(5);
 
-    // Four more turns. A trim deletes nothing from Cosmos, so the same rows
-    // come back every time plus a new small turn; the watermark is what has to
-    // absorb them.
+    // Four more turns. A compaction deletes nothing from Cosmos, so the same
+    // rows come back every time plus a new small turn; the watermark absorbs
+    // them, and the measurement the compacting turn recorded is the small
+    // prompt it produced.
+    mockEnsureThread.mockResolvedValue(measured(2_000));
     let grown = rows;
     for (let i = 0; i < 4; i++) {
       grown = [...grown, ...makeTurns(1, 100)];
@@ -560,22 +641,25 @@ describe("chat-page.unit.thread-context.007 — one compaction, not a loop", () 
     expect(mockRecordCompaction).toHaveBeenCalledTimes(1);
   });
 
-  it("counts the summary against the budget, so small turns do not re-trigger", async () => {
-    // Hysteresis has to include the replayed summary: it is really in the
-    // prompt, so a thread that is just under budget with it must not tip over
-    // on the next small turn and trim again.
+  it("does not compact again while the measured prompt stays under budget", async () => {
+    // The replayed summary is really in the prompt, so the provider measures
+    // it along with everything else. Nothing here has to model that — the
+    // number already includes it.
     process.env.HISTORY_TOKEN_BUDGET = "12000";
     summaryEnabled = true;
-    mockEnsureThread.mockResolvedValue({ status: "OK", response: makeThread() });
+    mockEnsureThread.mockResolvedValue(measured(15_400));
 
     let rows = pasteThread();
     mockFindHistory.mockResolvedValue({ status: "OK", response: rows });
     await loadThreadContext(makeUserPrompt());
     expect(mockRecordCompaction).toHaveBeenCalledTimes(1);
 
-    // Ten small turns on top: still under budget WITH the summary counted.
+    // Ten small turns on top. The measurement climbs but stays under budget.
+    let promptTokens = 2_000;
     for (let i = 0; i < 10; i++) {
       rows = [...rows, ...makeTurns(1, 100)];
+      promptTokens += 200;
+      mockEnsureThread.mockResolvedValue(measured(promptTokens));
       mockFindHistory.mockResolvedValue({ status: "OK", response: rows });
       const ctx = await loadThreadContext(makeUserPrompt());
       expect(ctx.compaction).toBeUndefined();
@@ -590,7 +674,7 @@ describe("chat-page.unit.thread-context.007 — one compaction, not a loop", () 
     process.env.HISTORY_TOKEN_BUDGET = "12000";
     process.env.HISTORY_PROTECTED_TURNS = "2";
     summaryEnabled = true;
-    mockEnsureThread.mockResolvedValue({ status: "OK", response: makeThread() });
+    mockEnsureThread.mockResolvedValue(measured(15_400));
 
     // The same rows come back on every load — which is exactly what happened
     // live, because the user's new message is not in history yet and a trim
@@ -615,7 +699,7 @@ describe("chat-page.unit.thread-context.007 — one compaction, not a loop", () 
     // order, and the read order is the kind of thing that gets refactored.
     process.env.HISTORY_TOKEN_BUDGET = "12000";
     summaryEnabled = true;
-    mockEnsureThread.mockResolvedValue({ status: "OK", response: makeThread() });
+    mockEnsureThread.mockResolvedValue(measured(15_400));
     mockFindHistory.mockResolvedValue({
       status: "OK",
       response: pasteThread(),

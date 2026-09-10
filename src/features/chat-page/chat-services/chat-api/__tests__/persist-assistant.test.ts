@@ -162,6 +162,10 @@ describe("persistThread — usage counters", () => {
       // Cache writes are persisted too, so the header's cache row survives a
       // reload instead of folding the writes into "plain".
       0,
+      // The last step's own prompt size. Undefined here: this payload carries
+      // no step information, so nothing is persisted and readers fall back to
+      // the turn total.
+      undefined,
     );
   });
 });
@@ -183,6 +187,7 @@ describe("persistThread — cache-write tokens", () => {
         outputTokens: 500,
         cachedTokens: 6_000,
         cacheWriteTokens: 3_000,
+        lastPromptTokens: 4_100,
       },
     });
 
@@ -201,6 +206,9 @@ describe("persistThread — cache-write tokens", () => {
       6_000,
       expectedCost,
       3_000,
+      // Cost is billed off the TURN TOTALS above; the last step's own prompt
+      // size travels beside them, and is much smaller on a multi-step turn.
+      4_100,
     );
   });
 
@@ -235,6 +243,7 @@ describe("persistThread — cache-write tokens", () => {
       6_000,
       expectedCost,
       3_000,
+      undefined,
     );
   });
 

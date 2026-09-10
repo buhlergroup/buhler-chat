@@ -46,8 +46,6 @@ import {
   planHistoryTrim,
   resolveHistoryBudget,
   resolveHistoryProtectedTurns,
-  resolveHistoryTrimTargetRatio,
-  SUMMARY_TOKEN_RESERVE,
 } from "./history-budget";
 import {
   formatSummaryReplayText,
@@ -234,8 +232,13 @@ async function compactHistory(input: {
   threadId: string;
   selectedModel: ChatThreadModel["selectedModel"];
   rows: ChatMessageModel[];
-  /** Real `inputTokens` of the thread's previous request, if recorded. */
-  threadUsageLastInputTokens?: number;
+  /**
+   * Size of the LAST PROMPT of the thread's previous request, if recorded —
+   * the ONE input to the compaction decision. A prompt size, not the billed
+   * all-steps sum. Absent on a first turn or an old row, and then nothing is
+   * compacted. See `TrimPlanOptions.measuredPromptTokens`.
+   */
+  threadUsageLastPromptTokens?: number;
 }): Promise<{
   rows: ChatMessageModel[];
   summary: ChatHistorySummaryModel | null;
@@ -283,71 +286,66 @@ async function compactHistory(input: {
     cappedByGuard: budgetDecision.cappedByGuard,
   });
 
-  // The provider's real prompt size for this thread's PREVIOUS request, when
-  // one was recorded. It decides whether we are over budget; the estimator
-  // still decides how many turns to drop. See TrimPlanOptions.
-  const measuredTokensBefore = input.threadUsageLastInputTokens;
+  // The ONE input to the decision: the provider's measured size of this
+  // thread's PREVIOUS last prompt. Over budget means compact the history and
+  // start again; there is nothing else to work out and nothing to estimate.
+  //
+  // This is the previous turn's LAST-STEP input, not its billed roll-up. AI
+  // SDK 7 sums step usage over a turn, so the roll-up counted one prompt per
+  // step: measured on dev, a thread reported 285,647 against a 256,000 budget
+  // while its real prompt was about half that, and compacted a thread that was
+  // never over budget.
+  const measuredPromptTokens = input.threadUsageLastPromptTokens;
 
   const plan = planHistoryTrim(retained, {
     budget,
-    targetRatio: resolveHistoryTrimTargetRatio({
-      envRatio: process.env.HISTORY_TRIM_TARGET_RATIO,
-    }),
     minKeptTurns: resolveHistoryProtectedTurns({
       envProtectedTurns: process.env.HISTORY_PROTECTED_TURNS,
     }),
-    existingSummaryTokens: existingSummary?.estimatedTokens ?? 0,
-    summaryReserveTokens: summaryEnabled ? SUMMARY_TOKEN_RESERVE : 0,
-    ...(typeof measuredTokensBefore === "number"
-      ? { measuredTokensBefore }
+    ...(typeof measuredPromptTokens === "number"
+      ? { measuredPromptTokens }
       : {}),
   });
 
   if (!plan.trimmed) {
-    if (plan.skipReason === "no-reduction") {
-      // The cut would have landed under target, but the replacement summary
-      // costs as much as the turns it replaces. Trimming would have deleted
-      // context, spent a model call, and left the prompt the same size — this
-      // is the guard against the "compacted 17k -> 19k" loop.
-      logInfo("thread-context: skipped a trim that would not shrink the prompt", {
+    if (plan.skipReason === "no-measurement") {
+      // No recorded prompt size for this thread: its first turn, or a row
+      // written before `lastPromptTokens` existed. Nothing to compare against,
+      // so nothing is compacted and no summariser call is spent — and an
+      // oversized first message could not be helped anyway, because the
+      // current user turn is never droppable. DEBUG: once per new thread.
+      logDebug("thread-context: no measured prompt size yet, not compacting", {
         threadId: input.threadId,
-        triggerSource: plan.triggerSource,
-        triggerTokens: plan.triggerTokens,
-        estimatedTokens: plan.estimatedTokensBefore,
         budget: plan.budget,
-        target: plan.target,
+        turnCount: plan.keptTurnCount,
+        skipReason: plan.skipReason,
       });
-      return {
-        rows: plan.kept,
-        summary: summaryWithContent(existingSummary),
-        compaction: undefined,
-      };
-    }
-    if (plan.targetUnreachable) {
-      // Over budget with nothing left that may be dropped: the surviving turns
-      // alone exceed the target. Nothing to do but let it through — the
-      // alternative is trimming the question being answered.
+    } else if (plan.skipReason === "nothing-droppable") {
+      // Over budget with no history to compact: an empty thread, or every turn
+      // protected by HISTORY_PROTECTED_TURNS. Nothing to do but let it through
+      // — the alternative is dropping the question being answered.
       //
-      // WARN only when the budget is the shipped default, where it means one
+      // WARN only when the budget is the shipped default, where this means one
       // turn is genuinely enormous. With a deliberately small budget (a test
-      // environment set to 10k, say) the two protected turns exceed the target
-      // routinely, and warning on every turn of every thread would train
-      // people to ignore the log.
+      // environment set to 10k, say) it happens routinely, and warning on
+      // every turn of every thread would train people to ignore the log.
       const budgetIsDefault = budgetDecision.baseSource === "default";
       const log = budgetIsDefault ? logWarn : logInfo;
-      log("thread-context: history over budget, trim cannot reach target", {
+      log("thread-context: prompt over budget but nothing can be compacted", {
         threadId: input.threadId,
-        triggerSource: plan.triggerSource,
-        triggerTokens: plan.triggerTokens,
-        estimatedTokens: plan.estimatedTokensBefore,
+        measuredPromptTokens: plan.measuredPromptTokens,
         budget: plan.budget,
-        target: plan.target,
         budgetSource: budgetDecision.baseSource,
         turnCount: plan.keptTurnCount,
+        protectedTurns: resolveHistoryProtectedTurns({
+          envProtectedTurns: process.env.HISTORY_PROTECTED_TURNS,
+        }),
         // No summariser call is spent and no notice is shown: nothing happened.
         skipReason: plan.skipReason,
       });
     }
+    // "under-budget" is the ordinary outcome of almost every turn and is not
+    // logged at all.
     return {
       rows: plan.kept,
       summary: summaryWithContent(existingSummary),
@@ -355,14 +353,10 @@ async function compactHistory(input: {
     };
   }
 
-  logInfo("thread-context: trimmed history to token budget", {
+  logInfo("thread-context: compacted history, the thread starts again", {
     threadId: input.threadId,
     budget: plan.budget,
-    target: plan.target,
-    triggerSource: plan.triggerSource,
-    triggerTokens: plan.triggerTokens,
-    estimatedTokensBefore: plan.estimatedTokensBefore,
-    estimatedTokensAfter: plan.estimatedTokensAfter,
+    measuredPromptTokens: plan.measuredPromptTokens,
     droppedTurnCount: plan.droppedTurnCount,
     keptTurnCount: plan.keptTurnCount,
     droppedMessageCount: plan.dropped.length,
@@ -396,10 +390,12 @@ async function compactHistory(input: {
   const summarised = summaryOutcome === "ok" && summaryContent.length > 0;
   const compaction: HistoryCompactionOutcome = {
     trimmedTurns: plan.droppedTurnCount,
-    // Estimates, for the log and the trim maths. What the user sees are the
-    // provider's real numbers, written by the route once the turn finishes.
-    estimatedTokensBefore: plan.estimatedTokensBefore,
-    estimatedTokensAfter: plan.estimatedTokensAfter,
+    // The measurement that triggered this compaction. What the USER sees are
+    // the provider's real prompt sizes either side of the trim, written by the
+    // route once this turn finishes.
+    ...(typeof plan.measuredPromptTokens === "number"
+      ? { measuredPromptTokens: plan.measuredPromptTokens }
+      : {}),
     summaryOutcome,
     durationMs,
     ...(summarised && recorded?.model ? { summaryModel: recorded.model } : {}),
@@ -596,12 +592,14 @@ export interface ThreadContext {
    */
   compaction: HistoryCompactionOutcome | undefined;
   /**
-   * The provider's real `inputTokens` for this thread's PREVIOUS request, read
-   * before this turn overwrites it. The route pairs it with this request's own
-   * `inputTokens` so the compaction notice can state what the prompt actually
-   * went from and to. Undefined on a thread's first turn.
+   * The size of the LAST PROMPT of this thread's PREVIOUS request, read before
+   * this turn overwrites it. The route pairs it with this request's own
+   * last-prompt size so the compaction notice can state what the prompt
+   * actually went from and to — both ends are prompt sizes, never the billed
+   * all-steps roll-up, which on a tool turn counts one conversation several
+   * times over. Undefined on a thread's first turn.
    */
-  previousRequestInputTokens: number | undefined;
+  previousRequestPromptTokens: number | undefined;
 }
 
 // ---------------------------------------------------------------------------
@@ -668,9 +666,17 @@ export async function loadThreadContext(
     // Recorded by UpdateChatThreadUsage at the end of the previous turn, so
     // this is that request's real prompt size — read here BEFORE this turn
     // overwrites it.
-    ...(typeof thread.usage?.lastInputTokens === "number"
-      ? { threadUsageLastInputTokens: thread.usage.lastInputTokens }
-      : {}),
+    //
+    // `lastPromptTokens` is the last step's own input. Rows written before
+    // that field existed only have `lastInputTokens`, the all-steps roll-up:
+    // exact for a single-step turn, and an OVERSTATEMENT of a multi-step one
+    // by roughly the number of steps. Falling back to it keeps old threads
+    // working and errs towards trimming, which is the safe direction.
+    ...(typeof thread.usage?.lastPromptTokens === "number"
+      ? { threadUsageLastPromptTokens: thread.usage.lastPromptTokens }
+      : typeof thread.usage?.lastInputTokens === "number"
+        ? { threadUsageLastPromptTokens: thread.usage.lastInputTokens }
+        : {}),
   });
 
   const history = await resolveHistoryFileRefs(
@@ -844,6 +850,9 @@ export async function loadThreadContext(
     attachedFiles: thread.attachedFiles ?? [],
     turnId,
     compaction,
-    previousRequestInputTokens: thread.usage?.lastInputTokens,
+    // Same last-step-first, roll-up-as-fallback rule as the budget input
+    // above: both describe the size of a prompt.
+    previousRequestPromptTokens:
+      thread.usage?.lastPromptTokens ?? thread.usage?.lastInputTokens,
   };
 }
