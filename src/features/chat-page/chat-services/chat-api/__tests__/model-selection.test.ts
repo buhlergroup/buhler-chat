@@ -274,3 +274,81 @@ describe("resolveModelAndLimits — cap downgrade respects vision capability", (
     expect(result.selectedModel).not.toBe(VISIONLESS);
   });
 });
+
+// ---------------------------------------------------------------------------
+// Reasoning-effort resolution
+// ---------------------------------------------------------------------------
+
+describe("resolveModelAndLimits — reasoning effort", () => {
+  it("uses the effective model's default when the user picked nothing", async () => {
+    const thread = makeThread({ selectedModel: PINNED_MODEL });
+    const result = await resolveModelAndLimits({}, thread);
+    expect(result.effectiveReasoningEffort).toBe(
+      MODEL_CONFIGS[PINNED_MODEL].defaultReasoningEffort,
+    );
+  });
+
+  it("lets an explicit user pick win over the model default", async () => {
+    const thread = makeThread({ selectedModel: PINNED_MODEL });
+    const result = await resolveModelAndLimits(
+      { reasoningEffort: "high" },
+      thread,
+    );
+    expect(result.effectiveReasoningEffort).toBe("high");
+  });
+
+  it("applies REASONING_EFFORT_OVERRIDES for the model that actually runs", async () => {
+    const { resetReasoningEffortOverridesCache } = await import(
+      "../../models/reasoning-effort"
+    );
+    const saved = process.env.REASONING_EFFORT_OVERRIDES;
+    process.env.REASONING_EFFORT_OVERRIDES = JSON.stringify({
+      [PINNED_MODEL]: "high",
+    });
+    resetReasoningEffortOverridesCache();
+    try {
+      const thread = makeThread({ selectedModel: PINNED_MODEL });
+      const result = await resolveModelAndLimits({}, thread);
+      expect(result.effectiveReasoningEffort).toBe("high");
+    } finally {
+      if (saved === undefined) delete process.env.REASONING_EFFORT_OVERRIDES;
+      else process.env.REASONING_EFFORT_OVERRIDES = saved;
+      resetReasoningEffortOverridesCache();
+    }
+  });
+
+  it("resolves the effort of the DOWNGRADED model, not the one the user asked for", async () => {
+    const { resetReasoningEffortOverridesCache } = await import(
+      "../../models/reasoning-effort"
+    );
+    const saved = process.env.REASONING_EFFORT_OVERRIDES;
+    // Override only the downgrade TARGET. Resolving the effort before the
+    // downgrade (the old order) would miss this entirely.
+    process.env.REASONING_EFFORT_OVERRIDES = JSON.stringify({
+      [PINNED_MODEL]: "minimal",
+    });
+    resetReasoningEffortOverridesCache();
+    // The CheckLimits mock's inferred return type is the narrow
+    // `{ exceeded: boolean }`; widen for the exceeded shape.
+    mockCheckLimits.mockResolvedValue({
+      exceeded: true,
+      fallbackModel: PINNED_MODEL,
+      limitType: "tokens",
+      currentUsage: 50_000,
+      limit: 40_000,
+    } as unknown as { exceeded: boolean });
+    try {
+      const thread = makeThread({ selectedModel: "gpt-5.5" });
+      const result = await resolveModelAndLimits(
+        { selectedModel: "gpt-5.5" },
+        thread,
+      );
+      expect(result.selectedModel).toBe(PINNED_MODEL);
+      expect(result.effectiveReasoningEffort).toBe("minimal");
+    } finally {
+      if (saved === undefined) delete process.env.REASONING_EFFORT_OVERRIDES;
+      else process.env.REASONING_EFFORT_OVERRIDES = saved;
+      resetReasoningEffortOverridesCache();
+    }
+  });
+});

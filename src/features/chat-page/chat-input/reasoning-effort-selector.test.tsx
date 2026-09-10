@@ -95,3 +95,58 @@ describe("chat-page.unit.components.003 — ReasoningEffortSelector", () => {
     );
   });
 });
+
+describe("chat-page.unit.components.003b — ReasoningEffortSelector follows the model", () => {
+  it("does not offer Minimal for a model whose provider rejects it", async () => {
+    const onChange = vi.fn();
+    const user = userEvent.setup();
+    const { baseElement } = render(
+      <ReasoningEffortSelector
+        value="low"
+        onChange={onChange}
+        showReasoningModelsOnly
+        modelId="gpt-5.6-terra"
+      />
+    );
+
+    await user.click(screen.getByRole("combobox"));
+
+    expect(baseElement.textContent).toContain("Low");
+    expect(baseElement.textContent).toContain("Medium");
+    expect(baseElement.textContent).toContain("High");
+    // Measured 400 on the dev deployment; selecting it pinned a dead value on
+    // the thread, so it must not be reachable.
+    expect(baseElement.textContent).not.toContain("Minimal");
+  });
+
+  it("still offers Minimal for a model that declares no level list", async () => {
+    const onChange = vi.fn();
+    const user = userEvent.setup();
+    const { baseElement } = render(
+      <ReasoningEffortSelector
+        value="low"
+        onChange={onChange}
+        showReasoningModelsOnly
+        modelId="gpt-5.4"
+      />
+    );
+
+    await user.click(screen.getByRole("combobox"));
+    expect(baseElement.textContent).toContain("Minimal");
+  });
+
+  it("displays the clamped level for a thread that stored an unsupported one", () => {
+    // The server clamps to "low", so showing the stored "minimal" would tell
+    // the user something untrue about the turn they are about to send.
+    const onChange = vi.fn();
+    render(
+      <ReasoningEffortSelector
+        value="minimal"
+        onChange={onChange}
+        showReasoningModelsOnly
+        modelId="gpt-5.6-sol"
+      />
+    );
+    expect(screen.getByRole("combobox").textContent).toContain("Low");
+  });
+});

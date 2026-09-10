@@ -62,16 +62,32 @@ describe("getBudgetConfig", () => {
 });
 
 describe("getDowngradeTargets — hardCapSet", () => {
-  it("includes flagged+deployed models, sorted cheapest-first by output price", () => {
-    // output prices: DeepSeek 1.20 < Kimi 2.50 < luna 6.00
+  it("includes flagged+deployed models, sorted cheapest-first by output then input price", () => {
+    // Output prices: luna 1.20 = DeepSeek 1.20 < Kimi 2.50. luna and DeepSeek
+    // tie on output, so the input price breaks it: luna 0.20 < DeepSeek 0.30.
     const { hardCapSet } = getDowngradeTargets();
-    expect(hardCapSet).toEqual(["DeepSeek-V4-Pro", "Kimi-K2.6", "gpt-5.6-luna"]);
+    expect(hardCapSet).toEqual(["gpt-5.6-luna", "DeepSeek-V4-Pro", "Kimi-K2.6"]);
+  });
+
+  it("orders ties by price, not by MODEL_CONFIGS declaration order", () => {
+    // Regression guard: with output-price-only sorting this set depended on
+    // the order of the MODEL_CONFIGS object literal.
+    const { hardCapSet } = getDowngradeTargets();
+    const priced = hardCapSet.map((id) => [
+      MODEL_CONFIGS[id].pricing.outputPerMillion,
+      MODEL_CONFIGS[id].pricing.inputPerMillion,
+    ]);
+    for (let i = 1; i < priced.length; i++) {
+      const [prevOut, prevIn] = priced[i - 1];
+      const [out, input] = priced[i];
+      expect(prevOut < out || (prevOut === out && prevIn <= input)).toBe(true);
+    }
   });
 
   it("excludes eligible models that are not deployed", () => {
     (MODEL_CONFIGS["DeepSeek-V4-Pro"] as any).deploymentName = undefined;
     const { hardCapSet } = getDowngradeTargets();
-    expect(hardCapSet).toEqual(["Kimi-K2.6", "gpt-5.6-luna"]);
+    expect(hardCapSet).toEqual(["gpt-5.6-luna", "Kimi-K2.6"]);
   });
 
   it("env allow-list constrains AND reorders the set", () => {

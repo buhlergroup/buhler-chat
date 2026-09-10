@@ -223,20 +223,25 @@ This is the largest feature folder with complex state management and streaming.
   - `UpdateChatThreadReasoningEffort(threadId, effort)` → Change reasoning effort
   - `AddExtensionToChatThread(threadId, extensionId)` → Attach extension
   - `RemoveExtensionFromChatThread(threadId, extensionId)` → Detach extension
-  - `UpdateChatThreadUsage(threadId, usage)` → Track token usage
+  - `UpdateChatThreadUsage(threadId, inputTokens, outputTokens, cachedTokens, costUsd, cacheWriteTokens, lastPromptTokens)` → Track token usage. The first five are TURN TOTALS (summed over every step of the turn — what was billed); `lastPromptTokens` is the different quantity, the size of the turn's LAST prompt, which is what the context row and the compaction decision read
   - `EnsureChatThreadOperation(threadId)` → Validates thread ownership
 
 **Chat Messages:**
 - `chat-services/chat-message-service.ts`
-  - `FindTopChatMessagesForCurrentUser(threadId, top)` → Load message history
-  - `FindAllChatMessagesForCurrentUser(threadId)` → Get all messages
+  - `FindTopChatMessagesForCurrentUser(threadId, top)` → Newest N rows (default 30). NOT used by the chat path any more — the row cap made the prompt prefix slide on every turn past row 30
+  - `FindAllChatMessagesForCurrentUser(threadId)` → The whole thread, `createdAt ASC`, then put into a total order by `sortHistoryRowsDeterministically`. This is what the chat path loads
   - `CreateChatMessage(message)` → Save new message
   - `UpsertChatMessage(message)` → Create/update message
   - `DeleteChatMessage(messageId)` → Soft delete message
 
+**History Ordering:**
+- `chat-services/chat-history-order.ts`
+  - `sortHistoryRowsDeterministically(rows)` — Total order over `(createdAt, sequence, id)`. `ORDER BY createdAt` alone is not total: parallel tool calls persist in the same millisecond and Cosmos leaves their order undefined, so two reads of one thread could differ and move the prompt prefix
+  - **Tests:** `chat-services/chat-history-order.test.ts` (Vitest)
+
 **Chat Documents:**
 - `chat-services/chat-document-service.ts`
-  - `FindAllChatDocuments(threadId)` → List attached documents
+  - `FindAllChatDocuments(threadId)` → List attached documents, `ORDER BY createdAt ASC` so the names in the prompt cannot reshuffle
   - `DeleteAllChatDocuments(threadId)` → Remove documents from thread
 
 **Code Interpreter:**
@@ -306,10 +311,40 @@ This is the largest feature folder with complex state management and streaming.
 
 **Prompt Building (with tests):**
 - `chat-services/chat-api/prompt-builder.ts`
-  - `buildSystemMessage(inputs)` — Assembles cache-stable system prompt
+  - `buildSystemMessage(inputs)` — Assembles the cache-stable developer message: `staticSystemPrompt → personaMessage → trailingStaticBlock → documentHint`
   - `isoDate(now)` — ISO-8601 date formatting (locale-independent)
   - `sortFunctionTools(tools)` — Sorts tools by name for cache key stability
+  - `withAnthropicPromptCache(system, messages)` — Two `cache_control` breakpoints (system prefix + latest turn) for the Azure /anthropic Messages API; always applied, since Claude caches nothing without one
+  - `withPromptCacheBreakpoint(system, messages)` — The same provider-neutral "the reusable prefix ends here" breakpoint in the Responses-seam wire form (`providerOptions.openai.promptCacheBreakpoint {mode:"explicit"}`); gated by `PROMPT_CACHE_PERSONA_BREAKPOINT`, which is a no-op on Anthropic
   - **Tests:** `chat-services/chat-api/prompt-builder.test.ts` (Vitest)
+
+**Compaction Notice (with tests):**
+- `chat-services/chat-api/compaction-part.ts` — Pure, client-safe. The `data-compaction` wire contract shared by the route, the transcript and the thread loader, plus the copy derived from it
+  - `compactionRunningPart` / `compactionDonePart` — Both phases, one stable part id so a later write replaces the earlier notice
+  - `threadCompactionMarker(row)` / `compactionMarkerPlacement({marker, messages})` — The persisted divider: what it renders, and the message it is drawn after (`coversThroughMessageId`), with the turn count derived from the transcript
+  - `compactionNoticeText` / `compactionMarkerText` / `formatTokenCount` — The words on screen
+  - **Tests:** `chat-services/chat-api/compaction-part.test.ts` (Vitest)
+- `chat-page/compaction-notice.tsx` — `CompactionNotice` (streamed part: running / done / trimmed-without-summary) and `CompactionMarker` (persisted divider). Muted centred row, `Collapsible` "Show summary"
+  - **Tests:** `chat-page/compaction-notice.test.tsx` (Vitest + testing-library)
+
+**History Budget & Summarisation (with tests):**
+- `chat-services/chat-api/history-budget.ts` — Pure. Turn segmentation, watermark, and the compaction decision. **Nothing is estimated:** the decision has ONE input, the provider's measured size of the previous request's last prompt (`ThreadUsage.lastPromptTokens` — the LAST step's `inputTokens`, never the all-steps roll-up). Over budget compacts the history and the thread starts again; there is no target, no per-turn token accounting and no tokenizer heuristic anywhere in the path
+  - `estimateTextTokens` — the only estimator left, and it decides nothing: the summary writer stamps an informational size on the row it persists
+  - `splitIntoTurns(messages)` — A turn opens at every user row; carries the index span and no token figure
+  - `applyHistoryWatermark(messages, coversThroughMessageId)` — Makes a compaction stick instead of sliding forward a turn per turn
+  - `planHistoryTrim(messages, { budget, minKeptTurns, measuredPromptTokens })` — The compaction decision. `measuredPromptTokens > budget` → drop everything before the newest `minKeptTurns` turns. Self-correcting: the next request measures the result, so a compaction that was not enough simply compacts again
+  - `resolveHistoryBudget(input)` — The whole budget decision, with the source of every number for logging: base budget (env `HISTORY_TOKEN_BUDGET` > per-model `historyTokenBudget` > 256 000 default) bounded by the model guard (`longContextThresholdTokens − reserve`, else 60 % of `contextWindow`, else none)
+  - `resolveHistoryTokenBudget` / `resolveHistoryLongContextReserve` / `resolveHistoryProtectedTurns` — The effective budget only, the reserve (`HISTORY_LONG_CONTEXT_RESERVE`, default 16 000), and the protected-turn count (`HISTORY_PROTECTED_TURNS`, **default 0** — every persisted turn is eligible; the current user message is not in these rows at all)
+  - `skipReason` says why a thread was left alone: `"no-measurement"` (a first turn, or a row written before `lastPromptTokens` — nothing is compacted and no summariser call is spent), `"under-budget"` (the ordinary case), `"nothing-droppable"` (over budget with no history to compact — an oversized current message cannot be helped, because the current turn is never droppable)
+  - **Tests:** `chat-services/chat-api/history-budget.test.ts` (Vitest)
+- `chat-services/chat-api/history-summary.ts` — Pure. Row shape, summariser prompt, replay text
+  - **Tests:** `chat-services/chat-api/history-summary.test.ts` (Vitest)
+- `chat-services/chat-api/history-summary-service.ts` — Cosmos read/write of the compaction row plus the summariser call (injectable; unit tests never reach a model). Gated by `HISTORY_SUMMARY_ENABLED`. `resolveHistorySummaryModel` picks a MODEL (`HISTORY_SUMMARY_DEPLOYMENT_NAME` > the thread's own model > terra > luna > titles) and the call goes through `resolveProvider` + `generateText` — the same seam as the chat route, because the legacy Azure chat-completions client 404s on the 5.6 deployments. Reports `historySummaryTokens`; never touches the user's cost cap. Every failure is a reason code (`ok`/`off`/`failed`/`timeout`/`no-deployment`) on the row and on the UI part
+  - `FindChatHistorySummary` / `UpsertChatHistorySummary` / `SoftDeleteChatHistorySummary`
+  - `recordHistoryCompaction(input)` — Advances the watermark; summarises when enabled
+  - **Tests:** `chat-services/chat-api/history-summary-service.test.ts` (Vitest)
+- **Append-only invariant:** `chat-services/chat-api/__tests__/history-append-only.test.ts` — The model-message list for turn n must be an exact item-by-item prefix of turn n+1 (developer message included). Compaction is the only sanctioned exception
+- **Step-layout seam:** the same suite also pins the join between the two halves of this change set — `stepLayout` and `sequence`, written by `persist-assistant.ts`, must survive `FindAllChatMessagesForCurrentUser` and replay through `message-adapter.ts` in the live step shape, and the `CHAT_HISTORY_SUMMARY` row must stay invisible to both
 
 **Utilities:**
 - `chat-services/utils.ts`
@@ -1173,7 +1208,13 @@ src/__tests__/
 | Extensions | `features/extensions-page/extension-services/extension-service.ts` | `CreateExtension()`, `FindAllExtensionForCurrentUser()` |
 | Prompts | `features/prompt-page/prompt-service.ts` | `CreatePrompt()`, `FindAllPromptForCurrentUser()` |
 | Usage | `features/common/services/usage-service.ts` | `GetDailyUsage()`, `CheckLimits()` |
-| Models | `features/chat-page/chat-services/models.ts` | `MODEL_CONFIGS`, `ChatModel`, `ChatThreadModel` |
+| Models | `features/chat-page/chat-services/models.ts` | `MODEL_CONFIGS`, `ChatModel`, `ChatThreadModel`, `DEFAULT_MODEL`, `resolveDefaultModel()` |
+| Provider seam | `features/chat-page/chat-services/models/provider-seam.ts` | `resolveProvider()` — model + built-in tools + providerOptions |
+| Prompt-cache key | `features/chat-page/chat-services/models/prompt-cache-key.ts` | `resolvePromptCacheKey()`, `toolsetSignature()`, `shardForUser()` |
+| Reasoning effort | `features/chat-page/chat-services/models/reasoning-effort.ts` | `resolveReasoningEffort()`, `parseReasoningEffortOverrides()` |
+| Tool order | `features/chat-page/chat-services/tools/stabilize-toolset.ts` | `stabilizeToolset()`, `compareByCodepoint()` |
+| Code-interpreter container | `features/chat-page/chat-services/code-interpreter-container.ts` | `ensureCodeInterpreterContainer()` |
+| Usage / cost | `features/chat-page/chat-services/chat-api/usage-data.ts` | `computeTokenCostUsd()`, `computeRequestUsage()` — keeps TURN TOTALS (billing, the cache split) apart from `lastPromptTokens` (the context figure) and carries `stepCount` |
 | AI Search | `features/chat-page/chat-services/azure-ai-search/azure-ai-search.ts` | `SimpleSearch()`, `InsertChatDocumentWithEmbedding()` |
 | Cosmos | `features/common/services/cosmos.ts` | `HistoryContainer()`, `ConfigContainer()` |
 

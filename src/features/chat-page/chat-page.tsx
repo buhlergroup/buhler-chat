@@ -37,6 +37,13 @@ import { X, FileSpreadsheet } from "lucide-react";
 import { ChatImageDisplay } from "./chat-image-display";
 import type { UIMessage, FileUIPart } from "ai";
 import { uiMessagesFromChatMessages } from "./chat-services/chat-api/message-adapter";
+import { CompactionMarker, CompactionNotice } from "./compaction-notice";
+import {
+  compactionMarkerPlacement,
+  isCompactionDataPart,
+  type CompactionData,
+  type ThreadCompactionMarker,
+} from "./chat-services/chat-api/compaction-part";
 import { useEmbedMode } from "@/features/embed/embed-mode-context";
 
 interface ChatPageProps {
@@ -44,6 +51,13 @@ interface ChatPageProps {
   chatThread: ChatThreadModel;
   chatDocuments: Array<ChatDocumentModel>;
   extensions: Array<ExtensionModel>;
+  /**
+   * The thread's persisted compaction row, if it has ever been trimmed. Read
+   * once by the page and rendered as a divider at the watermark; it is display
+   * only and never reaches the model — the prompt's copy of the summary is
+   * assembled server-side in thread-context.ts.
+   */
+  compactionMarker?: ThreadCompactionMarker | null;
 }
 
 // ---------------------------------------------------------------------------
@@ -76,6 +90,19 @@ function getToolParts(m: UIMessage) {
 }
 
 /**
+ * `data-compaction` parts on this message. Written by /api/chat on the turn
+ * whose history was trimmed, so the user is told at the moment it happens.
+ * The AI SDK keeps data parts on the streaming message and reconciles repeat
+ * writes by part id, so there is at most one per turn.
+ */
+function getCompactionData(m: UIMessage): CompactionData[] {
+  return m.parts
+    .filter(isCompactionDataPart)
+    .map((p) => p.data)
+    .filter((d): d is CompactionData => Boolean(d));
+}
+
+/**
  * Per-message error boundary. Keeps a single message that fails to render
  * (e.g. a malformed generative-UI spec) from taking down the whole chat, and
  * logs the React component stack to aid diagnosis.
@@ -105,9 +132,27 @@ class MessageErrorBoundary extends Component<{ children: ReactNode; mid: string 
 // ChatMessages — rendered from AI SDK UIMessage stream
 // ---------------------------------------------------------------------------
 
-const ChatMessages = memo(function ChatMessages({ profilePicture }: { profilePicture?: string | null }) {
+const ChatMessages = memo(function ChatMessages({
+  profilePicture,
+  compactionMarker,
+}: {
+  profilePicture?: string | null;
+  compactionMarker?: ThreadCompactionMarker | null;
+}) {
   const { messages, status, error } = useChatSession();
   const setInputText = useChatStore((s) => s.setInputText);
+  // Where the persisted compaction divider goes. Recomputed only when the
+  // transcript or the marker changes; it walks the message list once.
+  const markerPlacement = useMemo(
+    () =>
+      compactionMarkerPlacement({
+        marker: compactionMarker,
+        messages: messages.filter(
+          (m) => m.role === "user" || m.role === "assistant",
+        ),
+      }),
+    [compactionMarker, messages],
+  );
   const [copiedMap, setCopiedMap] = useState<Record<string, boolean>>({});
   const isStreaming = status === "streaming" || status === "submitted";
   const router = useRouter();
@@ -200,6 +245,13 @@ const ChatMessages = memo(function ChatMessages({ profilePicture }: { profilePic
             const reasoningText = role === "assistant" ? getReasoningText(m) : "";
             const imageUrls = role === "user" ? getImageUrls(m) : [];
             const toolParts = role === "assistant" ? getToolParts(m) : [];
+            const compactionData = role === "assistant" ? getCompactionData(m) : [];
+
+            // The persisted marker sits directly after the newest row the
+            // summary covers — see compactionMarkerPlacement, which also
+            // derives how many turns it stands for.
+            const isWatermarkMessage =
+              markerPlacement?.afterMessageId === m.id;
 
             // Reasoning panel state: while the assistant turn is still
             // streaming AND its last part is reasoning, the model is actively
@@ -221,6 +273,9 @@ const ChatMessages = memo(function ChatMessages({ profilePicture }: { profilePic
 
             return (
               <div className="flex flex-col gap-4" key={m.id}>
+                {compactionData.map((data, i) => (
+                  <CompactionNotice data={data} key={`compaction-${i}`} />
+                ))}
                 <MessageErrorBoundary mid={m.id}>
                 <Message key={m.id} from={role}>
                   <div className="flex flex-col gap-0.5 w-full">
@@ -290,6 +345,23 @@ const ChatMessages = memo(function ChatMessages({ profilePicture }: { profilePic
                   </div>
                 </Message>
                 </MessageErrorBoundary>
+                {isWatermarkMessage && markerPlacement && (
+                  <CompactionMarker
+                    trimmedTurns={markerPlacement.trimmedTurns}
+                    {...(compactionMarker?.summaryText
+                      ? { summaryText: compactionMarker.summaryText }
+                      : {})}
+                    {...(compactionMarker?.summaryModel
+                      ? { summaryModel: compactionMarker.summaryModel }
+                      : {})}
+                    {...(typeof compactionMarker?.realTokensBefore === "number"
+                      ? { realTokensBefore: compactionMarker.realTokensBefore }
+                      : {})}
+                    {...(typeof compactionMarker?.realTokensAfter === "number"
+                      ? { realTokensAfter: compactionMarker.realTokensAfter }
+                      : {})}
+                  />
+                )}
               </div>
             );
           })}
@@ -516,7 +588,10 @@ const ChatPageInner = (props: ChatPageProps) => {
         />
       )}
 
-      <ChatMessages profilePicture={profilePicture} />
+      <ChatMessages
+        profilePicture={profilePicture}
+        compactionMarker={props.compactionMarker}
+      />
 
       <div className="sticky bottom-3 max-w-4xl mx-auto w-full">
         {/* Fade gradient above input to indicate scrollable content */}
@@ -656,6 +731,7 @@ const ChatPageInner = (props: ChatPageProps) => {
                 }}
                 disabled={isStreaming}
                 showReasoningModelsOnly={MODEL_CONFIGS[effectiveModel]?.supportsReasoning}
+                modelId={effectiveModel}
               />
               <PromptInputModelSelect
                 value={effectiveModel}

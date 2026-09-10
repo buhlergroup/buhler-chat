@@ -3,6 +3,8 @@ import { ChatPage } from "@/features/chat-page/chat-page";
 import { FindAllChatDocuments } from "@/features/chat-page/chat-services/chat-document-service";
 import { FindAllChatMessagesForCurrentUser } from "@/features/chat-page/chat-services/chat-message-service";
 import { FindChatThreadForCurrentUser } from "@/features/chat-page/chat-services/chat-thread-service";
+import { FindChatHistorySummary } from "@/features/chat-page/chat-services/chat-api/history-summary-service";
+import { threadCompactionMarker } from "@/features/chat-page/chat-services/chat-api/compaction-part";
 import { EmbedFrame } from "@/features/embed/embed-frame";
 import { EmbedSignIn } from "@/features/embed/embed-sign-in";
 import { FindAllExtensionForCurrentUserAndIds } from "@/features/extensions-page/extension-services/extension-service";
@@ -37,11 +39,15 @@ export default async function EmbedChat(props: EmbedChatParams) {
     return <EmbedSignIn />;
   }
 
-  const [chatResponse, chatThreadResponse, docsResponse] = await Promise.all([
-    FindAllChatMessagesForCurrentUser(id),
-    FindChatThreadForCurrentUser(id),
-    FindAllChatDocuments(id),
-  ]);
+  // Same reads as /chat/[id], including the compaction row: an embedded
+  // thread is trimmed by the same budget, so it needs the same divider.
+  const [chatResponse, chatThreadResponse, docsResponse, historySummary] =
+    await Promise.all([
+      FindAllChatMessagesForCurrentUser(id),
+      FindChatThreadForCurrentUser(id),
+      FindAllChatDocuments(id),
+      FindChatHistorySummary(id),
+    ]);
 
   if (docsResponse.status !== "OK") {
     return <DisplayError errors={docsResponse.errors} />;
@@ -73,6 +79,7 @@ export default async function EmbedChat(props: EmbedChatParams) {
         chatThread={chatThreadResponse.response}
         chatDocuments={docsResponse.response}
         extensions={extensionResponse.response}
+        compactionMarker={threadCompactionMarker(historySummary)}
       />
     </EmbedFrame>
   );

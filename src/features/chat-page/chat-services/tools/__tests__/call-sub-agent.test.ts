@@ -1,12 +1,22 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 
 // ─── hoisted mocks (must be declared before any vi.mock factory that references them) ──
-const { mockGenerateText, mockFindPersonaByID, mockResolveAzureModel } =
-  vi.hoisted(() => ({
-    mockGenerateText: vi.fn(),
-    mockFindPersonaByID: vi.fn(),
-    mockResolveAzureModel: vi.fn(() => ({ provider: "azure", modelId: "fake" })),
-  }));
+const {
+  mockGenerateText,
+  mockFindPersonaByID,
+  mockResolveAzureModel,
+  mockResolveFoundryModel,
+  mockResolveAnthropicModel,
+} = vi.hoisted(() => ({
+  mockGenerateText: vi.fn(),
+  mockFindPersonaByID: vi.fn(),
+  mockResolveAzureModel: vi.fn(() => ({ provider: "azure", modelId: "fake" })),
+  mockResolveFoundryModel: vi.fn(() => ({ provider: "foundry", modelId: "fake" })),
+  mockResolveAnthropicModel: vi.fn(() => ({
+    provider: "anthropic",
+    modelId: "fake",
+  })),
+}));
 
 // Patch MODEL_CONFIGS so deploymentName is always populated in tests
 vi.mock("@/features/chat-page/chat-services/models", async () => {
@@ -35,8 +45,12 @@ vi.mock("@/features/persona-page/persona-services/persona-service", () => ({
   FindAllPersonaForCurrentUser: vi.fn(async () => ({ status: "OK", response: [] })),
 }));
 
+// call-sub-agent now goes through the provider seam, which resolves all three
+// provider families — stub every entry point the seam imports.
 vi.mock("@/features/chat-page/chat-services/models/provider", () => ({
   resolveAzureModel: mockResolveAzureModel,
+  resolveFoundryModel: mockResolveFoundryModel,
+  resolveAnthropicModel: mockResolveAnthropicModel,
 }));
 
 vi.mock("ai", async () => {
@@ -133,10 +147,83 @@ describe("callSubAgentTool – execute", () => {
     expect(mockResolveAzureModel).toHaveBeenCalledWith("gpt-5.4-mini");
     expect(mockGenerateText).toHaveBeenCalledWith(
       expect.objectContaining({
-        system: FAKE_PERSONA.personaMessage,
+        instructions: FAKE_PERSONA.personaMessage,
         messages: [{ role: "user", content: "Do something" }],
       })
     );
+  });
+
+  it("caps the sub-agent generation with the model's maxOutputTokens", async () => {
+    const t = callSubAgentTool(makeCtx());
+    await (t as any).execute(
+      { agent_id: "agent-1", task: "Do something" },
+      { abortSignal: undefined }
+    );
+
+    // FAKE_PERSONA runs on gpt-5.4-mini, whose configured cap is 8000.
+    expect(mockGenerateText).toHaveBeenCalledWith(
+      expect.objectContaining({ maxOutputTokens: 8000 })
+    );
+  });
+
+  it("sends the seam's provider options: a sub-agent cache key, store:false and the model's effort", async () => {
+    const t = callSubAgentTool(makeCtx());
+    await (t as any).execute(
+      { agent_id: "agent-1", task: "Do something" },
+      { abortSignal: undefined }
+    );
+
+    const options = mockGenerateText.mock.calls[0][0] as {
+      providerOptions?: { openai?: Record<string, unknown> };
+    };
+    const openai = options.providerOptions?.openai ?? {};
+    // Namespaced under the parent thread but distinct from it, so a repeated
+    // delegation reads its own cached prefix instead of rewriting one.
+    expect(openai.promptCacheKey).toBe("thread-1:sub:agent-1");
+    expect(openai.store).toBe(false);
+    // gpt-5.4-mini is supportsReasoning:false → no effort keys are sent.
+    expect(openai.reasoningEffort).toBeUndefined();
+  });
+
+  it("sends promptCacheOptions for a GPT-5.6 sub-agent and a reasoning effort", async () => {
+    mockFindPersonaByID.mockResolvedValue({
+      status: "OK",
+      response: { ...FAKE_PERSONA, selectedModel: "gpt-5.6-sol" },
+    });
+
+    const t = callSubAgentTool(makeCtx());
+    await (t as any).execute(
+      { agent_id: "agent-1", task: "Do something" },
+      { abortSignal: undefined }
+    );
+
+    const options = mockGenerateText.mock.calls[0][0] as {
+      providerOptions?: { openai?: Record<string, unknown> };
+    };
+    const openai = options.providerOptions?.openai ?? {};
+    expect(openai.promptCacheOptions).toEqual({ mode: "implicit", ttl: "30m" });
+    expect(openai.reasoningEffort).toBe("low");
+    expect(openai.store).toBe(false);
+  });
+
+  it("resolves a Claude persona through the anthropic seam, not the Azure one", async () => {
+    mockFindPersonaByID.mockResolvedValue({
+      status: "OK",
+      response: { ...FAKE_PERSONA, selectedModel: "claude-sonnet-5" },
+    });
+
+    const t = callSubAgentTool(makeCtx());
+    await (t as any).execute(
+      { agent_id: "agent-1", task: "Do something" },
+      { abortSignal: undefined }
+    );
+
+    expect(mockResolveAnthropicModel).toHaveBeenCalledWith("claude-sonnet-5");
+    expect(mockResolveAzureModel).not.toHaveBeenCalled();
+    const options = mockGenerateText.mock.calls[0][0] as {
+      providerOptions?: Record<string, unknown>;
+    };
+    expect(options.providerOptions).toHaveProperty("anthropic");
   });
 
   it("passes abortSignal to generateText", async () => {

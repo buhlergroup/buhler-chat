@@ -106,23 +106,40 @@ export function createChatStore(options: CreateChatStoreOptions) {
   // persisted per-turn counts (lastInputTokens/…) so a reloaded thread shows
   // the same values the header showed live, not 0. Older rows without these
   // fields fall back to 0 (only the thread totals are shown for them).
+  //
+  // `lastInputTokens` is the TURN TOTAL (all steps, what was billed);
+  // `lastPromptTokens` is the size of the LAST PROMPT. The context row needs
+  // the second one. Rows written before `lastPromptTokens` existed fall back
+  // to the roll-up: exact for a single-step turn, and an OVERSTATEMENT of a
+  // multi-step one by roughly the number of steps.
   let initialUsageData: UsageDataResponse | null = null;
   if (chatThread?.usage) {
     const u = chatThread.usage;
     const contextWindowSize = modelCfg?.contextWindow ?? 128000;
     const lastInput = u.lastInputTokens ?? 0;
     const lastOutput = u.lastOutputTokens ?? 0;
+    const lastPrompt = u.lastPromptTokens ?? lastInput;
     initialUsageData = {
       inputTokens: lastInput,
       outputTokens: lastOutput,
       cachedTokens: u.lastCachedTokens ?? 0,
+      // Real numbers from the last completed request, so a reloaded thread
+      // shows the same context size and cache split it showed live — the
+      // header never estimates.
+      ...(typeof u.lastCacheWriteTokens === "number"
+        ? { cacheWriteTokens: u.lastCacheWriteTokens }
+        : {}),
       totalTokens: lastInput + lastOutput,
       costUsd: 0,
       threadTotalCostUsd: u.totalCostUsd,
       threadTotalTokens: u.totalInputTokens + u.totalOutputTokens,
+      lastPromptTokens: lastPrompt,
+      // `stepCount` is NOT persisted, so a reloaded thread cannot say how many
+      // steps the last turn took and the panel leaves the badge off rather
+      // than claiming "1 step" it does not know.
       contextWindowSize,
       contextUsagePercent:
-        contextWindowSize > 0 ? (lastInput / contextWindowSize) * 100 : 0,
+        contextWindowSize > 0 ? (lastPrompt / contextWindowSize) * 100 : 0,
       model: initialModel,
     };
   }

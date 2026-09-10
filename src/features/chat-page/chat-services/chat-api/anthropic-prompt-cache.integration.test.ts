@@ -48,7 +48,7 @@ describe("Anthropic prompt cache — wire level", () => {
       fetch: cap.fetch,
     });
 
-    const { system, messages } = withAnthropicPromptCache(
+    const { instructions: system, messages } = withAnthropicPromptCache(
       "A SUFFICIENTLY LARGE, STABLE SYSTEM PROMPT FOR CACHING",
       [
         { role: "user", content: "earlier question" },
@@ -59,7 +59,7 @@ describe("Anthropic prompt cache — wire level", () => {
 
     await generateText({
       model: provider("claude-opus-4-8"),
-      system,
+      instructions: system,
       messages,
     });
 

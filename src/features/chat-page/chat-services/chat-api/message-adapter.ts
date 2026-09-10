@@ -54,6 +54,114 @@ function tryParseToolContent(content: string): PersistedToolContent | null {
   }
 }
 
+/**
+ * Step-layout entry kinds. See ChatMessageModel.stepLayout.
+ */
+const STEP_START = "step-start";
+const TEXT_PREFIX = "text:";
+const TOOL_PREFIX = "tool:";
+const REASONING_ENTRY = "reasoning";
+
+/**
+ * Derive the step layout from an assistant UIMessage's parts. Returns
+ * undefined when the message carries no `step-start` part — i.e. it was built
+ * by a path that has no step information (the empty-finish sentinel, or an
+ * old row being re-persisted). Those keep writing rows without a layout, so
+ * nothing about the pre-existing shape changes.
+ */
+function deriveStepLayout(parts: UIMessage["parts"]): string[] | undefined {
+  if (!parts.some((p) => p.type === STEP_START)) return undefined;
+  const layout: string[] = [];
+  for (const part of parts) {
+    if (part.type === STEP_START) {
+      layout.push(STEP_START);
+    } else if (part.type === "text") {
+      layout.push(`${TEXT_PREFIX}${(part as import("ai").TextUIPart).text.length}`);
+    } else if (part.type === "reasoning") {
+      layout.push(REASONING_ENTRY);
+    } else if (part.type === "dynamic-tool") {
+      layout.push(
+        `${TOOL_PREFIX}${(part as import("ai").DynamicToolUIPart).toolCallId}`,
+      );
+    }
+  }
+  return layout;
+}
+
+/**
+ * Rebuild an assistant message's parts in the order the live turn produced
+ * them, re-inserting the `step-start` markers convertToModelMessages splits
+ * on. `parts` is what the legacy rebuild produced: [reasoning?, text?,
+ * ...tools]. Returns null when the layout can't be honoured (text lengths
+ * don't add up, a referenced tool call is missing), in which case the caller
+ * keeps the legacy ordering — a wrong-but-familiar history beats a corrupted
+ * one.
+ */
+function applyStepLayout(
+  layout: string[],
+  parts: UIMessage["parts"],
+): UIMessage["parts"] | null {
+  const textParts = parts.filter(
+    (p): p is import("ai").TextUIPart => p.type === "text",
+  );
+  const reasoningParts = parts.filter(
+    (p): p is import("ai").ReasoningUIPart => p.type === "reasoning",
+  );
+  const toolParts = new Map(
+    parts
+      .filter((p): p is import("ai").DynamicToolUIPart => p.type === "dynamic-tool")
+      .map((p) => [p.toolCallId, p]),
+  );
+
+  // The row stores one concatenated `content`, so the legacy rebuild yields a
+  // single text part; the layout says how to cut it back into per-step slices.
+  const fullText = textParts.map((p) => p.text).join("");
+  const declaredTextLength = layout
+    .filter((e) => e.startsWith(TEXT_PREFIX))
+    .reduce((sum, e) => sum + (Number(e.slice(TEXT_PREFIX.length)) || 0), 0);
+  if (declaredTextLength !== fullText.length) return null;
+
+  const rebuilt: UIMessage["parts"] = [];
+  const usedToolIds = new Set<string>();
+  let textOffset = 0;
+  let reasoningEmitted = false;
+  for (const entry of layout) {
+    if (entry === STEP_START) {
+      rebuilt.push({ type: STEP_START } as unknown as UIMessage["parts"][number]);
+    } else if (entry.startsWith(TEXT_PREFIX)) {
+      const length = Number(entry.slice(TEXT_PREFIX.length));
+      if (!Number.isFinite(length) || length < 0) return null;
+      rebuilt.push({
+        type: "text",
+        text: fullText.slice(textOffset, textOffset + length),
+        state: "done",
+      } as import("ai").TextUIPart);
+      textOffset += length;
+    } else if (entry === REASONING_ENTRY) {
+      // Reasoning is persisted as one blob on the row, so it is replayed once
+      // at the position the layout first names it.
+      if (!reasoningEmitted && reasoningParts.length > 0) {
+        rebuilt.push(...reasoningParts);
+        reasoningEmitted = true;
+      }
+    } else if (entry.startsWith(TOOL_PREFIX)) {
+      const toolCallId = entry.slice(TOOL_PREFIX.length);
+      const toolPart = toolParts.get(toolCallId);
+      if (!toolPart) return null;
+      rebuilt.push(toolPart);
+      usedToolIds.add(toolCallId);
+    }
+  }
+
+  // Anything the layout didn't name (a tool row written by an older code
+  // path, reasoning the layout omitted) is appended so no content is lost.
+  if (!reasoningEmitted) rebuilt.unshift(...reasoningParts);
+  for (const [id, part] of toolParts) {
+    if (!usedToolIds.has(id)) rebuilt.push(part);
+  }
+  return rebuilt;
+}
+
 function generateId(): string {
   return (
     Date.now().toString(36) +
@@ -156,6 +264,7 @@ export function uiMessagesFromChatMessages(rows: ChatMessageModel[]): UIMessage[
           ...(row.reasoningDurationMs !== undefined && {
             reasoningDurationMs: row.reasoningDurationMs,
           }),
+          ...(row.stepLayout !== undefined && { stepLayout: row.stepLayout }),
         },
         parts,
       };
@@ -256,6 +365,24 @@ export function uiMessagesFromChatMessages(rows: ChatMessageModel[]): UIMessage[
     }
   }
 
+  // Step boundaries. The loop above builds each assistant turn as one flat
+  // block (reasoning, text, then every tool part), which convertToModelMessages
+  // serialises as a SINGLE assistant message followed by one tool message.
+  // The live turn was several steps, so the rehydrated history didn't match the
+  // prefix the provider had cached and the next turn paid to rewrite it. Rows
+  // that carry a stepLayout are reordered back into the live shape here; rows
+  // without one (written before the layout existed) keep the old behaviour.
+  for (const msg of result) {
+    if (msg.role !== "assistant") continue;
+    const layout = (msg.metadata as { stepLayout?: unknown } | undefined)
+      ?.stepLayout;
+    if (!Array.isArray(layout) || layout.length === 0) continue;
+    const rebuilt = applyStepLayout(layout as string[], msg.parts);
+    if (rebuilt) {
+      (msg as { parts: UIMessage["parts"] }).parts = rebuilt;
+    }
+  }
+
   return result;
 }
 
@@ -344,6 +471,12 @@ export function chatMessagesFromUIMessages(
       const reasoningState = meta.reasoningState;
       const reasoningDurationMs =
         typeof meta.reasoningDurationMs === "number" ? meta.reasoningDurationMs : undefined;
+      // Step boundaries: derived from the parts when they carry `step-start`
+      // markers (the live path and any rehydrated row that had a layout),
+      // otherwise carried over from metadata so a re-persist doesn't drop it.
+      const stepLayout =
+        deriveStepLayout(msg.parts) ??
+        (Array.isArray(meta.stepLayout) ? (meta.stepLayout as string[]) : undefined);
 
       rows.push({
         ...baseRow(),
@@ -353,6 +486,7 @@ export function chatMessagesFromUIMessages(
         ...(reasoningContent !== undefined && { reasoningContent }),
         ...(reasoningState !== undefined && { reasoningState }),
         ...(reasoningDurationMs !== undefined && { reasoningDurationMs }),
+        ...(stepLayout !== undefined && { stepLayout }),
       });
 
       // Each DynamicToolUIPart → one tool row.

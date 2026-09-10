@@ -50,7 +50,17 @@ export async function GET(request: NextRequest) {
       });
     }
 
-    const defaultModel = availableModelIds.length > 0 ? availableModelIds[0] : DEFAULT_MODEL;
+    // Prefer the configured DEFAULT_MODEL. The old code took
+    // availableModelIds[0], i.e. whichever model happens to be declared first
+    // in MODEL_CONFIGS — so the picker's default silently depended on object
+    // key order and could disagree with the default the /api/chat route
+    // actually uses. Only fall back to the first available id when the
+    // configured default has no deployment in this environment.
+    const defaultModel = availableModels[DEFAULT_MODEL]
+      ? DEFAULT_MODEL
+      : availableModelIds.length > 0
+        ? availableModelIds[0]
+        : DEFAULT_MODEL;
     return NextResponse.json({
       availableModels,
       availableModelIds,

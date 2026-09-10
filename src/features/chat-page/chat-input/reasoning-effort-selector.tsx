@@ -9,7 +9,12 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/features/ui/select";
-import { ReasoningEffort } from "../chat-services/models";
+import {
+  ChatModel,
+  clampReasoningEffort,
+  getPickableReasoningEfforts,
+  ReasoningEffort,
+} from "../chat-services/models";
 import { useChatStore } from "../chat-store-context";
 
 interface ReasoningEffortSelectorProps {
@@ -17,6 +22,13 @@ interface ReasoningEffortSelectorProps {
   onChange: (value: ReasoningEffort) => void;
   disabled?: boolean;
   showReasoningModelsOnly?: boolean;
+  /**
+   * The model the next turn will run on. Decides which levels are offered:
+   * not every model accepts all four, and one that is offered anyway gets
+   * pinned on the thread and then answers 400 on every turn. Omitted means
+   * "no model known", which falls back to all four.
+   */
+  modelId?: ChatModel;
 }
 
 export const ReasoningEffortSelector: React.FC<ReasoningEffortSelectorProps> = ({
@@ -24,6 +36,7 @@ export const ReasoningEffortSelector: React.FC<ReasoningEffortSelectorProps> = (
   onChange,
   disabled = false,
   showReasoningModelsOnly = false,
+  modelId,
 }) => {
   const toolsEnabled = useChatStore(
     (s) =>
@@ -37,7 +50,7 @@ export const ReasoningEffortSelector: React.FC<ReasoningEffortSelectorProps> = (
     return null;
   }
 
-  const effortOptions = [
+  const allEffortOptions = [
     {
       value: "minimal" as ReasoningEffort,
       label: "Minimal",
@@ -64,9 +77,20 @@ export const ReasoningEffortSelector: React.FC<ReasoningEffortSelectorProps> = (
     },
   ];
 
+  // Only what this model's provider accepts. "Minimal" was offered to every
+  // reasoning model and no GPT-5.5 or 5.6 deployment takes it, so selecting it
+  // pinned a value on the thread that answered 400 from then on.
+  const pickable = getPickableReasoningEfforts(modelId);
+  const effortOptions = allEffortOptions.filter((o) => pickable.includes(o.value));
+
+  // Show what will actually be sent. A thread that stored an effort this model
+  // does not accept is clamped server-side, so displaying the stored value
+  // would tell the user something untrue about their next turn.
+  const shownValue = clampReasoningEffort(modelId, value) as ReasoningEffort;
+
   return (
     <div className="flex items-center">
-      <Select value={value} onValueChange={onChange} disabled={disabled}>
+      <Select value={shownValue} onValueChange={onChange} disabled={disabled}>
         <SelectTrigger className="w-auto h-8 text-xs gap-1 px-2">
           <Brain size={14} className="text-blue-500 shrink-0" />
           <SelectValue placeholder="Reasoning" />

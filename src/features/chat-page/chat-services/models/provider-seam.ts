@@ -4,7 +4,7 @@
  * Generic provider abstraction. Resolves a model id (any provider) into
  * everything `streamText` needs to actually invoke that provider:
  *
- *   - `model`              the LanguageModelV3 instance
+ *   - `model`              the LanguageModelV4 instance
  *   - `builtInTools(...)`  provider-native server-side tools merged into
  *                          the user's effective-toggles set
  *   - `providerOptions(...)` per-provider options block (reasoning,
@@ -17,7 +17,7 @@
  *
  * What goes where on addition of a new provider:
  *   1. Add `provider: "anthropic"` (or similar) to the model's ModelConfig.
- *   2. Add a branch below resolving that provider's LanguageModelV3 +
+ *   2. Add a branch below resolving that provider's LanguageModelV4 +
  *      built-in tools + providerOptions shape.
  *   3. If Anthropic exposes tools we want to surface (e.g. their server-
  *      side bash tool), wire those into builtInTools branch. Otherwise
@@ -28,14 +28,14 @@
  * providerOptions.openai.* in route.ts" coupling.
  */
 
-import type { LanguageModelV3, JSONValue } from "@ai-sdk/provider";
+import type { LanguageModelV4, JSONValue } from "@ai-sdk/provider";
 import { azure } from "@ai-sdk/azure";
 import { anthropic } from "@ai-sdk/anthropic";
 import { resolveAzureModel, resolveFoundryModel, resolveAnthropicModel } from "./provider";
 import {
   MODEL_CONFIGS,
   type ChatModel,
-  type ReasoningEffort,
+  type ProviderReasoningEffort,
   type ModelConfig,
   type ModelProvider,
 } from "../models";
@@ -52,7 +52,7 @@ export interface BuiltInToggles {
 }
 
 export interface ResolvedProvider {
-  model: LanguageModelV3;
+  model: LanguageModelV4;
   /**
    * Map of provider-native tools keyed by stable tool-name (used as part
    * type by the AI SDK stream). Merged with custom tools by the route.
@@ -61,7 +61,7 @@ export interface ResolvedProvider {
   /**
    * Object passed verbatim into streamText({ providerOptions }).
    * Provider-specific keys; AI SDK ignores unknown providers' keys.
-   * Values must be JSON-serialisable per AI SDK's SharedV3ProviderOptions.
+   * Values must be JSON-serialisable per AI SDK's SharedV4ProviderOptions.
    */
   providerOptions: Record<string, Record<string, JSONValue>>;
 }
@@ -72,7 +72,7 @@ export interface ResolveProviderArgs {
   toggles: BuiltInToggles;
   reasoning: {
     supported: boolean;
-    effort: ReasoningEffort | undefined;
+    effort: ProviderReasoningEffort | undefined;
   };
   /**
    * Files the user attached for code_interpreter this turn (OpenAI file
@@ -87,6 +87,17 @@ export interface ResolveProviderArgs {
    * persisted `codeInterpreterFileIdsSignature`.
    */
   codeInterpreterFileIds?: string[];
+  /**
+   * Overrides the value sent as `promptCacheKey`. Defaults to `thread.id`.
+   * Two callers need this:
+   *   - the sub-agent tool, whose prefix (its own persona message + the
+   *     delegated task) has nothing in common with the parent thread's, so
+   *     sharing the parent's key would only cause cache misses;
+   *   - the persona cache-key strategy (prompt-cache-key.ts), which
+   *     deliberately shares one key across threads that have the same
+   *     developer message so they can read each other's prefix.
+   */
+  promptCacheKey?: string;
 }
 
 /**
@@ -117,7 +128,7 @@ export function resolveProvider(args: ResolveProviderArgs): ResolvedProvider {
 
   switch (providerTag) {
     case "azure":
-      return resolveAzureBackedProvider(args);
+      return resolveAzureBackedProvider(args, config);
     case "foundry":
       return resolveFoundryBackedProvider(args);
     case "anthropic":
@@ -129,7 +140,10 @@ export function resolveProvider(args: ResolveProviderArgs): ResolvedProvider {
   }
 }
 
-function resolveAzureBackedProvider(args: ResolveProviderArgs): ResolvedProvider {
+function resolveAzureBackedProvider(
+  args: ResolveProviderArgs,
+  config: ModelConfig,
+): ResolvedProvider {
   const model = resolveAzureModel(args.modelId);
 
   // Built-in tools that Azure runs server-side (Responses API).
@@ -177,9 +191,18 @@ function resolveAzureBackedProvider(args: ResolveProviderArgs): ResolvedProvider
   // under the hood so the providerOptions namespace is "openai", not
   // "azure" — verified from @ai-sdk/openai/internal types.
   const openaiOptions: Record<string, JSONValue> = {
-    promptCacheKey: args.thread.id,
+    promptCacheKey: args.promptCacheKey ?? args.thread.id,
     store: false,
   };
+  // GPT-5.6 exposes `prompt_cache_options`: implicit mode keeps the automatic
+  // prefix matching we already rely on, and ttl "30m" extends the cache
+  // lifetime from the ~5-minute default so a user who thinks between turns
+  // still lands a cache read instead of re-writing the whole prefix.
+  // Strictly gated: gpt-5.5 and older answer HTTP 400
+  // "prompt_cache_options is not supported on this model".
+  if (config.promptCacheOptionsSupported) {
+    openaiOptions.promptCacheOptions = { mode: "implicit", ttl: "30m" };
+  }
   if (args.reasoning.supported && args.reasoning.effort) {
     openaiOptions.reasoningEffort = args.reasoning.effort;
     openaiOptions.reasoningSummary = "auto";
@@ -235,16 +258,29 @@ function resolveAnthropicBackedProvider(args: ResolveProviderArgs): ResolvedProv
     builtInTools["web_fetch"] = anthropic.tools.webFetch_20260209({ maxUses: 5 });
   }
 
-  // Adaptive thinking is Claude 4.x's reasoning mode. We never send
+  // Adaptive thinking is Claude 4.x's reasoning mode, enabled only for a
+  // config that declares supportsReasoning. We never send
   // temperature/top_p/top_k (the route doesn't, and Opus 4.8 rejects them with
   // a 400), so adaptive thinking is safe to leave on. `effort` is mapped from
   // the user's ReasoningEffort selection; "minimal" → "low".
-  const anthropicOptions: Record<string, JSONValue> = {
-    thinking: { type: "adaptive" },
-  };
+  const anthropicOptions: Record<string, JSONValue> = {};
+  if (args.reasoning.supported) {
+    // Inside the gate, not above it: a Claude entry declared
+    // supportsReasoning:false (the obvious way to add a cheap Haiku-class
+    // model) would otherwise still get thinking enabled — and still be
+    // billed for thinking tokens — with the reasoning gate bypassed.
+    anthropicOptions.thinking = { type: "adaptive" };
+  }
   if (args.reasoning.supported && args.reasoning.effort) {
+    // Claude's adaptive thinking takes low/medium/high. Map the levels that
+    // only exist on the OpenAI side onto the nearest Claude equivalent.
+    const effort = args.reasoning.effort;
     anthropicOptions.effort =
-      args.reasoning.effort === "minimal" ? "low" : args.reasoning.effort;
+      effort === "minimal" || effort === "none"
+        ? "low"
+        : effort === "xhigh" || effort === "max"
+          ? "high"
+          : effort;
   }
 
   return {

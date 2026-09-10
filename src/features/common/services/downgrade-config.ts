@@ -80,11 +80,21 @@ export function getDowngradeTargets(): DowngradeTargets {
   // Base eligible set: flagged hardCapEligible AND deployed.
   let hardCapSet = (Object.keys(MODEL_CONFIGS) as ChatModel[])
     .filter((id) => MODEL_CONFIGS[id].hardCapEligible && isDeployed(id))
-    .sort(
-      (a, b) =>
-        MODEL_CONFIGS[a].pricing.outputPerMillion -
-        MODEL_CONFIGS[b].pricing.outputPerMillion,
-    );
+    // Cheapest-first by output price, then by input price, then by model id.
+    // Output price alone leaves ties (gpt-5.6-luna and DeepSeek-V4-Pro are both
+    // 1.20/1M output), and a tie under Array.prototype.sort resolves by
+    // MODEL_CONFIGS declaration order — so which model a capped user landed on
+    // depended on the order of an object literal. The extra keys make the
+    // ordering a property of the prices, not of the file.
+    .sort((a, b) => {
+      const pa = MODEL_CONFIGS[a].pricing;
+      const pb = MODEL_CONFIGS[b].pricing;
+      return (
+        pa.outputPerMillion - pb.outputPerMillion ||
+        pa.inputPerMillion - pb.inputPerMillion ||
+        (a < b ? -1 : a > b ? 1 : 0)
+      );
+    });
 
   // Optional env allow-list constrains AND reorders the set (ops override).
   const allowList = process.env.DOWNGRADE_HARDCAP_MODELS?.split(",")

@@ -162,6 +162,31 @@ describe("provider-seam — Azure branch", () => {
     expect(openai.include).toBeUndefined();
   });
 
+  it("uses promptCacheKey when the caller overrides it, otherwise the thread id", () => {
+    const overridden = resolveProvider({
+      modelId: "gpt-5.6-sol",
+      thread: { id: "thread-parent", codeInterpreterContainerId: undefined },
+      toggles: offToggles,
+      reasoning: baseReasoning,
+      promptCacheKey: "thread-parent:sub:agent-9",
+    });
+    expect(
+      (overridden.providerOptions.openai as Record<string, unknown>)
+        .promptCacheKey,
+    ).toBe("thread-parent:sub:agent-9");
+
+    const defaulted = resolveProvider({
+      modelId: "gpt-5.6-sol",
+      thread: { id: "thread-parent", codeInterpreterContainerId: undefined },
+      toggles: offToggles,
+      reasoning: baseReasoning,
+    });
+    expect(
+      (defaulted.providerOptions.openai as Record<string, unknown>)
+        .promptCacheKey,
+    ).toBe("thread-parent");
+  });
+
   it("emits reasoning options only when supported + effort provided", () => {
     const r = resolveProvider({
       modelId: "gpt-5.5",
@@ -174,6 +199,42 @@ describe("provider-seam — Azure branch", () => {
     expect(openai.reasoningSummary).toBe("auto");
     expect(openai.include).toEqual(["reasoning.encrypted_content"]);
   });
+
+  it.each(["gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"] as const)(
+    "sends promptCacheOptions { implicit, 30m } for %s",
+    (modelId) => {
+      const r = resolveProvider({
+        modelId,
+        thread: baseThread,
+        toggles: offToggles,
+        reasoning: baseReasoning,
+      });
+      const openai = r.providerOptions.openai as Record<string, unknown>;
+      expect(openai.promptCacheOptions).toEqual({
+        mode: "implicit",
+        ttl: "30m",
+      });
+      // The key + store contract is unchanged by the cache options.
+      expect(openai.promptCacheKey).toBe("thread-1");
+      expect(openai.store).toBe(false);
+    },
+  );
+
+  it.each(["gpt-5.5", "gpt-5.4", "gpt-5.4-mini"] as const)(
+    "omits promptCacheOptions for %s (the model answers HTTP 400)",
+    (modelId) => {
+      const r = resolveProvider({
+        modelId,
+        thread: baseThread,
+        toggles: offToggles,
+        reasoning: baseReasoning,
+      });
+      const openai = r.providerOptions.openai as Record<string, unknown>;
+      expect(openai.promptCacheOptions).toBeUndefined();
+      expect(openai.promptCacheKey).toBe("thread-1");
+      expect(openai.store).toBe(false);
+    },
+  );
 
   it("omits reasoning options when supported=true but effort is undefined", () => {
     const r = resolveProvider({
@@ -275,12 +336,30 @@ describe("provider-seam — Anthropic branch", () => {
       thread: baseThread,
       // code_interpreter / image_generation must NOT produce Anthropic tools.
       toggles: { codeInterpreter: true, imageGeneration: true, webSearch: true },
-      reasoning: baseReasoning,
+      // Both Claude configs declare supportsReasoning, so this is the shape a
+      // real Claude turn takes.
+      reasoning: { supported: true, effort: "medium" },
     });
     expect(Object.keys(r.builtInTools).sort()).toEqual(["web_fetch", "web_search"]);
-    // Still adaptive thinking, never an openai block.
+    // A tool toggle must not switch thinking off, and never an openai block.
     expect((r.providerOptions.anthropic as Record<string, unknown>).thinking).toEqual({ type: "adaptive" });
     expect(r.providerOptions.openai).toBeUndefined();
+  });
+
+  it("leaves thinking off when the config does not support reasoning (negative)", () => {
+    // The gate has to cover `thinking`, not just `effort`. A Claude entry
+    // added with supportsReasoning:false — the obvious way to wire a cheap
+    // Haiku-class model — would otherwise still think, and still be billed
+    // for the thinking tokens.
+    const r = resolveProvider({
+      modelId: "claude-sonnet-5",
+      thread: baseThread,
+      toggles: offToggles,
+      reasoning: baseReasoning,
+    });
+    const anth = r.providerOptions.anthropic as Record<string, unknown>;
+    expect(anth.thinking).toBeUndefined();
+    expect(anth.effort).toBeUndefined();
   });
 });
 

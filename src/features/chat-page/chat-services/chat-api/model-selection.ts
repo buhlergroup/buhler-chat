@@ -19,8 +19,10 @@ import {
   DEFAULT_MODEL,
   MODEL_CONFIGS,
   ModelConfig,
+  ProviderReasoningEffort,
   ReasoningEffort,
 } from "../models";
+import { resolveReasoningEffort } from "../models/reasoning-effort";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -54,7 +56,7 @@ export interface ModelSelectionResult {
   modelConfig: ModelConfig;
   fallbackInfo: FallbackResult;
   selectedModel: ChatModel;
-  effectiveReasoningEffort?: ReasoningEffort;
+  effectiveReasoningEffort?: ProviderReasoningEffort;
 }
 
 // ---------------------------------------------------------------------------
@@ -117,9 +119,6 @@ export async function resolveModelAndLimits(
   let selectedModel: ChatModel =
     payload.selectedModel ?? thread.selectedModel ?? DEFAULT_MODEL;
   let modelConfig = MODEL_CONFIGS[selectedModel];
-
-  const reasoningEffort: ReasoningEffort =
-    payload.reasoningEffort ?? modelConfig?.defaultReasoningEffort ?? "low";
 
   // An explicit pick is the user choosing a model this turn, or having
   // previously pinned a non-default model on the thread. Cap overrides it;
@@ -238,6 +237,15 @@ export async function resolveModelAndLimits(
       { status: 500 }
     );
   }
+
+  // Effort is resolved AFTER the model is final: user pick → the
+  // REASONING_EFFORT_OVERRIDES env map for THIS model → the model's default.
+  // Resolving it earlier meant a downgraded turn ran at the effort configured
+  // for the model that did not run.
+  const reasoningEffort = resolveReasoningEffort({
+    modelId: selectedModel,
+    userPick: payload.reasoningEffort,
+  });
 
   return {
     modelDeployment: modelConfig.deploymentName,

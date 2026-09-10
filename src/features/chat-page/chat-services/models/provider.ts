@@ -1,7 +1,7 @@
 /**
  * AI SDK provider seam.
  *
- * Resolves a LanguageModelV3 (LanguageModelV2-compatible) from @ai-sdk/azure
+ * Resolves a LanguageModelV4 from @ai-sdk/azure
  * for a given ChatModel, via the service-container DI registry.
  *
  * The old AzureOpenAI factories in openai.ts / openai.production.ts continue
@@ -11,7 +11,7 @@
 import { createAzure } from "@ai-sdk/azure";
 import { createOpenAI } from "@ai-sdk/openai";
 import { createAnthropic } from "@ai-sdk/anthropic";
-import type { LanguageModelV3 } from "@ai-sdk/provider";
+import type { LanguageModelV4 } from "@ai-sdk/provider";
 import { getAzureAiFoundryTokenProvider } from "@/features/common/services/azure-default-credential";
 import {
   register,
@@ -23,20 +23,20 @@ import { getAzureCognitiveServicesTokenProvider } from "@/features/common/servic
 import { MODEL_CONFIGS, type ChatModel } from "../models";
 
 /** The shape stored under SERVICE_KEYS.aiProvider: a function that maps a
- *  deployment name to a LanguageModelV3. */
-export type AiProviderFn = (deploymentName: string) => LanguageModelV3;
+ *  deployment name to a LanguageModelV4. */
+export type AiProviderFn = (deploymentName: string) => LanguageModelV4;
 
 /** Same shape for the Foundry (OpenAI-compatible) provider. */
-export type FoundryProviderFn = (deploymentName: string) => LanguageModelV3;
+export type FoundryProviderFn = (deploymentName: string) => LanguageModelV4;
 
 /** Same shape for the Anthropic (Azure /anthropic Messages API) provider. */
-export type AnthropicProviderFn = (deploymentName: string) => LanguageModelV3;
+export type AnthropicProviderFn = (deploymentName: string) => LanguageModelV4;
 
 /**
- * Returns the LanguageModelV3 for the given ChatModel by looking up the
+ * Returns the LanguageModelV4 for the given ChatModel by looking up the
  * deployment name in MODEL_CONFIGS and delegating to the registered aiProvider.
  */
-export function resolveAzureModel(modelId: ChatModel): LanguageModelV3 {
+export function resolveAzureModel(modelId: ChatModel): LanguageModelV4 {
   const config = MODEL_CONFIGS[modelId];
   if (!config) {
     throw new Error(`resolveAzureModel: unknown modelId "${modelId}"`);
@@ -64,7 +64,7 @@ export function resolveAzureModel(modelId: ChatModel): LanguageModelV3 {
  *
  * @ai-sdk/azure config used:
  *   createAzure({ resourceName, apiKey?, apiVersion?, fetch? })
- *   provider(deploymentName) → LanguageModelV3
+ *   provider(deploymentName) → LanguageModelV4
  */
 export function createProductionAzureProvider(): AiProviderFn {
   const resourceName = process.env.AZURE_OPENAI_API_INSTANCE_NAME;
@@ -139,10 +139,10 @@ if (!has(SERVICE_KEYS.aiProvider)) {
 }
 
 /**
- * Returns the LanguageModelV3 for a Foundry-hosted ChatModel by looking up
+ * Returns the LanguageModelV4 for a Foundry-hosted ChatModel by looking up
  * its deployment name and delegating to the registered foundryProvider.
  */
-export function resolveFoundryModel(modelId: ChatModel): LanguageModelV3 {
+export function resolveFoundryModel(modelId: ChatModel): LanguageModelV4 {
   const config = MODEL_CONFIGS[modelId];
   if (!config) {
     throw new Error(`resolveFoundryModel: unknown modelId "${modelId}"`);
@@ -187,10 +187,10 @@ if (!has(SERVICE_KEYS.foundryProvider)) {
 }
 
 /**
- * Returns the LanguageModelV3 for an Anthropic-hosted ChatModel (Azure
+ * Returns the LanguageModelV4 for an Anthropic-hosted ChatModel (Azure
  * /anthropic surface) by deployment name, via the registered provider.
  */
-export function resolveAnthropicModel(modelId: ChatModel): LanguageModelV3 {
+export function resolveAnthropicModel(modelId: ChatModel): LanguageModelV4 {
   const config = MODEL_CONFIGS[modelId];
   if (!config) {
     throw new Error(`resolveAnthropicModel: unknown modelId "${modelId}"`);

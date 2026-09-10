@@ -1,8 +1,8 @@
 /**
- * /api/chat — AI SDK v6 streamText route.
+ * /api/chat — AI SDK 7 streamText route.
  *
  * Built-in Azure server-side tools (code_interpreter, image_generation,
- * web_search_preview) ARE exposed by @ai-sdk/azure v3 via azure.tools.*
+ * web_search_preview) ARE exposed by @ai-sdk/azure v4 via azure.tools.*
  * — confirmed from node_modules/@ai-sdk/azure/dist/index.d.ts which re-exports
  * them from @ai-sdk/openai/internal as azureOpenaiTools, accessible as
  * azure.tools.codeInterpreter / .imageGeneration / .webSearchPreview.
@@ -12,8 +12,10 @@
 import {
   streamText,
   convertToModelMessages,
-  stepCountIs,
+  isStepCount,
   createIdGenerator,
+  createUIMessageStream,
+  createUIMessageStreamResponse,
 } from "ai";
 import type { StepResult, ToolSet } from "ai";
 import {
@@ -21,7 +23,12 @@ import {
   validateMultimodalInput,
 } from "@/features/chat-page/chat-services/chat-api/validate-input";
 import { resolveModelAndLimits } from "@/features/chat-page/chat-services/chat-api/model-selection";
-import { loadThreadContext } from "@/features/chat-page/chat-services/chat-api/thread-context";
+import { compactionDonePart } from "@/features/chat-page/chat-services/chat-api/compaction-part";
+import { recordHistoryCompactionRealUsage } from "@/features/chat-page/chat-services/chat-api/history-summary-service";
+import {
+  loadThreadContext,
+  applyDocumentHintPlacement,
+} from "@/features/chat-page/chat-services/chat-api/thread-context";
 import { persistAssistantFromFinishEvent } from "@/features/chat-page/chat-services/chat-api/persist-assistant";
 import { consumeRateLimitToken } from "@/features/chat-page/chat-services/chat-api/rate-limit";
 import { resolveRateLimitSubject } from "@/features/chat-page/chat-services/chat-api/rate-limit-subject";
@@ -29,18 +36,26 @@ import { createSandboxUrlTransform } from "@/features/chat-page/chat-services/ch
 import { createImageGenerationStreamRewriter } from "@/features/chat-page/chat-services/chat-api/image-generation-stream-rewriter";
 import { createCodeInterpreterStreamRewriter } from "@/features/chat-page/chat-services/chat-api/code-interpreter-stream-rewriter";
 import { resolveProvider, getFileIdsSignature } from "@/features/chat-page/chat-services/models/provider-seam";
+import { resolveMaxOutputTokens } from "@/features/chat-page/chat-services/models/max-output-tokens";
+import { ensureCodeInterpreterContainer } from "@/features/chat-page/chat-services/code-interpreter-container";
 import { computeRequestUsage, type ChatMessageMetadata } from "@/features/chat-page/chat-services/chat-api/usage-data";
 import {
   UpdateChatTitle,
   UpdateChatThreadCodeInterpreterContainer,
 } from "@/features/chat-page/chat-services/chat-thread-service";
 import { buildToolset, repairExtensionToolCall } from "@/features/chat-page/chat-services/tools/registry";
+import { stabilizeToolset } from "@/features/chat-page/chat-services/tools/stabilize-toolset";
 import {
   startPublisher,
   unregisterPublisher,
 } from "@/features/chat-page/chat-services/chat-api/stream-publisher";
 import { enforceSameOriginRequest } from "@/features/chat-page/chat-services/chat-api/same-origin";
-import { buildSystemMessage, withAnthropicPromptCache } from "@/features/chat-page/chat-services/chat-api/prompt-builder";
+import {
+  buildSystemMessage,
+  withAnthropicPromptCache,
+  withPromptCacheBreakpoint,
+} from "@/features/chat-page/chat-services/chat-api/prompt-builder";
+import { resolvePromptCacheKey } from "@/features/chat-page/chat-services/models/prompt-cache-key";
 import { CHAT_DEFAULT_SYSTEM_PROMPT } from "@/features/theme/theme-config";
 import {
   FindAllExtensionForCurrentUserAndIds,
@@ -192,6 +207,23 @@ export async function POST(req: Request) {
   const { modelConfig, fallbackInfo, effectiveReasoningEffort, selectedModel: effectiveModel } =
     await resolveModelAndLimits(payload, ctx.thread);
 
+  // The document hint's placement follows the EFFECTIVE model's provider, not
+  // the thread's. loadThreadContext could only guess from thread.selectedModel
+  // because the model resolution above needs the thread it returns; this turn's
+  // picker or a cap/intent downgrade can land on another provider entirely.
+  // Getting it wrong sends a mid-conversation system message to Claude, which
+  // is the one placement the Azure /anthropic surface may reject outright.
+  // Idempotent, and a no-op when the two already agree.
+  ctx = applyDocumentHintPlacement(ctx, modelConfig.provider);
+  if (ctx.documentHintPlacement !== "none") {
+    logInfo("/api/chat document hint placement", {
+      threadId: ctx.thread.id,
+      threadModel: ctx.thread.selectedModel,
+      effectiveModel,
+      placement: ctx.documentHintPlacement,
+    });
+  }
+
   // Resolve effective tool toggles up-front: per-request payload overrides the
   // thread's persisted defaultTools (the request body is the authoritative
   // user intent for this turn, since the UI toggles update local state and
@@ -231,21 +263,28 @@ export async function POST(req: Request) {
     });
   }
 
+  // ── prompt prefix assembly (cache-stability critical) ──────────────────
+  // The generative-UI block is process-constant, so it is handed to
+  // buildSystemMessage as `trailingStaticBlock` instead of being concatenated
+  // after the call. That lets the builder keep the per-thread `documentHint`
+  // in final position — see the ORDERING note in prompt-builder.ts.
   const system =
     buildSystemMessage({
       staticSystemPrompt: CHAT_DEFAULT_SYSTEM_PROMPT,
       personaMessage: ctx.thread.personaMessage ?? "",
       documentHint: ctx.documentHint,
-    }) +
-    // Generative UI: GPT-5.5 reliably declines a UI *tool* under tool_choice
-    // auto (it prefers to emit markdown), but it WILL emit a fenced code block.
-    // So we instruct it to emit a json-render spec as a ```genui block, which
-    // rich-response renders as a real Bühler card (see components/ai-elements).
-    "\n\n## Interactive UI (generative UI)\n" +
-    "When the user asks for a dashboard, metrics/KPIs, a comparison, a table, or a chart — or whenever numeric/structured data is clearer shown visually — render it as an interactive card by emitting a fenced code block whose language tag is `genui`, containing a json-render spec. Do NOT render that content as a markdown table.\n" +
-    'The spec is a FLAT object: { "root": "<id>", "elements": { "<id>": { "type": <Component>, "props": { … }, "children": ["<childId>"] } } }. `children` is an array of element ids; `root` is the top element id.\n' +
-    "Component types and props: Stack { direction: 'col' | 'row' }; Card { title?, description? }; Stat { label, value, delta?, trend?: 'up' | 'down' | 'flat' }; Badge { label, tone?: 'default' | 'success' | 'warning' | 'destructive' }; Table { columns: string[], rows: string[][] }; Text { content, muted? }; Chart { kind?: 'line' | 'bar', title?, data: { label: string, value: number }[] }.\n" +
-    "A short markdown sentence alongside the ```genui block is fine.";
+      trailingStaticBlock:
+        // Generative UI: GPT-5.5 reliably declines a UI *tool* under tool_choice
+        // auto (it prefers to emit markdown), but it WILL emit a fenced code block.
+        // So we instruct it to emit a json-render spec as a ```genui block, which
+        // rich-response renders as a real Bühler card (see components/ai-elements).
+        "\n\n## Interactive UI (generative UI)\n" +
+        "When the user asks for a dashboard, metrics/KPIs, a comparison, a table, or a chart — or whenever numeric/structured data is clearer shown visually — render it as an interactive card by emitting a fenced code block whose language tag is `genui`, containing a json-render spec. Do NOT render that content as a markdown table.\n" +
+        'The spec is a FLAT object: { "root": "<id>", "elements": { "<id>": { "type": <Component>, "props": { … }, "children": ["<childId>"] } } }. `children` is an array of element ids; `root` is the top element id.\n' +
+        "Component types and props: Stack { direction: 'col' | 'row' }; Card { title?, description? }; Stat { label, value, delta?, trend?: 'up' | 'down' | 'flat' }; Badge { label, tone?: 'default' | 'success' | 'warning' | 'destructive' }; Table { columns: string[], rows: string[][] }; Text { content, muted? }; Chart { kind?: 'line' | 'bar', title?, data: { label: string, value: number }[] }.\n" +
+        "A short markdown sentence alongside the ```genui block is fine.",
+    });
+  // ── end prompt prefix assembly ─────────────────────────────────────────
 
   // Resolve extension IDs → full objects with header secrets for buildToolset
   type ResolvedExt = Parameters<typeof buildToolset>[0]["extensions"][number];
@@ -323,9 +362,86 @@ export async function POST(req: Request) {
     }
   }
 
+  // Prompt-cache prefix stability for code_interpreter. The tool definition
+  // is part of the cached prefix, and it used to change between turn 1
+  // (container: {} or { fileIds }) and turn 2 (container: "<harvested id>"),
+  // so a code-interpreter thread could never match its own cached prefix.
+  // Creating the container BEFORE the first model call puts the id in the
+  // definition from turn 1 onwards. If creation fails we keep the old
+  // bootstrap-then-harvest path, which still works.
+  if (effectiveToolsSafe.codeInterpreter && !ctx.thread.codeInterpreterContainerId) {
+    const containerId = await ensureCodeInterpreterContainer({
+      threadId: ctx.thread.id,
+      existingContainerId: ctx.thread.codeInterpreterContainerId,
+      fileIds: requestedCiFileIds,
+    });
+    if (containerId) {
+      // Persist BEFORE using it. The id has to survive to the next turn even
+      // if the model never calls the tool this turn — otherwise turn 2 mints
+      // another container and changes the definition again, which is the
+      // instability this pre-creation exists to remove.
+      //
+      // And if the write fails, the id must NOT go on the wire: an
+      // unpersisted id is invisible to the next turn, so every turn would
+      // mint one more container. A sustained Cosmos write failure would then
+      // be an unbounded container-creation loop with nothing to stop it.
+      // Falling back to the old bootstrap-then-harvest shape costs a cache
+      // miss; the loop costs money.
+      let persisted = false;
+      try {
+        await UpdateChatThreadCodeInterpreterContainer(
+          ctx.thread.id,
+          containerId,
+          requestedCiSignature,
+        );
+        persisted = true;
+      } catch (err) {
+        logError("/api/chat failed to persist pre-created container id", {
+          threadId: ctx.thread.id,
+          containerId,
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
+      if (persisted) {
+        ctx.thread.codeInterpreterContainerId = containerId;
+      } else {
+        logWarn(
+          "/api/chat discarding an unpersisted container id for this turn",
+          { threadId: ctx.thread.id, containerId },
+        );
+      }
+    }
+  }
+
   // Resolve provider-native parts (model, built-in tools, providerOptions)
   // through the provider seam so Anthropic / future providers slot in
   // without touching this route handler (architect2 SEV-2 B10).
+  // Prompt-cache key. Default strategy is the thread id; the "persona"
+  // strategy deliberately shares one key across the threads of an agent so
+  // the second thread onwards READS the system+tools prefix the first one
+  // wrote (measured: same key + same developer message => shared prefix on
+  // GPT-5.6). The built-in tool names are derived from the toggles rather
+  // than from the resolved seam output because the key has to be known before
+  // the seam runs, and the toggle set determines the built-ins one-to-one.
+  const cacheKeyToolNames = [
+    ...Object.keys(tools),
+    ...(effectiveToolsSafe.codeInterpreter ? ["code_interpreter"] : []),
+    ...(effectiveToolsSafe.imageGeneration ? ["image_generation"] : []),
+    ...(effectiveToolsSafe.webSearch ? ["web_search"] : []),
+  ];
+  // The shard key must be OPAQUE: prompt_cache_key travels to the provider in
+  // the request body, and ctx.user.id is the user's EMAIL address. Reuse the
+  // rate-limit subject ("user:<sha256 hashed id>"), which is already resolved
+  // at the top of this handler — opaque, stable per user, and no second
+  // session lookup.
+  const promptCacheKey = resolvePromptCacheKey({
+    modelId: effectiveModel,
+    threadId: ctx.thread.id,
+    personaId: ctx.thread.personaId,
+    toolNames: cacheKeyToolNames,
+    userKey: rateLimitKey,
+  });
+
   const resolved = resolveProvider({
     modelId: effectiveModel,
     thread: {
@@ -338,6 +454,7 @@ export async function POST(req: Request) {
       effort: effectiveReasoningEffort,
     },
     codeInterpreterFileIds: requestedCiFileIds,
+    promptCacheKey,
   });
   logInfo("/api/chat builtInTools", {
     keys: Object.keys(resolved.builtInTools),
@@ -348,10 +465,18 @@ export async function POST(req: Request) {
   // through streamText's parameter type. ToolSet is structurally a
   // Record<string, Tool>; both `tools` (custom registry) and
   // `resolved.builtInTools` (provider-native) satisfy it.
-  const allTools = {
-    ...tools,
-    ...resolved.builtInTools,
-  } as ToolSet;
+  // One canonical order for the whole toolset — built-ins AND custom tools
+  // together. Merging the built-ins onto the (already sorted) custom tools
+  // left their position dependent on object insertion order, so the tools
+  // array on the wire changed shape whenever a toggle changed which built-ins
+  // existed. See stabilize-toolset.ts.
+  const allTools = stabilizeToolset(
+    {
+      ...tools,
+      ...resolved.builtInTools,
+    },
+    Object.keys(resolved.builtInTools),
+  ) as ToolSet;
 
   // Captured by `onError` so the failure cause can flow into onFinish's
   // sentinel row — without this, every provider failure renders as the
@@ -395,29 +520,73 @@ export async function POST(req: Request) {
   // keeps replaying for the next subscriber).
   const { abortController, publish } = startPublisher(ctx.thread.id);
 
-  // Anthropic (Claude via the Azure /anthropic Messages API) caches only the
-  // prefixes you mark with explicit cache_control breakpoints — there's no
-  // top-level auto-cache like the OpenAI promptCacheKey the Azure seam uses.
-  // For Claude, fold the system prompt into a cached SystemModelMessage and mark
-  // the latest turn so the tools+system+history prefix is replayed (cache-read)
-  // across turns of a thread instead of re-billed every turn. Other providers
-  // pass the plain system string unchanged.
-  const modelMessages = await convertToModelMessages(ctx.history);
+  // Every provider caches a prompt PREFIX and wants the end of the reusable
+  // prefix marked with a breakpoint; only the wire field differs, and that
+  // detail lives in prompt-builder.ts. What differs per seam is whether a
+  // breakpoint is REQUIRED:
+  //
+  //   anthropic (Claude via the Azure /anthropic Messages API) — required.
+  //     Nothing is cached without an explicit cache_control breakpoint, so the
+  //     system prompt is always folded into a cached SystemModelMessage and the
+  //     latest turn is always marked; the tools+system+history prefix is then
+  //     replayed (cache-read) across turns instead of re-billed every turn.
+  //   openai / Azure Responses — optional. The seam already gets automatic
+  //     prefix caching from promptCacheKey, so the breakpoint only PINS where
+  //     the shared unit ends and stays behind a flag (see below).
+  // ctx.modelHistory, not ctx.history: it is the same conversation plus the
+  // prompt scaffolding (replayed summary, document hint) already in the order
+  // the model must see it. ctx.history stays the real conversation for the
+  // title check and for originalMessages below.
+  const modelMessages = await convertToModelMessages(ctx.modelHistory);
+  // PROMPT_CACHE_PERSONA_BREAKPOINT: pin a cache breakpoint at the end of the
+  // static developer/system prefix on whichever provider serves the turn, so
+  // the system+tools block shared by every thread of an agent is one cache
+  // unit. It is a NO-OP on Anthropic — that seam always pins the same
+  // breakpoint, flag or not — so the flag only gates the Responses seam, where
+  // the mode:"explicit" wire value is still unverified against Azure (see
+  // withPromptCacheBreakpoint) and the default is therefore off.
+  const usePersonaBreakpoint =
+    process.env.PROMPT_CACHE_PERSONA_BREAKPOINT === "true" &&
+    modelConfig.provider !== "anthropic" &&
+    modelConfig.provider !== "foundry" &&
+    modelConfig.promptCacheOptionsSupported === true;
   const streamPrompt =
     modelConfig.provider === "anthropic"
       ? withAnthropicPromptCache(system, modelMessages)
-      : { system, messages: modelMessages };
+      : usePersonaBreakpoint
+        ? withPromptCacheBreakpoint(system, modelMessages)
+        : { instructions: system, messages: modelMessages };
 
   const result = streamText({
     model: resolved.model,
-    system: streamPrompt.system,
+    instructions: streamPrompt.instructions,
     messages: streamPrompt.messages,
+    // The prompt carries app-authored system messages INSIDE `messages`: the
+    // document-hint tail (thread-context.ts) and the replayed history summary
+    // are both `role: "system"` UIMessages, and convertToModelMessages maps
+    // them to system ModelMessages at the same index. AI SDK 7 rejects that by
+    // default (InvalidPromptError, "System messages are not allowed in the
+    // prompt or messages fields") because a system message coming from
+    // untrusted, persisted chat data is an injection vector. Ours are neither
+    // user-supplied nor round-tripped from the model — the loader builds both
+    // from server-side state — and their POSITION is the whole point (the hint
+    // has to sit at the prompt tail to stay out of the cached prefix), so they
+    // cannot move to `instructions`.
+    allowSystemInMessages: true,
     tools: allTools,
-    stopWhen: stepCountIs(15),
+    // Per-model ceiling on emitted tokens, via the resolver so the env
+    // override applies here and in the sub-agent identically. Reasoning
+    // tokens count against it, which is why a turn can finish with
+    // finishReason "length" — see the truncation notice in persist-assistant.
+    maxOutputTokens: resolveMaxOutputTokens({
+      modelId: effectiveModel,
+      modelValue: modelConfig.maxOutputTokens,
+    }),
+    stopWhen: isStepCount(15),
     // Repairs bare, pre-namespacing extension tool names the model may
     // echo from old persisted thread history (see repairExtensionToolCall)
     // instead of letting NoSuchToolError kill the turn.
-    experimental_repairToolCall: repairExtensionToolCall,
+    repairToolCall: repairExtensionToolCall,
     abortSignal: abortController.signal,
     experimental_transform: (() => {
       // Shared map populated by the code-interpreter rewriter when it
@@ -488,7 +657,7 @@ export async function POST(req: Request) {
             reasoningText: accumulatedReasoning || undefined,
             toolResults: aggregatedToolResults,
             finishReason: "other",
-            totalUsage: {
+            usage: {
               inputTokens: 0,
               outputTokens: 0,
               totalTokens: 0,
@@ -514,7 +683,7 @@ export async function POST(req: Request) {
     // Cosmos when the LLM finishes — not when the response stream closes
     // (which happens early on client disconnect and would persist a
     // partial message).
-    onFinish: async (event) => {
+    onEnd: async (event) => {
       logInfo("/api/chat streamText.onFinish fired", {
         threadId: ctx.thread.id,
         finishReason: event.finishReason,
@@ -742,16 +911,47 @@ export async function POST(req: Request) {
   // buffered prefix and forward live chunks. tee() backpressures both
   // consumers on the slower one — the publisher drains eagerly so the
   // POST stream isn't held back when no GET is attached.
-  const framedResponse = result.toUIMessageStreamResponse({
-    originalMessages: ctx.history,
-    generateMessageId: createIdGenerator({ prefix: "msg", size: 16 }),
-    onError: (err) => (err instanceof Error ? err.message : String(err)),
+  //
+  // The stream is OURS, not streamText's: it is created with a writer so the
+  // route can put its own parts on the assistant message before the model's
+  // chunks, and the model stream is merged into it. Today that is the
+  // compaction notice; anything else the turn needs to tell the user goes the
+  // same way.
+  // Two different quantities have to reach the header, and only one of them is
+  // on the terminal `finish` part.
+  //
+  //   TURN TOTALS       `finish.totalUsage` — the all-steps roll-up. The SDK
+  //                     is explicit: "When there are multiple steps, the usage
+  //                     is the sum of all step usages". That sum is what was
+  //                     billed, so cost and the cache split come from it.
+  //   LAST PROMPT SIZE  the LAST `finish-step` part's own `usage.inputTokens`.
+  //                     `TextStreamFinishStepPart` carries per-step usage
+  //                     (ai/dist/index.d.ts, the `finish-step` member of
+  //                     `TextStreamPart`); the `finish` part carries only the
+  //                     roll-up. So the step value has to be caught as it goes
+  //                     past — hence these two counters.
+  //
+  // `messageMetadata` is invoked for EVERY part (the SDK's own transform calls
+  // it before `toUIMessageChunk`), and a non-undefined return on a part that is
+  // not `start`/`finish` makes the SDK enqueue an extra `message-metadata`
+  // chunk. So: capture on `finish-step`, and emit ONLY on `finish`.
+  let lastStepInputTokens: number | undefined;
+  let stepCount = 0;
+
+  const modelStream = result.toUIMessageStream({
     // Ship the turn's token usage on the assistant message metadata so the
     // header's live usage display updates every turn (the chat session's
     // onFinish reads this). Provider-agnostic: the SDK normalises usage to
     // inputTokens/outputTokens for both Azure (Responses) and Anthropic
     // (Messages) before it reaches us. Fires on the terminal `finish` part.
     messageMetadata: ({ part }): ChatMessageMetadata | undefined => {
+      if (part.type === "finish-step") {
+        stepCount += 1;
+        // Last one wins: steps arrive in order, so after the final
+        // `finish-step` this holds the size of the last prompt sent.
+        lastStepInputTokens = part.usage?.inputTokens ?? lastStepInputTokens;
+        return undefined;
+      }
       if (part.type !== "finish") return undefined;
       const u = part.totalUsage;
       return {
@@ -759,10 +959,112 @@ export async function POST(req: Request) {
           inputTokens: u.inputTokens ?? 0,
           outputTokens: u.outputTokens ?? 0,
           cachedTokens: u.inputTokenDetails?.cacheReadTokens ?? 0,
+          cacheWriteTokens: u.inputTokenDetails?.cacheWriteTokens ?? 0,
+          // Undefined when no `finish-step` carried a number; computeRequestUsage
+          // then falls back to the roll-up, which is exact for one step.
+          ...(typeof lastStepInputTokens === "number"
+            ? { lastPromptTokens: lastStepInputTokens }
+            : {}),
+          ...(stepCount > 0 ? { stepCount } : {}),
           modelConfig,
         }),
       };
     },
+  });
+  const framedResponse = createUIMessageStreamResponse({
+    stream: createUIMessageStream({
+      // Persistence mode: the assistant message keeps the id the SDK would
+      // have given it through toUIMessageStreamResponse, so nothing
+      // downstream (client reconciliation, resume) changes shape.
+      originalMessages: ctx.history,
+      generateId: createIdGenerator({ prefix: "msg", size: 16 }),
+      onError: (err) => (err instanceof Error ? err.message : String(err)),
+      execute: async ({ writer }) => {
+        // The compaction notice is written TWICE under one part id, and the
+        // SDK reconciles data parts by (type, id) so the row updates in place.
+        //
+        //   now          "Compacted 2 older turns into a summary" — the trim
+        //                already happened in loadThreadContext (the summariser
+        //                is a model call on the request path, and its output
+        //                goes into the prompt this very turn replays), so the
+        //                fact is known immediately. The token counts are not.
+        //   at the end   the same line with the provider's REAL numbers:
+        //                "(34,012 → 17,565 tokens)". `tokensAfter` IS the size
+        //                of this request's LAST prompt (the final step's
+        //                inputTokens), which does not exist until the request
+        //                finishes. Both ends are prompt sizes, never the
+        //                billed all-steps sum — a trim shrinks the prompt, and
+        //                a roll-up would report it growing on a tool turn.
+        //
+        // No estimate is ever shown. A number in the header that later
+        // disagrees with the provider's own accounting is worse than no number
+        // for a few seconds.
+        if (ctx.compaction) {
+          writer.write(compactionDonePart(ctx.compaction));
+          logInfo("/api/chat wrote compaction notice", {
+            threadId: ctx.thread.id,
+            turnId: ctx.turnId,
+            trimmedTurns: ctx.compaction.trimmedTurns,
+            summaryOutcome: ctx.compaction.summaryOutcome,
+            durationMs: ctx.compaction.durationMs,
+          });
+        }
+        writer.merge(modelStream);
+
+        if (!ctx.compaction) return;
+        // Awaiting AFTER the merge is what keeps the stream open long enough
+        // to write again: createUIMessageStream closes when this callback's
+        // promise settles and the merged stream is done. `finalStep` resolves
+        // at the model's finish event.
+        //
+        // `finalStep`, NOT `result.usage`. Both ends of this notice are PROMPT
+        // SIZES — "the prompt went from 34,012 to 17,565" — and `result.usage`
+        // is the all-steps roll-up, which on a tool turn adds up several
+        // prompts and would claim the trim made the prompt bigger.
+        // `StreamTextResult.finalStep` is a `PromiseLike<StepResult>` and
+        // `StepResult` carries its own per-step `usage` (ai/dist/index.d.ts).
+        try {
+          const finalStep = await result.finalStep;
+          const tokensAfter = finalStep?.usage?.inputTokens ?? 0;
+          if (tokensAfter <= 0) return;
+          writer.write(
+            compactionDonePart(ctx.compaction, {
+              // The previous request's real prompt size, read at load time
+              // before this turn overwrote it. Absent on a thread's first
+              // turn, in which case the notice shows only what it is now.
+              ...(typeof ctx.previousRequestPromptTokens === "number" &&
+              ctx.previousRequestPromptTokens > 0
+                ? { tokensBefore: ctx.previousRequestPromptTokens }
+                : {}),
+              tokensAfter,
+            }),
+          );
+          logInfo("/api/chat completed the compaction notice", {
+            threadId: ctx.thread.id,
+            turnId: ctx.turnId,
+            realTokensBefore: ctx.previousRequestPromptTokens,
+            realTokensAfter: tokensAfter,
+          });
+          // Same numbers onto the compaction row, so the divider a reloaded
+          // page draws says what the live notice said. Fails soft inside.
+          await recordHistoryCompactionRealUsage({
+            threadId: ctx.thread.id,
+            ...(typeof ctx.previousRequestPromptTokens === "number"
+              ? { realTokensBefore: ctx.previousRequestPromptTokens }
+              : {}),
+            realTokensAfter: tokensAfter,
+          });
+        } catch (err) {
+          // A usage read that fails must not fail the turn: the user already
+          // has their answer, and the notice simply keeps its shorter form.
+          logWarn("/api/chat could not complete the compaction notice", {
+            threadId: ctx.thread.id,
+            turnId: ctx.turnId,
+            error: err instanceof Error ? err.message : String(err),
+          });
+        }
+      },
+    }),
   });
   if (!framedResponse.body) {
     unregisterPublisher(ctx.thread.id);

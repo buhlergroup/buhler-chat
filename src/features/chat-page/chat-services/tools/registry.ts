@@ -10,6 +10,7 @@ import { searchSubAgentTool } from "./search-sub-agent";
 import { getCurrentTimeTool } from "./get-current-time";
 import { extensionTool } from "./extension-tool";
 import type { ToolContext } from "./tool-context";
+import { compareByCodepoint } from "./stabilize-toolset";
 
 /**
  * Provider tool-name cap (OpenAI/Azure/Anthropic all reject function names
@@ -70,8 +71,9 @@ export function buildExtensionToolKey(
 /**
  * Builds the toolset for a given ToolContext.
  *
- * Keys are inserted in localeCompare ascending order so that the wire
- * representation is byte-identical across requests — this is the
+ * Keys are inserted in the canonical order defined by stabilize-toolset.ts
+ * (codepoint, never locale) so that the wire representation is byte-identical
+ * across requests AND across pods with different locales — this is the
  * prompt-cache stability invariant locked by the snapshot test in task 3.
  *
  * Never modifies function-registry.ts; runs in parallel with the old
@@ -175,8 +177,9 @@ export async function buildToolset(
     }
   }
 
-  // Sort by localeCompare for prompt-cache stability
-  entries.sort(([a], [b]) => a.localeCompare(b));
+  // Codepoint order for prompt-cache stability. localeCompare would make the
+  // tool order depend on the pod's locale/ICU build — see stabilize-toolset.ts.
+  entries.sort(([a], [b]) => compareByCodepoint(a, b));
 
   const toolset: Record<string, Tool> = {};
   for (const [name, t] of entries) {

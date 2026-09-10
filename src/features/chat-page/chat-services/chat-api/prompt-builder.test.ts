@@ -1,9 +1,10 @@
 import { describe, it, expect } from "vitest";
 import type { ModelMessage } from "ai";
+import { compareByCodepoint } from "../tools/stabilize-toolset";
 import {
   buildSystemMessage,
-  sortFunctionTools,
   withAnthropicPromptCache,
+  withPromptCacheBreakpoint,
 } from "./prompt-builder";
 
 // These tests lock down byte-for-byte stability of the parts of the request
@@ -62,53 +63,59 @@ describe("buildSystemMessage", () => {
     expect(out.toLowerCase()).not.toContain("today");
   });
 
-  it("places dynamic segments in the documented order: static, doc-hint, persona", () => {
+  it("places segments in the documented order: static, persona, trailing static block, doc-hint", () => {
     const out = buildSystemMessage({
       staticSystemPrompt: "STATIC",
       personaMessage: "PERSONA",
       documentHint: "DOCHINT",
+      trailingStaticBlock: "TRAILING",
     });
-    expect(out.indexOf("STATIC")).toBeLessThan(out.indexOf("DOCHINT"));
-    expect(out.indexOf("DOCHINT")).toBeLessThan(out.indexOf("PERSONA"));
+    expect(out.indexOf("STATIC")).toBeLessThan(out.indexOf("PERSONA"));
+    expect(out.indexOf("PERSONA")).toBeLessThan(out.indexOf("TRAILING"));
+    expect(out.indexOf("TRAILING")).toBeLessThan(out.indexOf("DOCHINT"));
   });
 
-});
-
-describe("sortFunctionTools", () => {
-  it("produces the same array regardless of input order", () => {
-    const a = [{ name: "search_documents" }, { name: "call_sub_agent" }, { name: "search_company_content" }];
-    const b = [{ name: "call_sub_agent" }, { name: "search_company_content" }, { name: "search_documents" }];
-    const c = [{ name: "search_company_content" }, { name: "search_documents" }, { name: "call_sub_agent" }];
-
-    const sortedA = sortFunctionTools(a);
-    const sortedB = sortFunctionTools(b);
-    const sortedC = sortFunctionTools(c);
-
-    expect(JSON.stringify(sortedA)).toBe(JSON.stringify(sortedB));
-    expect(JSON.stringify(sortedA)).toBe(JSON.stringify(sortedC));
+  it("keeps the whole prefix byte-identical when only the document hint changes", () => {
+    // The regression this pins: documentHint used to sit BETWEEN the static
+    // prompt and the persona, so attaching one document rewrote every byte
+    // after the static prompt. Now the shared prefix must survive intact.
+    const base = {
+      staticSystemPrompt: "STATIC PROMPT",
+      personaMessage: "PERSONA MESSAGE",
+      trailingStaticBlock: "\n\n## Interactive UI\nrules",
+    };
+    const withoutDocs = buildSystemMessage(base);
+    const withDocs = buildSystemMessage({
+      ...base,
+      documentHint: "\n\nDOCUMENT CONTEXT: a.pdf",
+    });
+    expect(withDocs.startsWith(withoutDocs)).toBe(true);
+    expect(withDocs).not.toBe(withoutDocs);
   });
 
-  it("does not mutate the input", () => {
-    const original = [{ name: "z" }, { name: "a" }];
-    const snapshot = JSON.stringify(original);
-    sortFunctionTools(original);
-    expect(JSON.stringify(original)).toBe(snapshot);
+  it("keeps the prefix byte-identical when the document hint only changes wording", () => {
+    const base = {
+      staticSystemPrompt: "STATIC PROMPT",
+      personaMessage: "PERSONA MESSAGE",
+      trailingStaticBlock: "\n\n## Interactive UI\nrules",
+    };
+    const oneDoc = buildSystemMessage({ ...base, documentHint: "\n\nDOCS: a.pdf" });
+    const twoDocs = buildSystemMessage({ ...base, documentHint: "\n\nDOCS: a.pdf, b.pdf" });
+    const shared = buildSystemMessage(base);
+    expect(oneDoc.startsWith(shared)).toBe(true);
+    expect(twoDocs.startsWith(shared)).toBe(true);
   });
 
-  it("preserves all other fields on each tool entry", () => {
-    const tools = [
-      { name: "b", description: "desc-b", strict: true as const, parameters: { type: "object" } },
-      { name: "a", description: "desc-a", strict: true as const, parameters: { type: "object" } },
-    ];
-    const sorted = sortFunctionTools(tools);
-    expect(sorted[0]).toEqual(tools[1]);
-    expect(sorted[1]).toEqual(tools[0]);
+  it("treats an omitted trailingStaticBlock as empty string", () => {
+    const a = buildSystemMessage({
+      staticSystemPrompt: "S",
+      personaMessage: "P",
+      trailingStaticBlock: "",
+    });
+    const b = buildSystemMessage({ staticSystemPrompt: "S", personaMessage: "P" });
+    expect(a).toBe(b);
   });
 
-  it("handles tools with missing/empty names without throwing", () => {
-    const tools = [{ name: "z" }, { name: undefined }, { name: "a" }];
-    expect(() => sortFunctionTools(tools as any)).not.toThrow();
-  });
 });
 
 describe("withAnthropicPromptCache", () => {
@@ -120,7 +127,7 @@ describe("withAnthropicPromptCache", () => {
   ];
 
   it("returns the system prompt as a cached SystemModelMessage (breakpoint #1: tools+system)", () => {
-    const { system } = withAnthropicPromptCache("SYSTEM PROMPT", userMsgs);
+    const { instructions: system } = withAnthropicPromptCache("SYSTEM PROMPT", userMsgs);
     expect(system.role).toBe("system");
     expect(system.content).toBe("SYSTEM PROMPT");
     expect(system.providerOptions?.anthropic?.cacheControl).toEqual(EPHEMERAL);
@@ -172,13 +179,13 @@ describe("withAnthropicPromptCache", () => {
   });
 
   it("handles an empty messages array (still caches the system prompt)", () => {
-    const { system, messages } = withAnthropicPromptCache("SYS", []);
+    const { instructions: system, messages } = withAnthropicPromptCache("SYS", []);
     expect(system.providerOptions?.anthropic?.cacheControl).toEqual(EPHEMERAL);
     expect(messages).toEqual([]);
   });
 
   it("uses fresh cacheControl objects per breakpoint (no aliasing across messages)", () => {
-    const { system, messages } = withAnthropicPromptCache("SYS", userMsgs);
+    const { instructions: system, messages } = withAnthropicPromptCache("SYS", userMsgs);
     const sysCc = system.providerOptions?.anthropic?.cacheControl;
     const lastCc = messages[messages.length - 1].providerOptions?.anthropic?.cacheControl;
     expect(sysCc).not.toBe(lastCc); // distinct object identities
@@ -193,7 +200,6 @@ describe("byte-for-byte invariant (the cache contract)", () => {
 
   const personaMessage = "Be a helpful coding assistant. Always cite line numbers when referring to code.";
   const staticSystemPrompt = "You are a friendly Bühler Chat AI assistant.\n\nFORMAT WITH MARKDOWN.";
-  const today = "2026-04-30";
 
   it("two requests with identical thread state produce identical system messages and tool arrays", () => {
     const toolsRequest1 = [
@@ -208,14 +214,56 @@ describe("byte-for-byte invariant (the cache contract)", () => {
       { name: "call_sub_agent", description: "..." },
     ];
 
-    const sys1 = buildSystemMessage({ staticSystemPrompt, personaMessage, today, documentHint: "" });
-    const sys2 = buildSystemMessage({ staticSystemPrompt, personaMessage, today, documentHint: "" });
-    const sortedTools1 = sortFunctionTools(toolsRequest1);
-    const sortedTools2 = sortFunctionTools(toolsRequest2);
+    // `today` used to be passed here; the builder never accepted it (a date in
+    // the prefix would void the cache at every UTC midnight) and TypeScript
+    // was flagging it.
+    const sys1 = buildSystemMessage({ staticSystemPrompt, personaMessage, documentHint: "" });
+    const sys2 = buildSystemMessage({ staticSystemPrompt, personaMessage, documentHint: "" });
+    // The live path orders tools with stabilizeToolset's comparator; sort with
+    // the same one here so this asserts the shipped ordering, not a helper.
+    const byName = (a: { name: string }, b: { name: string }) =>
+      compareByCodepoint(a.name, b.name);
+    const sortedTools1 = [...toolsRequest1].sort(byName);
+    const sortedTools2 = [...toolsRequest2].sort(byName);
 
     // System message is byte-identical
     expect(Buffer.from(sys1).equals(Buffer.from(sys2))).toBe(true);
     // Tool array is byte-identical (same JSON serialization)
     expect(JSON.stringify(sortedTools1)).toBe(JSON.stringify(sortedTools2));
+  });
+});
+
+// Provider-neutral concept, Responses-seam wire form. The Anthropic wire form
+// of the same breakpoint is covered by the withAnthropicPromptCache describe
+// above (breakpoint #1, on the system message).
+describe("withPromptCacheBreakpoint", () => {
+  const msgs: ModelMessage[] = [
+    { role: "user", content: "first question" },
+    { role: "assistant", content: "first answer" },
+    { role: "user", content: "follow-up question" },
+  ];
+
+  it("returns the system prompt as a SystemModelMessage carrying the breakpoint", () => {
+    const { instructions: system } = withPromptCacheBreakpoint("SYSTEM PROMPT", msgs);
+    expect(system.role).toBe("system");
+    expect(system.content).toBe("SYSTEM PROMPT");
+    // The wire shape @ai-sdk/openai emits as prompt_cache_breakpoint.
+    expect(system.providerOptions?.openai?.promptCacheBreakpoint).toEqual({
+      mode: "explicit",
+    });
+  });
+
+  it("leaves the conversation messages untouched", () => {
+    const { messages } = withPromptCacheBreakpoint("SYSTEM", msgs);
+    expect(messages).toEqual(msgs);
+    // A copy, so a later mutation cannot reach the caller's array.
+    expect(messages).not.toBe(msgs);
+    expect(messages.every((m) => m.providerOptions === undefined)).toBe(true);
+  });
+
+  it("is byte-stable across calls (the prefix must not drift)", () => {
+    expect(
+      JSON.stringify(withPromptCacheBreakpoint("SYSTEM", msgs)),
+    ).toBe(JSON.stringify(withPromptCacheBreakpoint("SYSTEM", msgs)));
   });
 });

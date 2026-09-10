@@ -126,3 +126,126 @@ describe("common.unit.chat-metrics — reportUserChatMessage", () => {
     );
   });
 });
+
+describe("common.unit.chat-metrics — turn-shape dimensions", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it("common.unit.chat-metrics.009: a 1-step plain turn reports stepCount 1 and toolCallCount 0", async () => {
+    const { reportPromptTokens } = await import("./chat-metrics-service");
+    await reportPromptTokens(100, "gpt-5.6-terra", "user", {
+      threadId: "t1",
+      stepCount: 1,
+      toolCallCount: 0,
+    });
+    expect(mockRecord).toHaveBeenCalledWith(
+      100,
+      expect.objectContaining({ stepCount: 1, toolCallCount: 0 }),
+    );
+  });
+
+  it("common.unit.chat-metrics.010: a 3-step tool turn reports its step and tool-call counts", async () => {
+    const mod = await import("./chat-metrics-service");
+    const attrs = { threadId: "t1", stepCount: 3, toolCallCount: 4 };
+    await mod.reportPromptTokens(100, "gpt-5.6-terra", "user", { ...attrs });
+    await mod.reportCompletionTokens(50, "gpt-5.6-terra", { ...attrs });
+    await mod.reportCachedTokens(80, "gpt-5.6-terra", { ...attrs });
+    await mod.reportCacheWriteTokens(20, "gpt-5.6-terra", { ...attrs });
+    await mod.reportUserChatMessage("gpt-5.6-terra", { ...attrs });
+
+    // Every token histogram carries the dimensions...
+    expect(mockRecord).toHaveBeenCalledTimes(4);
+    for (const call of mockRecord.mock.calls) {
+      expect(call[1]).toEqual(
+        expect.objectContaining({ stepCount: 3, toolCallCount: 4 }),
+      );
+    }
+    // ...and so does the message counter.
+    expect(mockAdd).toHaveBeenCalledWith(
+      1,
+      expect.objectContaining({ stepCount: 3, toolCallCount: 4 }),
+    );
+  });
+
+  it("common.unit.chat-metrics.011: the dimensions default to 0 when the caller omits them", async () => {
+    const { reportCachedTokens } = await import("./chat-metrics-service");
+    await reportCachedTokens(10, "gpt-5.6-terra", { threadId: "t1" });
+    expect(mockRecord).toHaveBeenCalledWith(
+      10,
+      expect.objectContaining({ stepCount: 0, toolCallCount: 0 }),
+    );
+  });
+
+  it("common.unit.chat-metrics.012: junk counts are coerced to 0 so the dimension type never splits (negative)", async () => {
+    const { reportCachedTokens } = await import("./chat-metrics-service");
+    await reportCachedTokens(10, "gpt-5.6-terra", {
+      stepCount: "three",
+      toolCallCount: -2,
+    });
+    expect(mockRecord).toHaveBeenCalledWith(
+      10,
+      expect.objectContaining({ stepCount: 0, toolCallCount: 0 }),
+    );
+  });
+
+  it("common.unit.chat-metrics.013: existing dimensions are untouched", async () => {
+    const { reportPromptTokens } = await import("./chat-metrics-service");
+    await reportPromptTokens(5, "gpt-5.6-terra", "user", { threadId: "t1" });
+    expect(mockRecord).toHaveBeenCalledWith(
+      5,
+      expect.objectContaining({
+        email: "user@example.com",
+        name: "Test User",
+        userHashedId: "hashed-id-abc123",
+        chatModel: "gpt-5.6-terra",
+        threadId: "t1",
+        role: "user",
+      }),
+    );
+  });
+});
+
+describe("common.unit.chat-metrics — the caller's attribute object is never mutated", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it("adds role to the emitted dimensions without writing it back", async () => {
+    // persist-assistant hands ONE attribute object to all five emitters inside
+    // a single Promise.all. reportPromptTokens used to write `role` onto it,
+    // so whichever sibling had not yet copied it emitted a role dimension too
+    // — non-deterministically, depending on statement order.
+    const { reportPromptTokens } = await import("./chat-metrics-service");
+    const shared = { threadId: "t1", stepCount: 2, toolCallCount: 1 };
+
+    await reportPromptTokens(100, "gpt-4", "user", shared);
+
+    expect(shared).toEqual({ threadId: "t1", stepCount: 2, toolCallCount: 1 });
+    expect("role" in shared).toBe(false);
+    expect(mockRecord).toHaveBeenCalledWith(
+      100,
+      expect.objectContaining({ role: "user", threadId: "t1", stepCount: 2, toolCallCount: 1 }),
+    );
+  });
+
+  it("keeps the siblings free of a role dimension when they share the object", async () => {
+    const { reportPromptTokens, reportCacheWriteTokens, reportCachedTokens } =
+      await import("./chat-metrics-service");
+    const shared = { threadId: "t1" };
+
+    await Promise.all([
+      reportPromptTokens(10, "gpt-4", "user", shared),
+      reportCachedTokens(20, "gpt-4", shared),
+      reportCacheWriteTokens(30, "gpt-4", shared),
+    ]);
+
+    const withoutRole = mockRecord.mock.calls.filter(
+      ([count]) => count === 20 || count === 30,
+    );
+    expect(withoutRole).toHaveLength(2);
+    for (const [, attrs] of withoutRole) {
+      expect(attrs).not.toHaveProperty("role");
+    }
+  });
+});

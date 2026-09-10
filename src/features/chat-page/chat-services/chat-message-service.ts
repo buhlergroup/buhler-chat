@@ -9,6 +9,7 @@ import { HistoryContainer } from "../../common/services/cosmos";
 import { ChatMessageModel, ChatRole, MESSAGE_ATTRIBUTE } from "./models";
 import { logDebug } from "@/features/common/services/logger";
 import { processMessageForImagePersistence } from "./chat-image-persistence-service";
+import { sortHistoryRowsDeterministically } from "./chat-history-order";
 
 export const FindTopChatMessagesForCurrentUser = async (
   chatThreadID: string,
@@ -93,15 +94,25 @@ export const FindAllChatMessagesForCurrentUser = async (
       .items.query<ChatMessageModel>(querySpec)
       .fetchAll();
 
+    // `ORDER BY r.createdAt ASC` alone is not a total order. createdAt has
+    // millisecond resolution and rows are written concurrently, so a turn that
+    // fires parallel tool calls persists several rows in the same millisecond
+    // and Cosmos leaves their relative order undefined. Two reads of the same
+    // thread can then differ, which moves the prompt prefix and voids the
+    // prompt cache for the whole turn. The in-memory pass breaks those ties on
+    // (createdAt, sequence, id); doing it here rather than in the query avoids
+    // requiring a composite index. See chat-history-order.ts.
+    const ordered = sortHistoryRowsDeterministically(resources);
+
     logDebug("Chat Messages Loaded", {
       threadId: chatThreadID,
-      count: resources.length,
+      count: ordered.length,
       userId: userHashedId
     });
 
     return {
       status: "OK",
-      response: resources,
+      response: ordered,
     };
   } catch (e) {
     return {

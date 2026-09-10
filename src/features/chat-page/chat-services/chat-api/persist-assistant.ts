@@ -4,13 +4,13 @@ import "server-only";
  * persist-assistant.ts
  *
  * Persists the completed assistant turn to Cosmos and records usage.
- * Called from the streamText onFinish callback (or the equivalent completion
+ * Called from the streamText onEnd callback (or the equivalent completion
  * hook in the new /api/chat rewrite).
  *
  * Design notes:
  * - Does NOT re-walk sub-agent results; the `usage` parameter is the parent
- *   streamText total which already includes all step usage (AI SDK v6 rolls up
- *   per-step usage into the final onFinish usage object automatically).
+ *   streamText total which already includes all step usage (AI SDK 7 rolls up
+ *   per-step usage into the final onEnd `usage` object automatically).
  * - Writer plumbing for `data-usage-warning` SSE events is not yet available at
  *   this layer; errors surface as logger warnings until the cutover route passes
  *   a writer here.  TODO: accept an optional writer param and emit the event.
@@ -34,6 +34,8 @@ import {
   reportPromptTokens,
   reportCompletionTokens,
   reportCachedTokens,
+  reportCacheWriteTokens,
+  reportTruncatedTurn,
   reportUserChatMessage,
 } from "@/features/common/services/chat-metrics-service";
 import { UpsertChatMessage } from "../chat-message-service";
@@ -43,6 +45,7 @@ import { MESSAGE_ATTRIBUTE } from "../models";
 import type { ChatMessageModel } from "../models";
 import { uniqueId } from "@/features/common/util";
 import { chatMessagesFromUIMessages } from "./message-adapter";
+import { computeTokenCostUsd } from "./usage-data";
 import { rewriteSandboxUrls } from "./rewrite-sandbox-urls";
 import {
   ingestContainerFileSourcesToChatStore,
@@ -119,14 +122,65 @@ export function friendlyErrorMessage(err: { message: string; name?: string }): s
   return "_⚠️ Something went wrong generating the reply. Please try again, or start a new chat if it keeps happening._";
 }
 
+/**
+ * Appended to a reply the provider cut short at the output ceiling.
+ *
+ * `finishReason: "length"` used to be indistinguishable from a finished
+ * answer: the text simply stopped, usually mid-sentence, and the user's only
+ * clue was that it read oddly. Reasoning makes it more likely rather than
+ * less — reasoning tokens count against the same ceiling, so a turn at high
+ * effort can spend most of the budget thinking and leave little for the
+ * answer.
+ *
+ * Kept short, and phrased as a fact about the answer rather than an error,
+ * because the part above it is usually still useful. Italic markdown to match
+ * the other sentinels in this file.
+ */
+export const TRUNCATION_NOTICE =
+  "\n\n_The answer was cut at the output limit. Ask for the rest, or for a shorter answer._";
+
+/**
+ * Append the truncation notice, unless it is already there.
+ *
+ * The idempotence matters: a turn can be persisted more than once (the retry
+ * in route.ts's onFinish handler), and two notices on one message reads like a
+ * bug in the app rather than a limit on the answer.
+ */
+export function withTruncationNotice(text: string): string {
+  return text.endsWith(TRUNCATION_NOTICE) ? text : `${text}${TRUNCATION_NOTICE}`;
+}
+
 // ---------------------------------------------------------------------------
 // Types
 // ---------------------------------------------------------------------------
 
 export interface UsagePayload {
+  /**
+   * TURN TOTAL input tokens: the sum over every step of the turn, which is
+   * what the provider billed. NOT the size of the last prompt — a tool turn
+   * sends one prompt per step and this adds them all up. See
+   * `lastPromptTokens`.
+   */
   inputTokens: number;
+  /** TURN TOTAL output tokens, summed over every step. */
   outputTokens: number;
+  /** TURN TOTAL cache reads, summed over every step. */
   cachedTokens?: number;
+  /**
+   * Input tokens the provider WROTE into the prompt cache this turn. GPT-5.6
+   * bills these at 1.25x the uncached input rate, so they need their own
+   * bucket in the cost formula instead of being folded into plain input.
+   * A TURN TOTAL, like the fields above.
+   */
+  cacheWriteTokens?: number;
+  /**
+   * LAST-STEP PROMPT SIZE: the real `inputTokens` of the turn's final step.
+   * Persisted next to the totals so the context row and the history budget
+   * read a prompt size instead of a billed sum. Absent when the caller has no
+   * step information (a sentinel row, or an abort before any step finished);
+   * nothing is then persisted and readers fall back to `lastInputTokens`.
+   */
+  lastPromptTokens?: number;
 }
 
 export interface PersistPayload {
@@ -151,6 +205,18 @@ export interface PersistPayload {
   usage: UsagePayload;
   /** Agent (persona) the thread was started from — attributes per-agent stats. */
   personaId?: string;
+  /**
+   * Shape of the turn, emitted as dimensions on every chat metric so cache
+   * hit rates can later be split by tool turns vs plain turns. Absent when
+   * the caller has no step information (e.g. a sentinel row).
+   */
+  turnShape?: { stepCount: number; toolCallCount: number };
+  /**
+   * The provider stopped at the output ceiling rather than because the answer
+   * was done (`finishReason: "length"`). Counted as its own metric so a rise
+   * in truncations is visible without waiting for a complaint.
+   */
+  truncated?: boolean;
 }
 
 // ---------------------------------------------------------------------------
@@ -177,6 +243,8 @@ export async function persistThread({
   modelConfig,
   usage,
   personaId,
+  turnShape,
+  truncated,
 }: PersistPayload): Promise<void> {
   const userId = await userHashedId();
 
@@ -191,7 +259,7 @@ export async function persistThread({
   // outgoing message). Skip user rows here to avoid double-writing.
   const rowsToPersist = rows
     .filter((row) => row.role !== "user")
-    .map<ChatMessageModel>((row) => ({
+    .map<ChatMessageModel>((row, index) => ({
       ...(row as ChatMessageModel),
       id: row.id || uniqueId(),
       createdAt: row.createdAt || new Date(),
@@ -200,6 +268,12 @@ export async function persistThread({
       threadId,
       userId,
       turnId,
+      // Every row of a turn is written in one batch and they routinely share
+      // a createdAt to the millisecond, which left their order undefined on
+      // read. `sequence` preserves the true order; 1-based because 0 belongs
+      // to the user row loadThreadContext already wrote. See
+      // ChatMessageModel.sequence.
+      sequence: index + 1,
     }));
 
   // Atomic-turn persist (architect SERIOUS #20): Cosmos transactional
@@ -276,20 +350,21 @@ export async function persistThread({
     }
   }
 
-  // Calculate cost
+  // Calculate cost via the shared formula (usage-data.computeTokenCostUsd) so
+  // the persisted rollup and the live per-turn block the header shows are
+  // always the same number.
   const inputTokens = usage.inputTokens;
   const outputTokens = usage.outputTokens;
   const cachedTokens = usage.cachedTokens ?? 0;
+  const cacheWriteTokens = usage.cacheWriteTokens ?? 0;
 
-  const pricing = modelConfig.pricing;
-  let costUsd = 0;
-  if (pricing) {
-    const nonCachedInput = inputTokens - cachedTokens;
-    costUsd =
-      (nonCachedInput / 1_000_000) * pricing.inputPerMillion +
-      (cachedTokens / 1_000_000) * pricing.cachedInputPerMillion +
-      (outputTokens / 1_000_000) * pricing.outputPerMillion;
-  }
+  const costUsd = computeTokenCostUsd({
+    inputTokens,
+    outputTokens,
+    cachedTokens,
+    cacheWriteTokens,
+    pricing: modelConfig.pricing,
+  });
 
   logInfo("Persisting assistant turn usage", {
     threadId,
@@ -297,7 +372,11 @@ export async function persistThread({
     inputTokens,
     outputTokens,
     cachedTokens,
+    cacheWriteTokens,
     costUsd,
+    // The two are equal on a single-step turn and diverge on a tool turn; a
+    // log line that shows only the roll-up cannot tell the two apart.
+    lastPromptTokens: usage.lastPromptTokens,
     rowCount: rows.length,
   });
 
@@ -311,6 +390,12 @@ export async function persistThread({
       outputTokens,
       cachedTokens,
       costUsd,
+      // Persisted too, so the header's cache row is whole after a reload.
+      cacheWriteTokens,
+      // The last step's own prompt size, kept apart from the billed roll-up
+      // above: it is what the next turn's over-budget check compares against
+      // and what the context row shows after a reload.
+      usage.lastPromptTokens,
     );
     if (usageRes.status !== "OK") {
       logWarn("UpdateChatThreadUsage returned non-OK", {
@@ -365,7 +450,14 @@ export async function persistThread({
   // cache / user tiles keep populating. chatModel/email/name are resolved
   // from the session inside chat-metrics-service.
   const model = modelConfig.id;
-  const metricAttrs = { threadId };
+  // stepCount / toolCallCount ride on every metric (the service normalises
+  // them to 0 when absent) so a query can separate tool turns from plain
+  // ones — the two have very different cache behaviour.
+  const metricAttrs = {
+    threadId,
+    stepCount: turnShape?.stepCount ?? 0,
+    toolCallCount: turnShape?.toolCallCount ?? 0,
+  };
   Promise.all([
     reportPromptTokens(inputTokens, model, "user", metricAttrs),
     reportCompletionTokens(outputTokens, model, {
@@ -374,7 +466,11 @@ export async function persistThread({
       inputTokens,
     }),
     reportCachedTokens(cachedTokens, model, metricAttrs),
+    reportCacheWriteTokens(cacheWriteTokens, model, metricAttrs),
     reportUserChatMessage(model, metricAttrs),
+    // Only on a truncated turn, so the counter reads as a count of
+    // truncations and not as a series with a lot of zeroes in it.
+    ...(truncated ? [reportTruncatedTurn(model, metricAttrs)] : []),
   ]).catch((err: unknown) =>
     logError("Failed to emit chat usage metrics", {
       error: err instanceof Error ? err.message : String(err),
@@ -391,50 +487,141 @@ export async function persistThread({
 // ---------------------------------------------------------------------------
 
 /**
+ * Per-step shape the assistant message needs in order to replay with the
+ * same step boundaries the live turn had. Only the tool calls are needed:
+ * `event.text` / `event.reasoningText` are the LAST step's (AI SDK
+ * semantics), so those always belong to the final step.
+ */
+export interface StepToolLayout {
+  toolCallIds: readonly string[];
+}
+
+/**
+ * Turn shape for the metric dimensions: how many model steps ran and how many
+ * tool calls they made in total. Falls back to counting tool RESULTS when a
+ * step carries no toolCalls array (the onAbort path synthesises steps).
+ */
+export function deriveTurnShape(
+  steps:
+    | ReadonlyArray<{
+        toolCalls?: ReadonlyArray<unknown>;
+        toolResults?: ReadonlyArray<unknown>;
+      }>
+    | undefined,
+): { stepCount: number; toolCallCount: number } {
+  if (!steps || steps.length === 0) return { stepCount: 0, toolCallCount: 0 };
+  return {
+    stepCount: steps.length,
+    toolCallCount: steps.reduce(
+      (sum, step) =>
+        sum + (step.toolCalls?.length ?? step.toolResults?.length ?? 0),
+      0,
+    ),
+  };
+}
+
+/** Derive the per-step tool-call layout from an onFinish/onAbort event. */
+export function deriveStepToolLayout(
+  steps: ReadonlyArray<{ toolResults?: ReadonlyArray<{ toolCallId: string }> }>,
+): StepToolLayout[] {
+  return steps.map((step) => ({
+    toolCallIds: (step.toolResults ?? []).map((r) => r.toolCallId),
+  }));
+}
+
+/**
  * Builds an assistant UIMessage from the bits of a streamText.onFinish
  * event we actually surface: reasoning, the final text, and tool results.
  * Tool results become DynamicToolUIPart entries so the message-adapter can
  * round-trip them through Cosmos via the same path used elsewhere.
+ *
+ * When `stepLayout` is supplied the parts carry `step-start` markers in the
+ * live positions, which is what makes the rehydrated history serialise to the
+ * same model messages as the live turn (see ChatMessageModel.stepLayout).
+ * Without it the message keeps the old flat shape.
  */
 export function buildAssistantUIMessage<TOOLS extends ToolSet>(
   event: {
     readonly text: string;
     readonly reasoningText?: string;
     readonly toolResults: ReadonlyArray<TypedToolResult<TOOLS>>;
+    readonly stepLayout?: ReadonlyArray<StepToolLayout>;
   },
   id: string,
   reasoningDurationMs?: number,
 ): UIMessage {
   const parts: UIMessage["parts"] = [];
 
-  if (event.reasoningText) {
-    const reasoning: ReasoningUIPart = {
-      type: "reasoning",
-      text: event.reasoningText,
-      state: "done",
+  const toolPart = (result: TypedToolResult<TOOLS>): DynamicToolUIPart => ({
+    type: "dynamic-tool",
+    toolName: result.toolName,
+    toolCallId: result.toolCallId,
+    state: "output-available",
+    input: result.input,
+    output: result.output,
+  });
+
+  const reasoningPart = (): ReasoningUIPart => ({
+    type: "reasoning",
+    text: event.reasoningText as string,
+    state: "done",
+  });
+
+  const textPart = (): TextUIPart => ({
+    type: "text",
+    text: event.text,
+    state: "done",
+  });
+
+  if (event.stepLayout && event.stepLayout.length > 0) {
+    const byCallId = new Map(
+      event.toolResults.map((r) => [r.toolCallId, r] as const),
+    );
+    const claimed = new Set<string>();
+    const lastIndex = event.stepLayout.length - 1;
+
+    event.stepLayout.forEach((step, index) => {
+      parts.push({ type: "step-start" } as unknown as UIMessage["parts"][number]);
+      // Reasoning and text are the last step's, so they go there — before and
+      // after that step's tool calls respectively, matching "think, call, answer".
+      if (index === lastIndex && event.reasoningText) parts.push(reasoningPart());
+      for (const callId of step.toolCallIds) {
+        const result = byCallId.get(callId);
+        if (!result) continue;
+        parts.push(toolPart(result));
+        claimed.add(callId);
+      }
+      if (index === lastIndex && event.text) parts.push(textPart());
+    });
+
+    // A tool result no step claimed (shouldn't happen, but losing a tool card
+    // is worse than an out-of-order one) still gets persisted.
+    for (const result of event.toolResults) {
+      if (!claimed.has(result.toolCallId)) parts.push(toolPart(result));
+    }
+
+    const metadataWithSteps =
+      reasoningDurationMs !== undefined && reasoningDurationMs > 0
+        ? { reasoningDurationMs }
+        : undefined;
+    return {
+      id,
+      role: "assistant",
+      parts,
+      ...(metadataWithSteps && { metadata: metadataWithSteps }),
     };
-    parts.push(reasoning);
+  }
+
+  if (event.reasoningText) {
+    parts.push(reasoningPart());
   }
 
   if (event.text) {
-    const text: TextUIPart = {
-      type: "text",
-      text: event.text,
-      state: "done",
-    };
-    parts.push(text);
+    parts.push(textPart());
   }
 
   for (const result of event.toolResults) {
-    const tool: DynamicToolUIPart = {
-      type: "dynamic-tool",
-      toolName: result.toolName,
-      toolCallId: result.toolCallId,
-      state: "output-available",
-      input: result.input,
-      output: result.output,
-    };
-    parts.push(tool);
+    parts.push(toolPart(result));
   }
 
   // Carry the reasoning wall-clock on metadata (same channel as
@@ -526,6 +713,28 @@ export async function persistAssistantFromFinishEvent<TOOLS extends ToolSet>({
     ? friendlyErrorMessage(streamError)
     : "_The model didn't produce a response. Try rephrasing your message, or ask again._";
 
+  // Truncation. The provider stopped because the turn hit its output ceiling,
+  // not because the answer was finished — so the text ends mid-sentence and
+  // nothing in the reply says why. Reasoning tokens count against the same
+  // ceiling, which makes this MORE likely at high effort, not less.
+  //
+  // Two things happen: the notice goes on the persisted text so the user can
+  // see it, and it is logged and counted so a rise in truncations is visible
+  // without waiting for someone to complain. An empty finish is left to the
+  // sentinel above, which already explains itself.
+  const finishReason = (event as { finishReason?: string }).finishReason;
+  const wasTruncated = finishReason === "length" && !isEmptyFinish;
+  if (wasTruncated) {
+    logWarn("persistAssistantFromFinishEvent: turn truncated at the output limit", {
+      threadId,
+      turnId,
+      modelId: modelConfig.id,
+      maxOutputTokens: modelConfig.maxOutputTokens,
+      outputTokens: event.usage?.outputTokens,
+      textLength: event.text?.length ?? 0,
+    });
+  }
+
   // image_generation tool results carry the bytes as raw base64 in
   // output.result (~2 MB per 1024² PNG), which blows past Cosmos's 2 MB
   // request-size cap. Ingest them into the chat-image-service store and
@@ -546,9 +755,20 @@ export async function persistAssistantFromFinishEvent<TOOLS extends ToolSet>({
 
   const assistant = buildAssistantUIMessage(
     {
-      text: isEmptyFinish ? sentinelText : event.text,
+      text: isEmptyFinish
+        ? sentinelText
+        : wasTruncated
+          ? withTruncationNotice(event.text)
+          : event.text,
       reasoningText: event.reasoningText,
       toolResults: ingestedToolResults,
+      // Only record step boundaries for a turn that actually produced steps;
+      // an empty finish writes a sentinel with no step information and keeps
+      // the pre-existing flat shape.
+      stepLayout:
+        !isEmptyFinish && event.steps && event.steps.length > 0
+          ? deriveStepToolLayout(event.steps)
+          : undefined,
     },
     messageId ?? assistantMessageIdGenerator(),
     reasoningDurationMs,
@@ -580,20 +800,43 @@ export async function persistAssistantFromFinishEvent<TOOLS extends ToolSet>({
     });
   }
 
-  // AI SDK v6 surfaces cached tokens via inputTokenDetails.cacheReadTokens;
-  // older versions used cachedInputTokens (now deprecated). Prefer the new
-  // path and fall back to the deprecated one so we don't lose telemetry on
-  // SDK upgrades. See task #36.
-  const usageDetails = event.totalUsage as {
+  // AI SDK 7 keeps cache accounting under `inputTokenDetails` only:
+  // `cacheReadTokens` (prefix served from cache) and `cacheWriteTokens`
+  // (prefix written into it — @ai-sdk/openai maps the Responses API's
+  // input_tokens_details.cache_write_tokens onto it). v6's flat
+  // `cachedInputTokens` alias is GONE, so there is nothing left to fall back
+  // to; `undefined` on either field means "this provider reported no number",
+  // which is what the header panel and the cost formula already expect.
+  // `event.usage` (was `totalUsage` in v6, still accepted as a deprecated
+  // alias) is the all-steps roll-up — a tool turn's tokens must all be billed.
+  const usageDetails = event.usage as {
     inputTokens?: number;
     outputTokens?: number;
-    cachedInputTokens?: number;
-    inputTokenDetails?: { cacheReadTokens?: number };
+    inputTokenDetails?: {
+      cacheReadTokens?: number;
+      cacheWriteTokens?: number;
+    };
   };
-  const cachedTokens =
-    usageDetails.inputTokenDetails?.cacheReadTokens ??
-    usageDetails.cachedInputTokens ??
-    undefined;
+  const cachedTokens = usageDetails.inputTokenDetails?.cacheReadTokens;
+  const cacheWriteTokens = usageDetails.inputTokenDetails?.cacheWriteTokens;
+
+  // The turn's LAST prompt size, which is a different quantity from every
+  // number above. `event.usage` is the all-steps roll-up (the SDK's own words:
+  // "When there are multiple steps, the usage is the sum of all step usages"),
+  // so on a 3-step tool turn it reports three prompts' worth of input for a
+  // conversation that never exceeded one prompt. `StepResult` carries its own
+  // `usage`, and the last step's `inputTokens` IS the size of the last prompt
+  // sent — the only one of the three that is still in the model's context.
+  //
+  // Left undefined when there are no steps to read (a sentinel row, or an
+  // abort before the first step finished): nothing is then persisted, and the
+  // reader's fallback to `lastInputTokens` applies.
+  const lastStepUsage = (
+    event as {
+      steps?: ReadonlyArray<{ usage?: { inputTokens?: number } }>;
+    }
+  ).steps?.at(-1)?.usage;
+  const lastPromptTokens = lastStepUsage?.inputTokens;
 
   await persistThread({
     threadId,
@@ -605,7 +848,11 @@ export async function persistAssistantFromFinishEvent<TOOLS extends ToolSet>({
       inputTokens: usageDetails.inputTokens ?? 0,
       outputTokens: usageDetails.outputTokens ?? 0,
       cachedTokens,
+      cacheWriteTokens,
+      ...(typeof lastPromptTokens === "number" ? { lastPromptTokens } : {}),
     },
     personaId,
+    turnShape: deriveTurnShape(event.steps),
+    truncated: wasTruncated,
   });
 }

@@ -1,6 +1,15 @@
-// Pure helpers for assembling the cache-relevant parts of an Azure OpenAI
-// Responses request. Kept side-effect free so the byte-for-byte stability of
-// the prompt prefix can be locked down by tests in prompt-builder.test.ts.
+// Pure helpers for assembling the cache-relevant parts of a chat request.
+//
+// A prompt-cache BREAKPOINT is not an OpenAI concept: every provider we serve
+// caches a prompt PREFIX, and each one wants the end of the reusable prefix
+// marked. Only the wire field differs — Azure OpenAI Responses reads
+// `providerOptions.openai.promptCacheBreakpoint`, Anthropic's Messages API
+// reads `providerOptions.anthropic.cacheControl` (`cache_control` on the wire)
+// — so that detail stays inside the two helpers below and callers speak in
+// terms of breakpoints.
+//
+// Kept side-effect free so the byte-for-byte stability of the prompt prefix
+// can be locked down by tests in prompt-builder.test.ts.
 
 import type { ModelMessage, SystemModelMessage } from "ai";
 
@@ -9,6 +18,13 @@ export interface PromptBuilderInputs {
   personaMessage: string;
   /** Optional document hint block. Empty string when no documents are attached. */
   documentHint?: string;
+  /**
+   * Static instruction blocks the caller wants appended AFTER the persona but
+   * BEFORE the per-thread document hint (see the ordering note on
+   * `buildSystemMessage`). Callers must only pass process-constant text here —
+   * anything thread-scoped belongs in `documentHint`.
+   */
+  trailingStaticBlock?: string;
 }
 
 /**
@@ -20,22 +36,31 @@ export interface PromptBuilderInputs {
  * The current date is intentionally NOT included here: injecting `today` would
  * invalidate the prompt cache at every UTC midnight rollover and prevent any
  * cross-day reuse. Time-sensitive answers should rely on tool calls instead.
+ *
+ * ORDERING (load-bearing): the assembled message is
+ *
+ *   staticSystemPrompt -> personaMessage -> trailingStaticBlock -> documentHint
+ *
+ * Both per-thread segments must sit as far right as possible. A prompt cache
+ * can only reuse the bytes to the LEFT of the first byte that changed, so a
+ * segment that moves invalidates every segment after it. `documentHint` is the
+ * most volatile input we have — it appears, disappears and changes wording the
+ * moment a user attaches or removes a document — so it goes LAST. It used to
+ * sit between the static prompt and the persona, which meant attaching a single
+ * document rewrote the persona and every instruction block after it, i.e. the
+ * entire prefix, at the cache-write rate.
+ *
+ * `personaMessage` is per-thread too, but it is fixed for the life of a thread,
+ * so it is stable exactly where a cacheable prefix needs it to be.
  */
 export function buildSystemMessage(inputs: PromptBuilderInputs): string {
-  const { staticSystemPrompt, personaMessage, documentHint = "" } = inputs;
-  return `${staticSystemPrompt}${documentHint}\n\n${personaMessage}`;
-}
-
-/**
- * Sort function-typed tools by name. The Responses API treats the tools array
- * as part of the request body that participates in the cache key, so its order
- * must be deterministic regardless of which conditional branches/extensions
- * registered each tool.
- *
- * Returns a new array; does not mutate input.
- */
-export function sortFunctionTools<T extends { name?: string }>(tools: readonly T[]): T[] {
-  return [...tools].sort((a, b) => (a?.name || "").localeCompare(b?.name || ""));
+  const {
+    staticSystemPrompt,
+    personaMessage,
+    documentHint = "",
+    trailingStaticBlock = "",
+  } = inputs;
+  return `${staticSystemPrompt}\n\n${personaMessage}${trailingStaticBlock}${documentHint}`;
 }
 
 /**
@@ -60,6 +85,11 @@ function anthropicCacheControl(): { anthropic: { cacheControl: { type: "ephemera
  *      string so it can carry `providerOptions`. In Anthropic's render order
  *      (tools → system → messages) a breakpoint on the system block caches the
  *      tool definitions AND the system prompt as a single reusable prefix.
+ *      This is the SAME breakpoint `withPromptCacheBreakpoint` pins on the
+ *      Responses seam, and it is set UNCONDITIONALLY here: Anthropic caches
+ *      nothing without one, so there is no version of this path worth gating
+ *      behind a flag. PROMPT_CACHE_PERSONA_BREAKPOINT is therefore a no-op for
+ *      Claude — the breakpoint it asks for is always already there.
  *   2. **Latest turn** — a message-level breakpoint on the last message. The AI
  *      SDK applies it to that message's final content part, so each turn writes
  *      a cache entry covering the whole conversation-so-far; the next turn
@@ -78,7 +108,7 @@ function anthropicCacheControl(): { anthropic: { cacheControl: { type: "ephemera
 export function withAnthropicPromptCache(
   system: string,
   messages: readonly ModelMessage[],
-): { system: SystemModelMessage; messages: ModelMessage[] } {
+): { instructions: SystemModelMessage; messages: ModelMessage[] } {
   const cachedSystem: SystemModelMessage = {
     role: "system",
     content: system,
@@ -102,5 +132,46 @@ export function withAnthropicPromptCache(
     } as ModelMessage;
   }
 
-  return { system: cachedSystem, messages: out };
+  return { instructions: cachedSystem, messages: out };
+}
+
+/**
+ * Pin a prompt-cache breakpoint at the end of the static developer/system
+ * prefix, for a model served over the OpenAI-compatible Responses seam (Azure
+ * OpenAI). Same provider-neutral intent as `withAnthropicPromptCache`'s first
+ * breakpoint — "the reusable prefix ends here" — expressed in the wire field
+ * this seam reads.
+ *
+ * @ai-sdk/openai reads `providerOptions.openai.promptCacheBreakpoint` per
+ * MESSAGE (confirmed in responses/convert-to-openai-responses-input.ts, which
+ * emits it on both the "system" and the "developer" system-message modes), and
+ * the wire value it expects is `{ mode: "explicit" }` — hence the
+ * SystemModelMessage: the bare `system` string has nowhere to carry
+ * providerOptions.
+ *
+ * The breakpoint says "the prefix up to and including the developer message is
+ * a cache unit", which is exactly the block shared by every thread of an
+ * agent. Request-level `prompt_cache_options` stays on `mode: "implicit"`, so
+ * automatic prefix matching keeps working; the breakpoint only pins where the
+ * shared unit ends.
+ *
+ * CAVEAT — and the only reason PROMPT_CACHE_PERSONA_BREAKPOINT exists as a
+ * flag at all: the breakpoint object's own field is literally
+ * `mode: "explicit"`, so pairing it with implicit request-level caching is a
+ * combination we have NOT been able to verify against Azure (that needs a live
+ * call). Hence default off on this seam. The Anthropic seam needs no flag; see
+ * `withAnthropicPromptCache`.
+ */
+export function withPromptCacheBreakpoint(
+  system: string,
+  messages: readonly ModelMessage[],
+): { instructions: SystemModelMessage; messages: ModelMessage[] } {
+  return {
+    instructions: {
+      role: "system",
+      content: system,
+      providerOptions: { openai: { promptCacheBreakpoint: { mode: "explicit" } } },
+    },
+    messages: [...messages],
+  };
 }

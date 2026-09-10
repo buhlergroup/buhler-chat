@@ -180,8 +180,14 @@ export const FindAllChatDocuments = async (
 ): Promise<ServerActionResponse<ChatDocumentModel[]>> => {
   try {
     const querySpec: SqlQuerySpec = {
+      // ORDER BY is load-bearing, not cosmetic. Without it Cosmos returns rows
+      // in whatever order the index feed yields, so the document names in the
+      // system prompt's DOCUMENT CONTEXT line could reshuffle between turns —
+      // rewriting the prompt prefix and voiding the prompt cache for no reason.
+      // createdAt ASC is stable for the life of a thread; callers additionally
+      // sort names so a same-millisecond tie can't leak through either.
       query:
-        "SELECT * FROM root r WHERE r.type=@type AND r.chatThreadId = @threadId AND r.isDeleted=@isDeleted",
+        "SELECT * FROM root r WHERE r.type=@type AND r.chatThreadId = @threadId AND r.isDeleted=@isDeleted ORDER BY r.createdAt ASC",
       parameters: [
         {
           name: "@type",

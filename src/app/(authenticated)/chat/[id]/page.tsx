@@ -2,6 +2,8 @@ import { ChatPage } from "@/features/chat-page/chat-page";
 import { FindAllChatDocuments } from "@/features/chat-page/chat-services/chat-document-service";
 import { FindAllChatMessagesForCurrentUser } from "@/features/chat-page/chat-services/chat-message-service";
 import { FindChatThreadForCurrentUser } from "@/features/chat-page/chat-services/chat-thread-service";
+import { FindChatHistorySummary } from "@/features/chat-page/chat-services/chat-api/history-summary-service";
+import { threadCompactionMarker } from "@/features/chat-page/chat-services/chat-api/compaction-part";
 import { FindAllExtensionForCurrentUserAndIds } from "@/features/extensions-page/extension-services/extension-service";
 import { AI_NAME } from "@/features/theme/theme-config";
 import { DisplayError } from "@/features/ui/error/display-error";
@@ -25,11 +27,18 @@ interface HomeParams {
 
 export default async function Home(props: HomeParams) {
   const { id } = await props.params;
-  const [chatResponse, chatThreadResponse, docsResponse] = await Promise.all([
-    FindAllChatMessagesForCurrentUser(id),
-    FindChatThreadForCurrentUser(id),
-    FindAllChatDocuments(id),
-  ]);
+  // The compaction row rides along with the transcript reads: one
+  // type-filtered query, and it fails soft (null) rather than blocking the
+  // thread. It marks where the conversation the model sees begins, so the
+  // divider survives a reload without a message row of its own. Display only
+  // -- the prompt's own copy of the summary is assembled in thread-context.ts.
+  const [chatResponse, chatThreadResponse, docsResponse, historySummary] =
+    await Promise.all([
+      FindAllChatMessagesForCurrentUser(id),
+      FindChatThreadForCurrentUser(id),
+      FindAllChatDocuments(id),
+      FindChatHistorySummary(id),
+    ]);
 
   if (docsResponse.status !== "OK") {
     return <DisplayError errors={docsResponse.errors} />;
@@ -57,6 +66,7 @@ export default async function Home(props: HomeParams) {
       chatThread={chatThreadResponse.response}
       chatDocuments={docsResponse.response}
       extensions={extensionResponse.response}
+      compactionMarker={threadCompactionMarker(historySummary)}
     />
   );
 }

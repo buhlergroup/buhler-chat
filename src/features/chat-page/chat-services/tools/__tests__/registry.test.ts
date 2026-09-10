@@ -51,6 +51,7 @@ vi.mock("../extension-url-guard", () => ({
 
 // ─── subject under test ───────────────────────────────────────────────────────
 import { buildToolset, buildExtensionToolKey, repairExtensionToolCall } from "../registry";
+import { compareByCodepoint, stabilizeToolset } from "../stabilize-toolset";
 import type { ToolContext } from "../tool-context";
 import type { ExtensionModel } from "@/features/extensions-page/extension-services/models";
 import type { Tool } from "@ai-sdk/provider-utils";
@@ -72,21 +73,21 @@ function makeCtx(overrides: Partial<ToolContext> = {}): ToolContext {
 
 // ─── tests ───────────────────────────────────────────────────────────────────
 describe("buildToolset – key ordering invariant", () => {
-  it("returns keys in localeCompare ascending order (empty context)", async () => {
+  it("returns keys in codepoint ascending order (empty context)", async () => {
     const toolset = await buildToolset(makeCtx());
     const keys = Object.keys(toolset);
-    const sorted = [...keys].sort((a, b) => a.localeCompare(b));
+    const sorted = [...keys].sort(compareByCodepoint);
     expect(keys).toEqual(sorted);
   });
 
-  it("returns keys in localeCompare ascending order (all features enabled)", async () => {
+  it("returns keys in codepoint ascending order (all features enabled)", async () => {
     const ctx = makeCtx({
       threadDocumentIds: ["doc-1"],
       defaultTools: { companyContent: true },
     });
     const toolset = await buildToolset(ctx);
     const keys = Object.keys(toolset);
-    const sorted = [...keys].sort((a, b) => a.localeCompare(b));
+    const sorted = [...keys].sort(compareByCodepoint);
     expect(keys).toEqual(sorted);
   });
 
@@ -134,7 +135,7 @@ describe("buildToolset – key ordering invariant", () => {
     });
     const toolset = await buildToolset(ctx);
     const keys = Object.keys(toolset);
-    const sorted = [...keys].sort((a, b) => a.localeCompare(b));
+    const sorted = [...keys].sort(compareByCodepoint);
     expect(keys).toEqual(sorted);
     // Verify both tools present, namespaced with the (8-char, here shorter)
     // extension id prefix — see buildExtensionToolKey in ../registry.
@@ -733,9 +734,9 @@ describe("repairExtensionToolCall", () => {
   }
 
   const baseRepairArgs = {
-    system: undefined,
+    instructions: undefined,
     messages: [],
-    inputSchema: async () => ({}) as any,
+    inputSchema: async () => (({}) as any),
   };
 
   it("returns null when the error is not a NoSuchToolError", async () => {
@@ -846,5 +847,60 @@ describe("repairExtensionToolCall", () => {
     // *further* prefixed match, so this correctly resolves to null rather
     // than double-prefixing.
     expect(result).toBeNull();
+  });
+});
+
+describe("buildToolset – tool definitions are byte-stable across turns", () => {
+  it("serialises identically when built twice for the same thread state", async () => {
+    const ctx = makeCtx({
+      threadDocumentIds: ["doc-1"],
+      defaultTools: { companyContent: true },
+      subAgentIds: ["agent-1"],
+    });
+
+    const shape = (toolset: Record<string, unknown>) =>
+      JSON.stringify(
+        Object.entries(toolset).map(([name, t]) => {
+          const tool = t as { description?: string; inputSchema?: unknown };
+          return {
+            name,
+            description: tool.description,
+            // The input schema is what actually rides on the wire; compare it
+            // rather than the tool object (which carries an execute function).
+            inputSchema: tool.inputSchema,
+          };
+        }),
+      );
+
+    const turnOne = await buildToolset(ctx);
+    const turnTwo = await buildToolset(ctx);
+    expect(shape(turnTwo)).toBe(shape(turnOne));
+    expect(Object.keys(turnTwo)).toEqual(Object.keys(turnOne));
+  });
+
+  it("stays byte-identical once the built-in tools are merged on, in either order", async () => {
+    const ctx = makeCtx({ threadDocumentIds: ["doc-1"] });
+    const custom = await buildToolset(ctx);
+    const builtIns = {
+      code_interpreter: { kind: "ci" },
+      web_search_preview: { kind: "web" },
+    };
+
+    // The route merges built-ins onto the custom set; the merge order must
+    // not be able to change the wire order.
+    const merged = stabilizeToolset(
+      { ...custom, ...builtIns },
+      Object.keys(builtIns),
+    );
+    const mergedOtherWay = stabilizeToolset(
+      { ...builtIns, ...custom },
+      Object.keys(builtIns),
+    );
+    expect(Object.keys(mergedOtherWay)).toEqual(Object.keys(merged));
+    // Built-ins lead, in their fixed precedence order.
+    expect(Object.keys(merged).slice(0, 2)).toEqual([
+      "code_interpreter",
+      "web_search_preview",
+    ]);
   });
 });

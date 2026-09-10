@@ -145,6 +145,15 @@ describe("chat-page.unit.document-service.004 — FindAllChatDocuments filters b
     // Pin design intent: no @userId parameter — documents are agent-scoped, not user-scoped.
     expect(queryCapture.parameters?.some((p: any) => p.name === "@userId")).toBe(false);
   });
+
+  it("orders deterministically, so the document names in the prompt cannot reshuffle", async () => {
+    // The document names go into the system prompt's DOCUMENT CONTEXT line.
+    // Without an ORDER BY, Cosmos may hand the same documents back in a
+    // different order on a later turn, rewriting the prompt prefix and voiding
+    // the prompt cache for no reason at all.
+    await FindAllChatDocuments("t1");
+    expect(queryCapture.query).toMatch(/ORDER BY r\.createdAt ASC/i);
+  });
 });
 
 describe("chat-page.unit.document-service.005 — Upload over MAX_UPLOAD_DOCUMENT_SIZE returns ERROR", () => {

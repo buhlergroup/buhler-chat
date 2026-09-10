@@ -81,8 +81,15 @@ describe("chat-page.unit.message-service.001 — FindTopChatMessagesForCurrentUs
   });
 });
 
-describe("chat-page.unit.message-service.002 — FindTopChatMessagesForCurrentUser default top=30", () => {
-  it("uses top=30 when not specified", async () => {
+describe("chat-page.unit.message-service.002 — FindTopChatMessagesForCurrentUser keeps its top=30 default for non-chat callers", () => {
+  it("still defaults to 30, but the chat path no longer uses this function", async () => {
+    // The default itself is unchanged. What changed is who calls it: the chat
+    // path now loads the whole thread and compacts it when the provider's
+    // measured prompt size exceeds the budget (see history-budget.ts and
+    // chat-page.unit.message-service.015), because the row cap made the prompt
+    // prefix slide by one row on every turn past 30 and cost a large part of
+    // the prompt-cache hit rate. This function stays for callers that
+    // genuinely want the newest N rows.
     let captured: any;
     historyContainer.items.query.mockImplementationOnce((q: any, _opts?: any) => {
       captured = q;
@@ -92,6 +99,119 @@ describe("chat-page.unit.message-service.002 — FindTopChatMessagesForCurrentUs
     expect(captured).toBeDefined();
     const topParam = captured.parameters.find((p: any) => p.name === "@top");
     expect(topParam?.value).toBe(30);
+  });
+});
+
+describe("chat-page.unit.message-service.015 — FindAllChatMessagesForCurrentUser has no row cap and orders oldest-first", () => {
+  it("issues a query with no TOP and no @top parameter", async () => {
+    let captured: any;
+    historyContainer.items.query.mockImplementationOnce((q: any, _opts?: any) => {
+      captured = q;
+      return { fetchAll: async () => ({ resources: [] }) };
+    });
+
+    await FindAllChatMessagesForCurrentUser("thread-1");
+
+    expect(captured).toBeDefined();
+    expect(captured.query).not.toMatch(/\bTOP\b/i);
+    expect(captured.parameters.some((p: any) => p.name === "@top")).toBe(false);
+  });
+
+  it("orders by createdAt ASC so callers need no reversal", async () => {
+    let captured: any;
+    historyContainer.items.query.mockImplementationOnce((q: any, _opts?: any) => {
+      captured = q;
+      return { fetchAll: async () => ({ resources: [] }) };
+    });
+
+    await FindAllChatMessagesForCurrentUser("thread-1");
+
+    expect(captured.query).toMatch(/ORDER BY r\.createdAt ASC/i);
+  });
+
+  it("applies the same thread, user and isDeleted scoping as the capped query", async () => {
+    let captured: any;
+    historyContainer.items.query.mockImplementationOnce((q: any, _opts?: any) => {
+      captured = q;
+      return { fetchAll: async () => ({ resources: [] }) };
+    });
+
+    await FindAllChatMessagesForCurrentUser("thread-1");
+
+    expect(captured.parameters).toEqual(
+      expect.arrayContaining([
+        { name: "@type", value: MESSAGE_ATTRIBUTE },
+        { name: "@threadId", value: "thread-1" },
+        { name: "@userId", value: hashedEmail },
+        { name: "@isDeleted", value: false },
+      ])
+    );
+  });
+
+  it("returns every row it is given, well past the old 30-row cap", async () => {
+    const rows = Array.from({ length: 250 }, (_, i) => ({
+      id: `m${i}`,
+      role: i % 2 === 0 ? "user" : "assistant",
+      content: `row ${i}`,
+    }));
+    historyContainer.items.query.mockImplementationOnce(() => ({
+      fetchAll: async () => ({ resources: rows }),
+    }));
+
+    const result = await FindAllChatMessagesForCurrentUser("thread-1");
+    expect(result.status).toBe("OK");
+    expect((result as any).response).toHaveLength(250);
+  });
+});
+
+describe("chat-page.unit.message-service.016 — the loader hands the cache fields through untouched", () => {
+  // The seam: the assistant turn is persisted with a `sequence` (write order
+  // inside the turn) and a `stepLayout` (the step boundaries the live turn
+  // had). The loader is the only thing between those writes and the adapter
+  // that replays them, so it must apply the sequence AND leave both fields on
+  // the rows. Dropping either one silently reverts the prompt to a shape the
+  // provider has not cached.
+  const SAME = new Date("2026-09-07T11:00:00.000Z");
+
+  it("applies sequence as the tie-break and preserves sequence and stepLayout", async () => {
+    const layout = ["step-start", "tool:call-1", "step-start", "text:6"];
+    // Handed over in the order a same-millisecond Cosmos read can produce.
+    historyContainer.items.query.mockImplementationOnce(() => ({
+      fetchAll: async () => ({
+        resources: [
+          { id: "t1", createdAt: SAME, role: "tool", content: "{}", sequence: 2 },
+          { id: "a1", createdAt: SAME, role: "assistant", content: "answer", sequence: 1, stepLayout: layout },
+          { id: "u1", createdAt: SAME, role: "user", content: "question" },
+        ],
+      }),
+    }));
+
+    const result = await FindAllChatMessagesForCurrentUser("thread-1");
+
+    expect(result.status).toBe("OK");
+    const rows = (result as any).response;
+    // user (no sequence, counts as 0) → assistant (1) → tool (2).
+    expect(rows.map((r: any) => r.id)).toEqual(["u1", "a1", "t1"]);
+    expect(rows[1].sequence).toBe(1);
+    expect(rows[1].stepLayout).toEqual(layout);
+    expect(rows[2].sequence).toBe(2);
+  });
+
+  it("keeps rows written before either field existed in a stable order", async () => {
+    historyContainer.items.query.mockImplementationOnce(() => ({
+      fetchAll: async () => ({
+        resources: [
+          { id: "b", createdAt: SAME, role: "assistant", content: "b" },
+          { id: "a", createdAt: SAME, role: "user", content: "a" },
+        ],
+      }),
+    }));
+
+    const result = await FindAllChatMessagesForCurrentUser("thread-1");
+    const rows = (result as any).response;
+    expect(rows.map((r: any) => r.id)).toEqual(["a", "b"]);
+    expect(rows[0].sequence).toBeUndefined();
+    expect(rows[0].stepLayout).toBeUndefined();
   });
 });
 

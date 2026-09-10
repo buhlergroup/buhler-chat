@@ -1,5 +1,19 @@
-"use server";
 import "server-only";
+
+/**
+ * Why there is no `"use server"` here
+ * -----------------------------------
+ * `"use server"` marks a module as a SERVER ACTION surface: Next turns every
+ * export into an RPC endpoint a client component may call, and therefore
+ * rejects any export that is not an async function. This module is reached
+ * only from other server modules, never from a client component, so it wants
+ * the opposite guarantee — "never bundle me for the browser" — which is what
+ * `import "server-only"` gives. That is the convention the neighbouring
+ * non-action server modules follow (`persist-assistant.ts`, `rate-limit.ts`,
+ * `stream-publisher.ts`, ...). Do not add the directive back: it is not needed
+ * for a server module, and it breaks `next build` the moment this file gains a
+ * sync export.
+ */
 
 /**
  * thread-context.ts
@@ -14,21 +28,41 @@ import "server-only";
  *   chat-api-response.ts).
  */
 
-import { getCurrentUser } from "@/features/auth-page/helpers";
-import { logError, logWarn } from "@/features/common/services/logger";
+import { getCurrentUser, userHashedId } from "@/features/auth-page/helpers";
+import { logDebug, logError, logInfo, logWarn } from "@/features/common/services/logger";
 import type { UIMessage } from "ai";
 import { createIdGenerator } from "ai";
 import { CreateChatMessage } from "../chat-message-service";
 import { FindAllChatDocuments } from "../chat-document-service";
-import { FindTopChatMessagesForCurrentUser } from "../chat-message-service";
+import { FindAllChatMessagesForCurrentUser } from "../chat-message-service";
 import { EnsureChatThreadOperation } from "../chat-thread-service";
 import { uiMessagesFromChatMessages } from "./message-adapter";
+import { compareByCodepoint } from "../tools/stabilize-toolset";
 import { getBase64ImageReference } from "../chat-image-persistence-service";
 import { isImageReference } from "../chat-image-persistence-utils";
+import type { HistoryCompactionOutcome, SummaryOutcome } from "./compaction-part";
+import {
+  applyHistoryWatermark,
+  planHistoryTrim,
+  resolveHistoryBudget,
+  resolveHistoryProtectedTurns,
+} from "./history-budget";
+import {
+  formatSummaryReplayText,
+  historySummaryRowId,
+  type ChatHistorySummaryModel,
+} from "./history-summary";
+import {
+  FindChatHistorySummary,
+  isHistorySummaryEnabled,
+  recordHistoryCompaction,
+} from "./history-summary-service";
 import {
   AttachedFileModel,
+  ChatMessageModel,
   ChatThreadModel,
   DefaultTools,
+  MODEL_CONFIGS,
   UserPrompt,
 } from "../models";
 
@@ -143,6 +177,357 @@ async function resolveHistoryFileRefs(
 }
 
 // ---------------------------------------------------------------------------
+// History compaction
+// ---------------------------------------------------------------------------
+
+/**
+ * Replay a stored summary as the first conversation item.
+ *
+ * Role `user`, not `system`. Two reasons:
+ *   - The message adapter and every provider seam already handle user
+ *     messages; a mid-prompt system message is handled inconsistently across
+ *     the three providers this app talks to (Azure Responses, the Azure
+ *     /anthropic Messages API, and Foundry Chat Completions), and getting it
+ *     right would mean touching provider files.
+ *   - The developer message is assembled separately in route.ts and is
+ *     process-constant; folding per-thread text into it would put a volatile
+ *     segment back at the front of the prefix, which is the mistake this
+ *     change set removes.
+ *
+ * Two consecutive user messages (this one and the oldest surviving turn) are
+ * fine: the Anthropic seam groups same-role messages into one block, and the
+ * OpenAI surfaces accept the sequence as-is.
+ *
+ * The id is derived from the thread so it is stable across turns.
+ */
+function summaryReplayMessage(
+  threadId: string,
+  summary: ChatHistorySummaryModel,
+): UIMessage {
+  return {
+    id: historySummaryRowId(threadId),
+    role: "user",
+    parts: [
+      { type: "text", text: formatSummaryReplayText(summary.content) },
+    ],
+  };
+}
+
+/**
+ * Apply the persisted watermark, then the token budget, to a thread's rows.
+ *
+ * Order matters. The watermark comes first: rows an earlier trim already
+ * accounted for must leave before anything is measured, otherwise the budget
+ * would keep re-discovering them and keep moving the cut forward one turn at a
+ * time. Only what survives the watermark is weighed against the budget.
+ *
+ * When a trim does happen this records it (advancing the watermark and, if the
+ * feature is on, summarising the dropped block) before returning. That write is
+ * the one thing standing between this design and the sliding window it
+ * replaced, so it is awaited rather than fired and forgotten.
+ *
+ * Returns the rows to send and the summary to replay, if any.
+ */
+async function compactHistory(input: {
+  threadId: string;
+  selectedModel: ChatThreadModel["selectedModel"];
+  rows: ChatMessageModel[];
+  /**
+   * Size of the LAST PROMPT of the thread's previous request, if recorded —
+   * the ONE input to the compaction decision. A prompt size, not the billed
+   * all-steps sum. Absent on a first turn or an old row, and then nothing is
+   * compacted. See `TrimPlanOptions.measuredPromptTokens`.
+   */
+  threadUsageLastPromptTokens?: number;
+}): Promise<{
+  rows: ChatMessageModel[];
+  summary: ChatHistorySummaryModel | null;
+  /** Set only on a turn that actually trimmed. Drives the UI notice. */
+  compaction: HistoryCompactionOutcome | undefined;
+}> {
+  const existingSummary = await FindChatHistorySummary(input.threadId);
+
+  const { retained, alreadyCompacted } = applyHistoryWatermark(
+    input.rows,
+    existingSummary?.coversThroughMessageId,
+  );
+
+  const summaryEnabled = isHistorySummaryEnabled();
+  // The budget follows the thread's selected model, not the effective model
+  // resolved later in route.ts. A downgrade changes who answers the turn, not
+  // how much of the thread is worth carrying, and reading it here keeps the
+  // decision (and therefore the prefix) independent of per-turn routing.
+  const budgetModelConfig = input.selectedModel
+    ? MODEL_CONFIGS[input.selectedModel]
+    : undefined;
+  // The configured budget, bounded by what this model can afford to be handed:
+  // its long-context billing threshold minus a reserve, else a fraction of its
+  // context window. See resolveHistoryBudget.
+  const budgetDecision = resolveHistoryBudget({
+    modelBudget: budgetModelConfig?.historyTokenBudget,
+    envBudget: process.env.HISTORY_TOKEN_BUDGET,
+    longContextThresholdTokens: budgetModelConfig?.longContextThresholdTokens,
+    contextWindow: budgetModelConfig?.contextWindow,
+    envReserve: process.env.HISTORY_LONG_CONTEXT_RESERVE,
+  });
+  const budget = budgetDecision.budget;
+  // Which of the four candidates actually decided. Debug, not info: it is the
+  // same answer on every turn of every thread on a given model, and it is only
+  // interesting when a budget looks wrong.
+  logDebug("thread-context: resolved history token budget", {
+    threadId: input.threadId,
+    selectedModel: input.selectedModel,
+    budget,
+    baseBudget: budgetDecision.baseBudget,
+    baseSource: budgetDecision.baseSource,
+    guard: budgetDecision.guard,
+    guardSource: budgetDecision.guardSource,
+    reserve: budgetDecision.reserve,
+    cappedByGuard: budgetDecision.cappedByGuard,
+  });
+
+  // The ONE input to the decision: the provider's measured size of this
+  // thread's PREVIOUS last prompt. Over budget means compact the history and
+  // start again; there is nothing else to work out and nothing to estimate.
+  //
+  // This is the previous turn's LAST-STEP input, not its billed roll-up. AI
+  // SDK 7 sums step usage over a turn, so the roll-up counted one prompt per
+  // step: measured on dev, a thread reported 285,647 against a 256,000 budget
+  // while its real prompt was about half that, and compacted a thread that was
+  // never over budget.
+  const measuredPromptTokens = input.threadUsageLastPromptTokens;
+
+  const plan = planHistoryTrim(retained, {
+    budget,
+    minKeptTurns: resolveHistoryProtectedTurns({
+      envProtectedTurns: process.env.HISTORY_PROTECTED_TURNS,
+    }),
+    ...(typeof measuredPromptTokens === "number"
+      ? { measuredPromptTokens }
+      : {}),
+  });
+
+  if (!plan.trimmed) {
+    if (plan.skipReason === "no-measurement") {
+      // No recorded prompt size for this thread: its first turn, or a row
+      // written before `lastPromptTokens` existed. Nothing to compare against,
+      // so nothing is compacted and no summariser call is spent — and an
+      // oversized first message could not be helped anyway, because the
+      // current user turn is never droppable. DEBUG: once per new thread.
+      logDebug("thread-context: no measured prompt size yet, not compacting", {
+        threadId: input.threadId,
+        budget: plan.budget,
+        turnCount: plan.keptTurnCount,
+        skipReason: plan.skipReason,
+      });
+    } else if (plan.skipReason === "nothing-droppable") {
+      // Over budget with no history to compact: an empty thread, or every turn
+      // protected by HISTORY_PROTECTED_TURNS. Nothing to do but let it through
+      // — the alternative is dropping the question being answered.
+      //
+      // WARN only when the budget is the shipped default, where this means one
+      // turn is genuinely enormous. With a deliberately small budget (a test
+      // environment set to 10k, say) it happens routinely, and warning on
+      // every turn of every thread would train people to ignore the log.
+      const budgetIsDefault = budgetDecision.baseSource === "default";
+      const log = budgetIsDefault ? logWarn : logInfo;
+      log("thread-context: prompt over budget but nothing can be compacted", {
+        threadId: input.threadId,
+        measuredPromptTokens: plan.measuredPromptTokens,
+        budget: plan.budget,
+        budgetSource: budgetDecision.baseSource,
+        turnCount: plan.keptTurnCount,
+        protectedTurns: resolveHistoryProtectedTurns({
+          envProtectedTurns: process.env.HISTORY_PROTECTED_TURNS,
+        }),
+        // No summariser call is spent and no notice is shown: nothing happened.
+        skipReason: plan.skipReason,
+      });
+    }
+    // "under-budget" is the ordinary outcome of almost every turn and is not
+    // logged at all.
+    return {
+      rows: plan.kept,
+      summary: summaryWithContent(existingSummary),
+      compaction: undefined,
+    };
+  }
+
+  logInfo("thread-context: compacted history, the thread starts again", {
+    threadId: input.threadId,
+    budget: plan.budget,
+    measuredPromptTokens: plan.measuredPromptTokens,
+    droppedTurnCount: plan.droppedTurnCount,
+    keptTurnCount: plan.keptTurnCount,
+    droppedMessageCount: plan.dropped.length,
+    previouslyCompactedMessageCount: alreadyCompacted.length,
+    summaryEnabled,
+  });
+
+  // Wall-clock of the trim as the user experiences it: the summariser call is
+  // a model call on the request path, so this is the wait the notice explains.
+  const startedAt = Date.now();
+  const recorded = await recordHistoryCompaction({
+    threadId: input.threadId,
+    userId: await userHashedId(),
+    droppedMessages: plan.dropped,
+    coversThroughMessageId: plan.coversThroughMessageId!,
+    previous: existingSummary,
+    // Summarise on the thread's own model: it is the model that just had this
+    // block in context, and re-sending the block to another deployment pays
+    // for all of it again, cold.
+    ...(input.selectedModel ? { selectedModel: input.selectedModel } : {}),
+  });
+  const durationMs = Date.now() - startedAt;
+
+  // The reason code comes from the writer, which is the only place that knows
+  // whether the summariser was off, absent, slow or broken. A row written
+  // before outcomes existed has none, and that is "unknown" — NOT "off".
+  // Mapping it to "off" put "no summary, feature off" in the transcript of
+  // threads whose summariser was on and working, which is the same class of
+  // misdiagnosis this reason code was added to remove. Note a row can carry
+  // text from an EARLIER trim while this trim failed — so the text is only
+  // shown when this trim itself succeeded.
+  const summaryContent = recorded?.content?.trim() ?? "";
+  const summaryOutcome: SummaryOutcome = recorded?.summaryOutcome ?? "unknown";
+  const summarised = summaryOutcome === "ok" && summaryContent.length > 0;
+  const compaction: HistoryCompactionOutcome = {
+    trimmedTurns: plan.droppedTurnCount,
+    // The measurement that triggered this compaction. What the USER sees are
+    // the provider's real prompt sizes either side of the trim, written by the
+    // route once this turn finishes.
+    ...(typeof plan.measuredPromptTokens === "number"
+      ? { measuredPromptTokens: plan.measuredPromptTokens }
+      : {}),
+    summaryOutcome,
+    durationMs,
+    ...(summarised && recorded?.model ? { summaryModel: recorded.model } : {}),
+    ...(summarised ? { summaryText: summaryContent } : {}),
+    ...(plan.coversThroughMessageId
+      ? { coversThroughMessageId: plan.coversThroughMessageId }
+      : {}),
+  };
+
+  // A failed write leaves the watermark where it was. This turn is still
+  // trimmed (the user gets the cheap prompt); the next turn will re-derive the
+  // same cut and try the write again.
+  return {
+    rows: plan.kept,
+    summary: summaryWithContent(recorded ?? existingSummary),
+    compaction,
+  };
+}
+
+/**
+ * Narrow a compaction row to one worth replaying. A row with empty `content`
+ * is a watermark only — the block was trimmed without being summarised — and
+ * replaying an empty summary would put a bare heading in front of the
+ * conversation.
+ */
+function summaryWithContent(
+  summary: ChatHistorySummaryModel | null,
+): ChatHistorySummaryModel | null {
+  if (!summary) return null;
+  return summary.content.trim().length > 0 ? summary : null;
+}
+
+// ---------------------------------------------------------------------------
+// Document hint placement
+// ---------------------------------------------------------------------------
+
+/**
+ * Providers that accept a system message in the MIDDLE of `messages`, which is
+ * what the tail placement needs. See the long note in `loadThreadContext`:
+ * Anthropic's seam handles it by requesting a beta this app cannot verify
+ * against the Azure /anthropic surface, and a wrong guess there is a hard 400.
+ */
+function providerTakesMidConversationSystem(provider: string | undefined): boolean {
+  return provider !== "anthropic";
+}
+
+/**
+ * The hint as its own developer message for the prompt tail. Role "system":
+ * `convertToModelMessages` maps a system UIMessage to a system ModelMessage at
+ * the same index, and the provider seams then render it as a system/developer
+ * item.
+ *
+ * The id is derived from the thread, so the item is byte-identical across turns
+ * for as long as the document set is unchanged.
+ */
+function documentHintTailMessage(threadId: string, hintText: string): UIMessage {
+  return {
+    id: documentHintMessageId(threadId),
+    role: "system",
+    parts: [{ type: "text", text: hintText.trimStart() }],
+  };
+}
+
+function documentHintMessageId(threadId: string): string {
+  return `dochint-${threadId}`;
+}
+
+/**
+ * Re-place the document hint for the model that will ACTUALLY run the turn.
+ *
+ * `loadThreadContext` has to decide a placement before the effective model is
+ * known — resolving the model needs the thread the loader returns — so it
+ * decides from `thread.selectedModel`. That is not always the model that runs:
+ * `resolveModelAndLimits` prefers `payload.selectedModel` (this turn's picker),
+ * and a budget cap or an intent rule can downgrade to another model again. When
+ * the two disagree ACROSS PROVIDERS the placement is wrong in a way that
+ * matters:
+ *
+ *   - thread on Azure, effective model Claude: the hint would ride in the tail
+ *     as a mid-conversation system message, the one case the tail placement is
+ *     not allowed to take (hard 400 risk — see above).
+ *   - thread on Claude, effective model Azure: the hint would stay in the
+ *     developer message, moving the FIRST item of the prompt whenever the
+ *     document set changes, which is the cache churn this change set removes.
+ *
+ * So the route calls this once `modelConfig` is resolved. Returns the context
+ * unchanged when the placement already matches, and is idempotent.
+ */
+export function applyDocumentHintPlacement(
+  ctx: ThreadContext,
+  provider: string | undefined,
+): ThreadContext {
+  const hintText = ctx.documentHintText;
+  if (!hintText) return ctx;
+
+  const wanted: ThreadContext["documentHintPlacement"] =
+    providerTakesMidConversationSystem(provider)
+      ? "tail-message"
+      : "developer-message";
+  if (wanted === ctx.documentHintPlacement) return ctx;
+
+  const hintId = documentHintMessageId(ctx.thread.id);
+  const withoutHint = ctx.modelHistory.filter((m) => m.id !== hintId);
+
+  if (wanted === "developer-message") {
+    return {
+      ...ctx,
+      modelHistory: withoutHint,
+      documentHint: hintText,
+      documentHintPlacement: "developer-message",
+    };
+  }
+
+  // Into the tail: immediately before the current user turn, which is the last
+  // item of modelHistory by construction.
+  const cut = Math.max(0, withoutHint.length - 1);
+  return {
+    ...ctx,
+    modelHistory: [
+      ...withoutHint.slice(0, cut),
+      documentHintTailMessage(ctx.thread.id, hintText),
+      ...withoutHint.slice(cut),
+    ],
+    documentHint: undefined,
+    documentHintPlacement: "tail-message",
+  };
+}
+
+// ---------------------------------------------------------------------------
 // Public types
 // ---------------------------------------------------------------------------
 
@@ -156,10 +541,40 @@ export interface ThreadContextUser {
 export interface ThreadContext {
   thread: ChatThreadModel;
   user: ThreadContextUser;
-  /** History in AI SDK UIMessage format (oldest-first, ready to pass to streamText) */
+  /**
+   * The real conversation in AI SDK UIMessage format, oldest-first, ending
+   * with the turn the user just submitted. Persisted messages only — no
+   * prompt scaffolding — so callers can still count turns (`length === 1`
+   * means a first turn) and hand it to `toUIMessageStreamResponse` as
+   * `originalMessages` without a synthetic item leaking to the browser.
+   */
   history: UIMessage[];
-  /** System-prompt appendix injected when documents are attached */
+  /**
+   * `history` plus the prompt scaffolding, in the exact order it must reach
+   * `convertToModelMessages`: the replayed summary (if any), then the
+   * conversation, then the document hint (if it goes in the tail), then the
+   * current user turn. This is what streamText should be given.
+   */
+  modelHistory: UIMessage[];
+  /**
+   * Document hint for the DEVELOPER message, set only when this thread's
+   * provider cannot take a mid-conversation system message (see
+   * `documentHintPlacement`). Undefined when the hint is already in
+   * `modelHistory` — or when there are no documents at all.
+   */
   documentHint: string | undefined;
+  /**
+   * The hint text itself, whichever placement it ended up in. Undefined when
+   * the thread has no documents. `applyDocumentHintPlacement` needs it to move
+   * the hint once the EFFECTIVE model is known.
+   */
+  documentHintText: string | undefined;
+  /**
+   * Where the document hint ended up. `"tail-message"` keeps the developer
+   * message static for the life of the thread; `"developer-message"` is the
+   * fallback. Exposed for logging and tests, not for dispatch.
+   */
+  documentHintPlacement: "tail-message" | "developer-message" | "none";
   threadDocumentIds: string[];
   personaDocumentIds: string[];
   defaultTools: DefaultTools | undefined;
@@ -172,6 +587,22 @@ export interface ThreadContext {
    * detection.
    */
   turnId: string;
+  /**
+   * What the history trim did on THIS turn, or undefined when nothing was
+   * trimmed. The route turns it into the `data-compaction` part the transcript
+   * renders, which is the only way the user learns that the model can no
+   * longer quote turns they can still scroll to.
+   */
+  compaction: HistoryCompactionOutcome | undefined;
+  /**
+   * The size of the LAST PROMPT of this thread's PREVIOUS request, read before
+   * this turn overwrites it. The route pairs it with this request's own
+   * last-prompt size so the compaction notice can state what the prompt
+   * actually went from and to — both ends are prompt sizes, never the billed
+   * all-steps roll-up, which on a tool turn counts one conversation several
+   * times over. Undefined on a thread's first turn.
+   */
+  previousRequestPromptTokens: number | undefined;
 }
 
 // ---------------------------------------------------------------------------
@@ -212,20 +643,57 @@ export async function loadThreadContext(
     isAdmin: currentUser.isAdmin,
   };
 
-  // 3. History (parallel with nothing else right now, but cheap to parallelize later)
-  const historyResponse = await FindTopChatMessagesForCurrentUser(thread.id);
-  const historyRows =
-    historyResponse.status === "OK" ? historyResponse.response : [];
+  // 3. History.
+  //
+  // The whole thread, not `TOP 30`. The old row cap made the prompt prefix
+  // move on every turn past row 30 — see the header comment in
+  // history-budget.ts for the measured cost. What limits the prompt now is the
+  // provider's own size for the previous request's last prompt, compared
+  // against the budget: over it, the eligible history is compacted in one
+  // block, so the prefix then holds still for dozens of turns at a time.
+  // Nothing is estimated.
+  const historyResponse = await FindAllChatMessagesForCurrentUser(thread.id);
+  const allRows = historyResponse.status === "OK" ? historyResponse.response : [];
   if (historyResponse.status !== "OK") {
     logError("Error getting history", { errors: historyResponse.errors });
   }
+  // FindAllChatMessagesForCurrentUser orders by createdAt ASC, which is the
+  // oldest-first order every adapter downstream expects.
 
-  // Cosmos returns rows newest-first; both adapters expect oldest-first.
-  const orderedRows = [...historyRows].reverse();
+  const {
+    rows: keptRows,
+    summary: activeSummary,
+    compaction,
+  } = await compactHistory({
+    threadId: thread.id,
+    selectedModel: thread.selectedModel,
+    rows: allRows,
+    // Recorded by UpdateChatThreadUsage at the end of the previous turn, so
+    // this is that request's real prompt size — read here BEFORE this turn
+    // overwrites it.
+    //
+    // `lastPromptTokens` is the last step's own input, and it is the ONLY
+    // figure allowed to trigger a compaction. There is deliberately no
+    // fallback to `lastInputTokens`: that is the all-steps roll-up, which sums
+    // one prompt per step and so overstates a multi-step turn by roughly the
+    // number of steps. Compacting on it is the defect this branch exists to
+    // remove, and doing it only to old threads would have been the same bug
+    // with a smaller blast radius. No measurement means no compaction; the
+    // next turn writes one and decides on its own number.
+    ...(typeof thread.usage?.lastPromptTokens === "number"
+      ? { threadUsageLastPromptTokens: thread.usage.lastPromptTokens }
+      : {}),
+  });
 
   const history = await resolveHistoryFileRefs(
-    uiMessagesFromChatMessages(orderedRows),
+    uiMessagesFromChatMessages(keptRows),
   );
+
+  // The summary replaces the rows it covers, so it goes at the very front of
+  // the conversation — immediately after the developer message.
+  const summaryPrefix: UIMessage[] = activeSummary
+    ? [summaryReplayMessage(thread.id, activeSummary)]
+    : [];
 
   // 4. Documents
   const documentsResponse = await FindAllChatDocuments(thread.id);
@@ -242,15 +710,28 @@ export async function loadThreadContext(
   const hasAnyDocuments = hasChatDocuments || hasPersonaDocuments;
 
   // Build document hint matching the logic in chat-api-response.ts lines 114-123
-  let documentHint: string | undefined;
+  let documentHintText: string | undefined;
   if (hasAnyDocuments) {
+    // Sort the names. FindAllChatDocuments already orders by createdAt, but the
+    // hint is part of the prompt: a reshuffle here rewrites it and voids that
+    // much of the cache. Sorting locally makes the line a pure function of the
+    // document SET, independent of insertion order or of a same-millisecond
+    // createdAt tie.
+    //
+    // Codepoint comparison, not localeCompare. Pinning the locale to "en" was
+    // not enough: the comparison is still the pod's ICU build talking, so two
+    // replicas built against different ICU data could order the same file
+    // names differently and neither would match the other's cached prompt.
     const documentNames = hasChatDocuments
-      ? documentsResponse.response.map((doc) => doc.name).join(", ")
+      ? [...documentsResponse.response]
+          .map((doc) => doc.name)
+          .sort(compareByCodepoint)
+          .join(", ")
       : "";
     const contextLine = hasChatDocuments
       ? `DOCUMENT CONTEXT: The user has attached the following document(s) to this conversation: ${documentNames}.`
       : `DOCUMENT CONTEXT: The user has persona-linked document(s) available for this conversation.`;
-    documentHint =
+    documentHintText =
       `\n\n${contextLine}\n\n` +
       `MANDATORY BEHAVIOR WHEN DOCUMENTS ARE PRESENT:\n` +
       `- You MUST first call the search_documents tool with the user's question as the query before composing an answer.\n` +
@@ -258,6 +739,43 @@ export async function loadThreadContext(
       `- Ground your answer in the retrieved content and cite filenames when relevant.\n` +
       `- Do not answer purely from prior knowledge when documents are attached.`;
   }
+
+  // 4b. Where the hint goes.
+  //
+  // The hint is the most volatile input to the prompt: it appears, disappears
+  // and changes wording the moment a user attaches or removes a document. In
+  // the developer message — even at its end — a change there is a change to
+  // the FIRST item of the prompt, so nothing after it can be reused and the
+  // whole thread is re-billed at the cache-write rate. Moved into the tail,
+  // between the history and the current question, it changes only the last few
+  // hundred bytes and the developer message plus the entire history stay
+  // byte-identical and cacheable.
+  //
+  // Not every provider will take a system message in the middle of `messages`:
+  //   - azure (Responses API): supported. @ai-sdk/openai emits it as an
+  //     `input` item with role system/developer at whatever position it holds.
+  //   - foundry (Chat Completions): supported. Same conversion, and the API
+  //     accepts a system message at any index.
+  //   - anthropic (Azure /anthropic Messages API): @ai-sdk/anthropic does
+  //     handle it, but by pushing a `role: "system"` message and requesting
+  //     the `mid-conversation-system-2026-04-07` beta. Whether the Azure
+  //     /anthropic surface honours that beta cannot be established without a
+  //     live call, and getting it wrong is a hard 400 rather than a
+  //     degradation — so Claude threads keep the developer-message placement.
+  //
+  // The provider read here is the THREAD's model. The model that actually runs
+  // the turn is resolved later (it needs the thread this function returns), so
+  // the route corrects the placement through `applyDocumentHintPlacement` once
+  // it knows. See that function for why the correction is not optional.
+  const provider = thread.selectedModel
+    ? MODEL_CONFIGS[thread.selectedModel]?.provider ?? "azure"
+    : "azure";
+  const documentHintPlacement: ThreadContext["documentHintPlacement"] =
+    documentHintText === undefined
+      ? "none"
+      : providerTakesMidConversationSystem(provider)
+        ? "tail-message"
+        : "developer-message";
 
   // 5. Extension IDs (full extension objects + header secrets are
   //    resolved later by route.ts so we don't fetch them twice).
@@ -310,16 +828,37 @@ export async function loadThreadContext(
     ],
   };
 
+  // The hint as its own developer message in the prompt tail. See
+  // `documentHintTailMessage`.
+  const documentHintMessages: UIMessage[] =
+    documentHintPlacement === "tail-message" && documentHintText
+      ? [documentHintTailMessage(thread.id, documentHintText)]
+      : [];
+
   return {
     thread,
     user,
     history: [...history, userUIMessage],
-    documentHint,
+    modelHistory: [
+      ...summaryPrefix,
+      ...history,
+      ...documentHintMessages,
+      userUIMessage,
+    ],
+    documentHint:
+      documentHintPlacement === "developer-message" ? documentHintText : undefined,
+    documentHintText,
+    documentHintPlacement,
     threadDocumentIds: chatDocumentIds,
     personaDocumentIds,
     defaultTools: thread.defaultTools,
     extensions,
     attachedFiles: thread.attachedFiles ?? [],
     turnId,
+    compaction,
+    // Same last-step-first, roll-up-as-fallback rule as the budget input
+    // above: both describe the size of a prompt.
+    previousRequestPromptTokens:
+      thread.usage?.lastPromptTokens ?? thread.usage?.lastInputTokens,
   };
 }
