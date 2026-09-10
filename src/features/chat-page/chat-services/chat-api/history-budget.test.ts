@@ -150,9 +150,10 @@ describe("chat-page.unit.history-budget.003 — one measured number decides", ()
   });
 
   it("keeps an old persisted row without the new field from compacting", () => {
-    // `thread-context` falls back to `lastInputTokens` when the row predates
-    // `lastPromptTokens`, so this shape only reaches the plan when the row has
-    // no usage at all. Either way: no number, no compaction.
+    // `thread-context` passes no measurement at all when the row predates
+    // `lastPromptTokens` — it does NOT fall back to the all-steps roll-up — so
+    // a legacy row reaches the plan exactly like a first turn. No number, no
+    // compaction.
     const rows = turns(80, 1_000);
     for (const measuredPromptTokens of [undefined, 0, -1, Number.NaN]) {
       const plan = planHistoryTrim(rows, {

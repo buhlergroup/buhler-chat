@@ -76,8 +76,12 @@
 // ---------------------------------------------------------------------------
 
 /**
- * Default ceiling on estimated history tokens, used when the model config
- * carries no `historyTokenBudget`.
+ * Default ceiling on the measured prompt size, used when the model config
+ * carries no `historyTokenBudget` — which today is every model, so this is the
+ * budget in force unless `HISTORY_TOKEN_BUDGET` overrides it.
+ *
+ * The number it is compared against is the provider's own size for the
+ * previous request's last prompt. Nothing here is estimated.
  *
  * Not a context limit — the 5.6 family has a ~1M-token context window — but a
  * COST limit on the history that is re-sent every turn.
@@ -435,7 +439,8 @@ export interface HistoryBudgetDecision {
  * ## Base budget
  *
  * Precedence: `HISTORY_TOKEN_BUDGET` env override > the model config's
- * `historyTokenBudget` > the module default. The env override wins so the
+ * `historyTokenBudget` (no model sets it today) > the module default. The env
+ * override wins so the
  * budget can be dialled down in one place during an incident without a deploy.
  * A value that is absent, unparseable or non-positive is ignored rather than
  * honoured — a typo in an env var must not silently reduce every thread to no

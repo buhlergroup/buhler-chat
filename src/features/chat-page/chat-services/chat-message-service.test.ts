@@ -84,11 +84,12 @@ describe("chat-page.unit.message-service.001 — FindTopChatMessagesForCurrentUs
 describe("chat-page.unit.message-service.002 — FindTopChatMessagesForCurrentUser keeps its top=30 default for non-chat callers", () => {
   it("still defaults to 30, but the chat path no longer uses this function", async () => {
     // The default itself is unchanged. What changed is who calls it: the chat
-    // path now loads the whole thread and caps it by estimated tokens (see
-    // history-budget.ts and chat-page.unit.message-service.015), because the
-    // row cap made the prompt prefix slide by one row on every turn past 30
-    // and cost 50 points of prompt-cache hit rate. This function stays for
-    // callers that genuinely want the newest N rows.
+    // path now loads the whole thread and compacts it when the provider's
+    // measured prompt size exceeds the budget (see history-budget.ts and
+    // chat-page.unit.message-service.015), because the row cap made the prompt
+    // prefix slide by one row on every turn past 30 and cost a large part of
+    // the prompt-cache hit rate. This function stays for callers that
+    // genuinely want the newest N rows.
     let captured: any;
     historyContainer.items.query.mockImplementationOnce((q: any, _opts?: any) => {
       captured = q;

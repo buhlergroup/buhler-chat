@@ -177,8 +177,15 @@ export interface ModelConfig {
    * (256,000); `HISTORY_TOKEN_BUDGET` overrides both.
    *
    * Not a context limit — the 5.6 family has ~1M tokens of context. It is a
-   * cost limit on the history that is re-sent every turn. Set it per model
-   * only where the price per input token justifies a different cut-off.
+   * cost limit on the history that is re-sent every turn.
+   *
+   * NO MODEL SETS THIS TODAY. Every model currently takes the module default
+   * (or the `HISTORY_TOKEN_BUDGET` env override), so this field is a seam with
+   * a reader and no producer. It is kept, not deleted, because a per-model
+   * cut-off is the natural lever once one model's input price justifies a
+   * different one — set it here on that model and `resolveHistoryBudget`
+   * already honours it. Until then, do not describe it as a configured
+   * override: nothing configures it.
    *
    * Whatever is configured here is still BOUNDED at resolution time by
    * `longContextThresholdTokens` (minus a reserve) or, failing that, by 60 % of
