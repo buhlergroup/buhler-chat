@@ -523,19 +523,21 @@ export interface RecordHistoryCompactionInput {
 }
 
 /**
- * Record a trim: advance the watermark and, when enabled, summarise the block
- * that was dropped.
+ * Record a compaction: advance the watermark and, when enabled, summarise the
+ * block that was dropped.
  *
- * Called ONCE per trim, which is once every few dozen turns rather than once
- * per turn — that ratio is the point of the hysteresis in `planHistoryTrim`.
+ * Called ONCE per compaction, which is once every few dozen turns rather than
+ * once per turn — a compaction empties the eligible history, so the thread has
+ * to grow all the way back to the budget before the next one. That is where
+ * the hysteresis comes from; `planHistoryTrim` has no target and no ratio.
  *
  * The previous summary is folded into the new one rather than being kept
  * alongside it, so a thread never accumulates a chain of summaries and one row
  * always accounts for the entire compacted span.
  *
  * Returns the stored row, or null if even the watermark could not be written
- * (in which case the caller has still trimmed this turn, and will trim again
- * next turn).
+ * (in which case the caller has still compacted this turn, and will
+ * compact again next turn).
  */
 export async function recordHistoryCompaction(
   input: RecordHistoryCompactionInput,

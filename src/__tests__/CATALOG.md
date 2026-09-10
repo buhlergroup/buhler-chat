@@ -206,9 +206,11 @@ Background. The chat path used to load history with `SELECT TOP 30 … ORDER BY
 createdAt DESC`. Past row 30 every turn pushed the oldest row out of the
 window, which moved the first byte of the prompt after the developer message:
 the prompt shrank on 20 % of turn pairs and the prompt-cache hit rate fell from
-80 % to 30 %. The chat path now loads the whole thread and caps it by estimated
-tokens, cutting only at turn boundaries and only when over budget, then down to
-60 % of budget in one block so the prefix holds still for dozens of turns.
+80 % to 30 %. The chat path now loads the whole thread and compacts it when the
+provider's MEASURED size for the previous request's last prompt goes over the
+budget — nothing is estimated. A compaction takes the whole eligible history in
+one block, cutting only at turn boundaries, and the thread starts again from
+the summary, so the prefix holds still for dozens of turns.
 
 | ID | Target file | Case title | Type | Preconditions/mocks | Steps | Expected outcome |
 |---|---|---|---|---|---|---|
