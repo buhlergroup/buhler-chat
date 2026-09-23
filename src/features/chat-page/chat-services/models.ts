@@ -348,8 +348,10 @@ export const MODEL_CONFIGS: Record<ChatModel, ModelConfig> = {
     supportsResponsesAPI: true,
     supportsImageGeneration: true,
     deploymentName: process.env.AZURE_OPENAI_API_GPT56_TERRA_DEPLOYMENT_NAME,
-    // Terra is the default model: "medium" is the effort at which it earns
-    // its keep on everyday work. Sol and Luna stay on "low".
+    // "medium" is the effort at which Terra earns its keep on everyday work
+    // (set when Terra was the default model, 2026-09-07). It stays on medium
+    // as the fallback default (CODE_FALLBACK_DEFAULT_MODEL). Sol and Luna
+    // stay on "low".
     defaultReasoningEffort: "medium",
     supportedReasoningEfforts: ["none", "low", "medium", "high", "xhigh", "max"],
     pricing: { inputPerMillion: 2.00, outputPerMillion: 12.00, cachedInputPerMillion: 0.20, cacheWritePerMillion: 2.50 },
@@ -611,8 +613,40 @@ function isDeployedModel(id: ChatModel): boolean {
 /**
  * Model used when the request, the thread and the picker all say nothing.
  * This is the code default; `DEFAULT_MODEL_ID` overrides it at deploy time.
+ *
+ * GPT-6 Sol since 2026-09-23, chosen on the OpenAI list price (2.00 / 10.00,
+ * cache write 2.50) against gpt-5.6-terra's Azure meter (2.00 / 12.00, cache
+ * write 2.50). The Azure GPT-6 meters were not published yet; verify when they
+ * are.
  */
-export const CODE_DEFAULT_MODEL: ChatModel = "gpt-5.6-terra";
+export const CODE_DEFAULT_MODEL: ChatModel = "gpt-6-sol";
+
+/**
+ * Model the default falls back to when this environment has no deployment
+ * for CODE_DEFAULT_MODEL (e.g. no AZURE_OPENAI_API_GPT6_SOL_DEPLOYMENT_NAME).
+ * Without it every unpinned chat would go to a model with no deployment and
+ * fail with "Missing deployment configuration" on every turn.
+ */
+export const CODE_FALLBACK_DEFAULT_MODEL: ChatModel = "gpt-5.6-terra";
+
+/**
+ * The code default this environment can serve: CODE_DEFAULT_MODEL when it is
+ * deployed, else CODE_FALLBACK_DEFAULT_MODEL when that one is. When neither
+ * is deployed (a bare environment, the unit-test environment, or the client
+ * bundle, which cannot read server env vars) there is no better answer, so
+ * CODE_DEFAULT_MODEL is returned unchanged.
+ */
+export function resolveCodeDefaultModel(): ChatModel {
+  if (isDeployedModel(CODE_DEFAULT_MODEL)) return CODE_DEFAULT_MODEL;
+  if (isDeployedModel(CODE_FALLBACK_DEFAULT_MODEL)) {
+    logError("Code default model has no deployment in this environment — using the fallback", {
+      codeDefault: CODE_DEFAULT_MODEL,
+      fallback: CODE_FALLBACK_DEFAULT_MODEL,
+    });
+    return CODE_FALLBACK_DEFAULT_MODEL;
+  }
+  return CODE_DEFAULT_MODEL;
+}
 
 /**
  * Resolve the default model, letting the deployment override the code
@@ -638,25 +672,27 @@ export function resolveDefaultModel(
   raw: string | undefined = process.env.DEFAULT_MODEL_ID,
 ): ChatModel {
   const candidate = raw?.trim();
-  if (!candidate) return CODE_DEFAULT_MODEL;
+  if (!candidate) return resolveCodeDefaultModel();
   if (!Object.prototype.hasOwnProperty.call(MODEL_CONFIGS, candidate)) {
+    const fallback = resolveCodeDefaultModel();
     logError("DEFAULT_MODEL_ID is not a known model id — ignoring", {
       value: candidate,
-      fallback: CODE_DEFAULT_MODEL,
+      fallback,
     });
-    return CODE_DEFAULT_MODEL;
+    return fallback;
   }
   if (!isDeployedModel(candidate as ChatModel)) {
-    // Falling back is only an improvement if the code default can actually
-    // serve a turn. When it cannot either — a bare environment, or one that
-    // deploys neither — there is nothing better to offer, so honour the
+    // Falling back is only an improvement if the code default (or its
+    // fallback) can actually serve a turn. When neither can — a bare
+    // environment — there is nothing better to offer, so honour the
     // configured id and let the loud log be the signal.
-    if (isDeployedModel(CODE_DEFAULT_MODEL)) {
+    const fallback = resolveCodeDefaultModel();
+    if (isDeployedModel(fallback)) {
       logError("DEFAULT_MODEL_ID has no deployment in this environment — ignoring", {
         value: candidate,
-        fallback: CODE_DEFAULT_MODEL,
+        fallback,
       });
-      return CODE_DEFAULT_MODEL;
+      return fallback;
     }
     logError(
       "DEFAULT_MODEL_ID has no deployment, and neither does the code default — honouring it anyway",

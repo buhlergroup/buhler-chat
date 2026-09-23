@@ -1,4 +1,4 @@
-import { describe, it, expect, vi } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 
 vi.mock("server-only", () => ({}));
 
@@ -13,6 +13,7 @@ vi.mock("@/features/common/services/logger", () => ({
 import {
   clampReasoningEffort,
   CODE_DEFAULT_MODEL,
+  CODE_FALLBACK_DEFAULT_MODEL,
   DEFAULT_MODEL,
   DEFAULT_REASONING_EFFORT_LEVELS,
   getPickableReasoningEfforts,
@@ -28,7 +29,8 @@ import {
 describe("resolveDefaultModel", () => {
   it("returns the code default when DEFAULT_MODEL_ID is unset", () => {
     expect(resolveDefaultModel(undefined)).toBe(CODE_DEFAULT_MODEL);
-    expect(CODE_DEFAULT_MODEL).toBe("gpt-5.6-terra");
+    expect(CODE_DEFAULT_MODEL).toBe("gpt-6-sol");
+    expect(CODE_FALLBACK_DEFAULT_MODEL).toBe("gpt-5.6-terra");
   });
 
   it("returns the code default for an empty or whitespace value", () => {
@@ -63,16 +65,17 @@ describe("resolveDefaultModel", () => {
 });
 
 describe("MODEL_CONFIGS — default reasoning effort", () => {
-  it("puts the default model on medium effort and its siblings on low", () => {
+  it("keeps terra (the fallback default) on medium and the Sol models on low", () => {
+    // Terra's "medium" is a property of Terra, set when it was the default.
+    // The Sol convention is "low": gpt-5.6-sol ran on low while it was the
+    // default, and GPT-6 Sol keeps that convention as the new default.
     expect(MODEL_CONFIGS["gpt-5.6-terra"].defaultReasoningEffort).toBe("medium");
     expect(MODEL_CONFIGS["gpt-5.6-sol"].defaultReasoningEffort).toBe("low");
     expect(MODEL_CONFIGS["gpt-5.5"].defaultReasoningEffort).toBe("low");
   });
 
-  it("keeps terra as the code default and puts the new models on low", () => {
-    // The default flip to GPT-6 Sol waits for the Azure price; until then the
-    // new models are opt-in and start on the cheapest thinking level.
-    expect(CODE_DEFAULT_MODEL).toBe("gpt-5.6-terra");
+  it("makes GPT-6 Sol the code default and puts the new models on low", () => {
+    expect(CODE_DEFAULT_MODEL).toBe("gpt-6-sol");
     expect(MODEL_CONFIGS["gpt-6-sol"].defaultReasoningEffort).toBe("low");
     expect(MODEL_CONFIGS["gpt-6-luna"].defaultReasoningEffort).toBe("low");
     expect(MODEL_CONFIGS["claude-opus-5-5"].defaultReasoningEffort).toBe("low");
@@ -215,6 +218,9 @@ describe("resolveDefaultModel — a deployment-aware override", () => {
     if (MODEL_CONFIGS[CODE_DEFAULT_MODEL].deploymentName?.trim()) {
       // A deployed alternative exists, so the undeployed override is refused.
       expect(resolved).toBe(CODE_DEFAULT_MODEL);
+    } else if (MODEL_CONFIGS[CODE_FALLBACK_DEFAULT_MODEL].deploymentName?.trim()) {
+      // The code default is undeployed too; the fallback default serves.
+      expect(resolved).toBe(CODE_FALLBACK_DEFAULT_MODEL);
     } else {
       // Nothing is deployed: honour the id and say so loudly.
       expect(resolved).toBe("gpt-5.6-luna");
@@ -234,6 +240,67 @@ describe("resolveDefaultModel — a deployment-aware override", () => {
     // Not an assertion about the app — a marker so a future reader knows why
     // the branches above are conditional.
     expect(typeof anyDeployed).toBe("boolean");
+  });
+});
+
+// ---------------------------------------------------------------------------
+
+describe("chat-page.unit.models.default-fallback — an undeployed code default falls back to terra", () => {
+  /**
+   * GPT-6 Sol is the code default, but an environment may not deploy it yet
+   * (no AZURE_OPENAI_API_GPT6_SOL_DEPLOYMENT_NAME). Then every unpinned chat
+   * must go to a model that CAN serve a turn — gpt-5.6-terra — and not to the
+   * undeployed default, which would 500 on every turn.
+   */
+  const ids = [CODE_DEFAULT_MODEL, CODE_FALLBACK_DEFAULT_MODEL, "gpt-5.6-luna"] as const;
+  const saved: Record<string, string | undefined> = {};
+
+  beforeEach(() => {
+    for (const id of ids) saved[id] = MODEL_CONFIGS[id].deploymentName;
+    for (const id of ids) (MODEL_CONFIGS[id] as { deploymentName?: string }).deploymentName = undefined;
+    mockLogError.mockClear();
+  });
+  afterEach(() => {
+    for (const id of ids) (MODEL_CONFIGS[id] as { deploymentName?: string }).deploymentName = saved[id];
+  });
+
+  const deploy = (id: (typeof ids)[number]) => {
+    (MODEL_CONFIGS[id] as { deploymentName?: string }).deploymentName = `${id}-dep`;
+  };
+
+  it("uses GPT-6 Sol when it is deployed", () => {
+    deploy("gpt-6-sol");
+    deploy("gpt-5.6-terra");
+    expect(resolveDefaultModel(undefined)).toBe("gpt-6-sol");
+    expect(mockLogError).not.toHaveBeenCalled();
+  });
+
+  it("falls back to terra when GPT-6 Sol has no deployment, and logs it", () => {
+    deploy("gpt-5.6-terra");
+    expect(resolveDefaultModel(undefined)).toBe("gpt-5.6-terra");
+    expect(resolveDefaultModel("   ")).toBe("gpt-5.6-terra");
+    expect(mockLogError).toHaveBeenCalledWith(
+      expect.stringMatching(/no deployment/i),
+      expect.objectContaining({ codeDefault: "gpt-6-sol", fallback: "gpt-5.6-terra" }),
+    );
+  });
+
+  it("falls back to terra for an unknown or undeployed DEFAULT_MODEL_ID when Sol is undeployed", () => {
+    deploy("gpt-5.6-terra");
+    expect(resolveDefaultModel("gpt-nope")).toBe("gpt-5.6-terra");
+    expect(resolveDefaultModel("gpt-5.6-luna")).toBe("gpt-5.6-terra");
+  });
+
+  it("still honours a deployed DEFAULT_MODEL_ID over both code defaults", () => {
+    deploy("gpt-5.6-terra");
+    deploy("gpt-5.6-luna");
+    expect(resolveDefaultModel("gpt-5.6-luna")).toBe("gpt-5.6-luna");
+  });
+
+  it("returns GPT-6 Sol unchanged when nothing is deployed (negative)", () => {
+    // A bare environment, or the client bundle: no better answer exists.
+    expect(resolveDefaultModel(undefined)).toBe("gpt-6-sol");
+    expect(mockLogError).not.toHaveBeenCalled();
   });
 });
 
