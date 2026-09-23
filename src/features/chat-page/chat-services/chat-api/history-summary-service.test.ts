@@ -50,6 +50,7 @@ const DEFAULT_MODEL_TABLE: Record<string, Record<string, unknown>> = {
   "gpt-5.6-sol": { id: "gpt-5.6-sol", deploymentName: "sol-dep" },
   "gpt-5.6-terra": { id: "gpt-5.6-terra", deploymentName: "terra-dep" },
   "gpt-5.6-luna": { id: "gpt-5.6-luna", deploymentName: "luna-dep" },
+  "gpt-6-luna": { id: "gpt-6-luna", deploymentName: "gpt6-luna-dep" },
   // In the table, but not deployed in this environment.
   "gpt-5.5": { id: "gpt-5.5" },
   "claude-sonnet-5": {
@@ -221,15 +222,28 @@ describe("chat-page.unit.history-summary-service.001 — configuration", () => {
     );
   });
 
-  it("defaults to terra, then luna, then the titles deployment", () => {
+  it("defaults to terra, then GPT-6 Luna, then gpt-5.6-luna, then the titles deployment", () => {
     expect(resolveHistorySummaryModel()?.modelId).toBe("gpt-5.6-terra");
 
-    // Terra not deployed here.
+    // Terra not deployed here: GPT-6 Luna, the fallback model.
     resetModelTable({
+      "gpt-6-luna": DEFAULT_MODEL_TABLE["gpt-6-luna"],
       "gpt-5.6-luna": DEFAULT_MODEL_TABLE["gpt-5.6-luna"],
       "gpt-5.6-sol": DEFAULT_MODEL_TABLE["gpt-5.6-sol"],
     });
-    expect(resolveHistorySummaryModel()?.modelId).toBe("gpt-5.6-luna");
+    expect(resolveHistorySummaryModel()).toEqual(
+      expect.objectContaining({ modelId: "gpt-6-luna", source: "luna" }),
+    );
+
+    // GPT-6 Luna in the table but not deployed here: skipped, gpt-5.6-luna serves.
+    resetModelTable({
+      "gpt-6-luna": { id: "gpt-6-luna" },
+      "gpt-5.6-luna": DEFAULT_MODEL_TABLE["gpt-5.6-luna"],
+      "gpt-5.6-sol": DEFAULT_MODEL_TABLE["gpt-5.6-sol"],
+    });
+    expect(resolveHistorySummaryModel()).toEqual(
+      expect.objectContaining({ modelId: "gpt-5.6-luna", source: "luna-5.6" }),
+    );
 
     // Neither terra nor luna: the titles deployment counts only if a model
     // config owns it.
