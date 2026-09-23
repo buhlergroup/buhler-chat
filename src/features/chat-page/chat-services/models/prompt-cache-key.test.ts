@@ -127,6 +127,21 @@ describe("resolvePromptCacheKey", () => {
     );
   });
 
+  it.each(["gpt-6-sol", "gpt-6-luna"] as const)(
+    "gives GPT-6 (%s) the persona key, like GPT-5.6",
+    (modelId) => {
+      const key = resolvePromptCacheKey({
+        ...base,
+        modelId,
+        personaId: "agent-7",
+        strategy: "persona",
+      });
+      expect(key).toBe(
+        `persona:agent-7:${toolsetSignature(base.toolNames)}:${shardForUser(USER_A, 4)}`,
+      );
+    },
+  );
+
   it("uses 'default' in place of a missing persona id", () => {
     const key = resolvePromptCacheKey({
       ...base,
@@ -207,8 +222,14 @@ describe("resolvePromptCacheKey", () => {
     ).toBe("thread-42");
   });
 
-  it("keeps the thread id for non-5.6 families generally (negative)", () => {
-    for (const modelId of ["gpt-5.4", "gpt-5.4-mini", "claude-sonnet-5", "Kimi-K2.6"] as const) {
+  it("keeps the thread id for families outside PERSONA_CACHE_KEY_FAMILIES (negative)", () => {
+    for (const modelId of [
+      "gpt-5.4",
+      "gpt-5.4-mini",
+      "claude-sonnet-5",
+      "claude-opus-5-5",
+      "Kimi-K2.6",
+    ] as const) {
       expect(
         resolvePromptCacheKey({
           ...base,

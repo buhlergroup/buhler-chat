@@ -189,6 +189,38 @@ describe("resolveReasoningEffort — resolution order", () => {
     expect(
       resolveReasoningEffort({ modelId: "claude-sonnet-5", overrides: {} }),
     ).toBe("low");
+    expect(
+      resolveReasoningEffort({ modelId: "claude-opus-5-5", overrides: {} }),
+    ).toBe("low");
+  });
+
+  it("uses the GPT-6 defaults with no pick and no override", () => {
+    expect(resolveReasoningEffort({ modelId: "gpt-6-sol", overrides: {} })).toBe("low");
+    expect(resolveReasoningEffort({ modelId: "gpt-6-luna", overrides: {} })).toBe("low");
+  });
+
+  it("accepts xhigh/max overrides for Opus 5.5 and GPT-6, not for Opus 4.8", () => {
+    // Opus 5.5 and GPT-6 were measured to take both; Opus 4.8 declares no list,
+    // so it keeps the picker's four and an xhigh entry is dropped.
+    expect(
+      parseReasoningEffortOverrides(
+        '{"claude-opus-5-5":"max","gpt-6-sol":"xhigh","claude-opus-4-8":"xhigh"}',
+      ),
+    ).toEqual({ "claude-opus-5-5": "max", "gpt-6-sol": "xhigh" });
+    expect(
+      resolveReasoningEffort({
+        modelId: "claude-opus-5-5",
+        overrides: { "claude-opus-5-5": "xhigh" },
+      }),
+    ).toBe("xhigh");
+  });
+
+  it("clamps a stored 'minimal' pick on GPT-6 and Opus 5.5 to low", () => {
+    for (const modelId of ["gpt-6-sol", "claude-opus-5-5"] as const) {
+      expect(
+        resolveReasoningEffort({ modelId, userPick: "minimal", overrides: {} }),
+      ).toBe("low");
+    }
   });
 
   it("clamps a user pick the model does not accept, and says so", () => {

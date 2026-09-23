@@ -133,7 +133,7 @@ export function resolveProvider(args: ResolveProviderArgs): ResolvedProvider {
     case "foundry":
       return resolveFoundryBackedProvider(args);
     case "anthropic":
-      return resolveAnthropicBackedProvider(args);
+      return resolveAnthropicBackedProvider(args, config);
     default:
       throw new Error(
         `resolveProvider: unhandled provider "${providerTag}" for model "${args.modelId}"`
@@ -255,7 +255,10 @@ function resolveFoundryBackedProvider(args: ResolveProviderArgs): ResolvedProvid
  * through the route's `tools` map. Reasoning/thinking options are not sent
  * (configs are supportsReasoning:false).
  */
-function resolveAnthropicBackedProvider(args: ResolveProviderArgs): ResolvedProvider {
+function resolveAnthropicBackedProvider(
+  args: ResolveProviderArgs,
+  config: ModelConfig,
+): ResolvedProvider {
   const builtInTools: Record<string, unknown> = {};
   if (args.toggles.webSearch) {
     // Web search + web fetch are paired: search finds pages, fetch reads them.
@@ -277,14 +280,19 @@ function resolveAnthropicBackedProvider(args: ResolveProviderArgs): ResolvedProv
     anthropicOptions.thinking = { type: "adaptive" };
   }
   if (args.reasoning.supported && args.reasoning.effort) {
-    // Claude's adaptive thinking takes low/medium/high. Map the levels that
-    // only exist on the OpenAI side onto the nearest Claude equivalent.
+    // Claude has no "minimal"/"none": those map to "low". "xhigh"/"max" pass
+    // through only for a model whose supportedReasoningEfforts names them
+    // (measured per deployment, e.g. Opus 5.5); every other Claude model gets
+    // "high", the top level it was verified at.
     const effort = args.reasoning.effort;
+    const supported = config.supportedReasoningEfforts ?? [];
     anthropicOptions.effort =
       effort === "minimal" || effort === "none"
         ? "low"
         : effort === "xhigh" || effort === "max"
-          ? "high"
+          ? supported.includes(effort)
+            ? effort
+            : "high"
           : effort;
   }
 

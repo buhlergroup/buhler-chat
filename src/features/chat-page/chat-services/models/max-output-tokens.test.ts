@@ -167,7 +167,14 @@ describe("chat-page.unit.max-output.004 — the shipped ceilings", () => {
   it("gives the reasoning-heavy families room for thinking AND an answer", () => {
     // Reasoning counts against this budget, so 16000 was measurably tight at
     // high effort: the thinking consumed it and the answer was cut off.
-    for (const id of ["gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna", "gpt-5.5"] as const) {
+    for (const id of [
+      "gpt-6-sol",
+      "gpt-6-luna",
+      "gpt-5.6-sol",
+      "gpt-5.6-terra",
+      "gpt-5.6-luna",
+      "gpt-5.5",
+    ] as const) {
       expect(MODEL_CONFIGS[id].maxOutputTokens, id).toBe(32000);
     }
   });
@@ -175,6 +182,7 @@ describe("chat-page.unit.max-output.004 — the shipped ceilings", () => {
   it("leaves Claude and the small models where they were", () => {
     // Claude's thinking is adaptive, so the cap is the bill guardrail rather
     // than the thinking budget; the small models are picked for speed.
+    expect(MODEL_CONFIGS["claude-opus-5-5"].maxOutputTokens).toBe(16000);
     expect(MODEL_CONFIGS["claude-opus-4-8"].maxOutputTokens).toBe(16000);
     expect(MODEL_CONFIGS["claude-sonnet-5"].maxOutputTokens).toBe(16000);
     expect(MODEL_CONFIGS["gpt-5.4-mini"].maxOutputTokens).toBe(8000);

@@ -3,7 +3,7 @@
  *
  * Decides the `prompt_cache_key` a turn is sent with.
  *
- * Measured on dev against GPT-5.6: implicit caching matches PARTIAL prefixes,
+ * Measured on dev against GPT-5.6 (and GPT-6, 2026-09-23): implicit caching matches PARTIAL prefixes,
  * and two conversations sent with the SAME prompt_cache_key and the same
  * developer message read each other's cached prefix. Different keys share
  * nothing. So keying on the thread id — today's default — means every new
@@ -22,12 +22,16 @@
  *     the user's hashed id so one user always lands on one shard (and keeps
  *     reading their own warm prefix).
  *
- * Only GPT-5.6 gets the persona strategy: it is the generation whose implicit
- * cache was measured to match partial prefixes across conversations. Every
- * other model keeps the thread id.
+ * Only the generations in PERSONA_CACHE_KEY_FAMILIES (GPT-6 and GPT-5.6) get
+ * the persona strategy: their implicit cache was measured to match partial
+ * prefixes across conversations. Every other model keeps the thread id.
  */
 
-import { MODEL_CONFIGS, type ChatModel } from "../models";
+import {
+  MODEL_CONFIGS,
+  PERSONA_CACHE_KEY_FAMILIES,
+  type ChatModel,
+} from "../models";
 
 export type PromptCacheKeyStrategy = "thread" | "persona";
 
@@ -144,8 +148,9 @@ export function resolvePromptCacheKey({
 }: ResolvePromptCacheKeyArgs): string {
   if (strategy !== "persona") return threadId;
   // Gated on the generation, not on a per-model flag: this is about how the
-  // implicit cache behaves, which is a property of GPT-5.6.
-  if (MODEL_CONFIGS[modelId]?.family !== "gpt-5.6") return threadId;
+  // implicit cache behaves, which is a property of the generation.
+  const family = MODEL_CONFIGS[modelId]?.family;
+  if (!family || !PERSONA_CACHE_KEY_FAMILIES.has(family)) return threadId;
 
   const signature = toolsetSignature(toolNames);
   const shard = shardForUser(userKey, shards);

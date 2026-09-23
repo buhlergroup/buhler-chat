@@ -11,6 +11,7 @@ import { MODEL_CONFIGS } from "@/features/chat-page/chat-services/models";
 // Models we toggle deployment names on during tests.
 const FOUNDRY = ["DeepSeek-V4-Pro", "Kimi-K2.6"] as const;
 const LUNA = "gpt-5.6-luna" as const;
+const GPT6_LUNA = "gpt-6-luna" as const;
 
 const savedDeploy: Record<string, string | undefined> = {};
 const ENV_KEYS = [
@@ -23,13 +24,16 @@ const ENV_KEYS = [
 const savedEnv: Record<string, string | undefined> = {};
 
 beforeEach(() => {
-  for (const id of [...FOUNDRY, LUNA]) {
+  for (const id of [...FOUNDRY, LUNA, GPT6_LUNA]) {
     savedDeploy[id] = MODEL_CONFIGS[id].deploymentName;
   }
   // Make all three eligible models "deployed" by default.
   (MODEL_CONFIGS["DeepSeek-V4-Pro"] as any).deploymentName = "DeepSeek-V4-Pro";
   (MODEL_CONFIGS["Kimi-K2.6"] as any).deploymentName = "Kimi-K2.6-1";
   (MODEL_CONFIGS[LUNA] as any).deploymentName = "luna-deploy";
+  // GPT-6 Luna starts undeployed so the sets below do not depend on the
+  // environment; the GPT-6 case deploys it explicitly.
+  (MODEL_CONFIGS[GPT6_LUNA] as any).deploymentName = undefined;
   for (const k of ENV_KEYS) {
     savedEnv[k] = process.env[k];
     delete process.env[k];
@@ -37,7 +41,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
-  for (const id of [...FOUNDRY, LUNA]) {
+  for (const id of [...FOUNDRY, LUNA, GPT6_LUNA]) {
     (MODEL_CONFIGS[id] as any).deploymentName = savedDeploy[id];
   }
   for (const k of ENV_KEYS) {
@@ -94,6 +98,24 @@ describe("getDowngradeTargets — hardCapSet", () => {
     process.env.DOWNGRADE_HARDCAP_MODELS = "gpt-5.6-luna,DeepSeek-V4-Pro";
     const { hardCapSet } = getDowngradeTargets();
     expect(hardCapSet).toEqual(["gpt-5.6-luna", "DeepSeek-V4-Pro"]);
+  });
+
+  it("puts a deployed GPT-6 Luna first: it is the cheapest eligible model", () => {
+    // Output prices: gpt-6-luna 0.50 < gpt-5.6-luna 1.20 = DeepSeek 1.20 < Kimi 2.50.
+    (MODEL_CONFIGS[GPT6_LUNA] as any).deploymentName = "gpt-6-luna";
+    expect(MODEL_CONFIGS[GPT6_LUNA].hardCapEligible).toBe(true);
+    const { hardCapSet } = getDowngradeTargets();
+    expect(hardCapSet).toEqual([
+      "gpt-6-luna",
+      "gpt-5.6-luna",
+      "DeepSeek-V4-Pro",
+      "Kimi-K2.6",
+    ]);
+  });
+
+  it("leaves an undeployed GPT-6 Luna out of the set (negative)", () => {
+    const { hardCapSet } = getDowngradeTargets();
+    expect(hardCapSet).not.toContain("gpt-6-luna");
   });
 
   it("drops unknown / ineligible ids from the allow-list", () => {
