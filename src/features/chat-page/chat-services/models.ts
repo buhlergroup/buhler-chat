@@ -248,6 +248,16 @@ export interface ModelConfig {
   longContextThresholdTokens?: number;
 }
 
+/**
+ * Where a per-model fallback goes when the configured `fallbackModel` has no
+ * deployment in this environment, in order. GPT-6 Luna is the fallback model;
+ * gpt-5.6-luna serves an environment that does not deploy GPT-6 Luna yet.
+ */
+export const FALLBACK_MODEL_CHAIN: ReadonlyArray<ChatModel> = [
+  "gpt-6-luna",
+  "gpt-5.6-luna",
+];
+
 export const MODEL_CONFIGS: Record<ChatModel, ModelConfig> = {
   // ── GPT-6 family (2026-09-22) ───────────────────────────────────────────
   // OpenAI list price, 2026-09-23. Azure meters not published yet
@@ -334,7 +344,7 @@ export const MODEL_CONFIGS: Record<ChatModel, ModelConfig> = {
     contextWindow: 1050000,
     longContextThresholdTokens: 272000,
     maxOutputTokens: 32000,
-    fallbackModel: "gpt-5.6-luna",
+    fallbackModel: "gpt-6-luna",
     capabilities: ["vision", "imageGen", "webSearch", "code"],
   },
   "gpt-5.6-terra": {
@@ -358,7 +368,7 @@ export const MODEL_CONFIGS: Record<ChatModel, ModelConfig> = {
     contextWindow: 1050000,
     longContextThresholdTokens: 272000,
     maxOutputTokens: 32000,
-    fallbackModel: "gpt-5.6-luna",
+    fallbackModel: "gpt-6-luna",
     capabilities: ["vision", "imageGen", "webSearch", "code"],
   },
   "gpt-5.6-luna": {
@@ -396,7 +406,7 @@ export const MODEL_CONFIGS: Record<ChatModel, ModelConfig> = {
     pricing: { inputPerMillion: 5.00, outputPerMillion: 30.00, cachedInputPerMillion: 0.50 },
     contextWindow: 1050000,
     maxOutputTokens: 32000,
-    fallbackModel: "gpt-5.6-luna",
+    fallbackModel: "gpt-6-luna",
     capabilities: ["vision", "imageGen", "webSearch", "code"],
   },
   "gpt-5.4": {
@@ -413,7 +423,7 @@ export const MODEL_CONFIGS: Record<ChatModel, ModelConfig> = {
     pricing: { inputPerMillion: 2.50, outputPerMillion: 15.00, cachedInputPerMillion: 0.25 },
     contextWindow: 1050000,
     maxOutputTokens: 16000,
-    fallbackModel: "gpt-5.6-luna",
+    fallbackModel: "gpt-6-luna",
     capabilities: ["vision", "imageGen", "webSearch", "code"],
   },
   "gpt-5.4-mini": {
@@ -608,6 +618,26 @@ export const MODEL_CONFIGS: Record<ChatModel, ModelConfig> = {
 /** A model this environment can actually route a turn to. */
 function isDeployedModel(id: ChatModel): boolean {
   return !!MODEL_CONFIGS[id]?.deploymentName?.trim();
+}
+
+/**
+ * The fallback a turn on `current` may actually move to: `preferred` (the
+ * model's configured `fallbackModel`) when it is deployed, else the first
+ * deployed entry of FALLBACK_MODEL_CHAIN. Never `current` itself, because
+ * "falling back" to the model that is over its limit changes nothing.
+ * Undefined when no candidate has a deployment here, and the caller then
+ * keeps the turn on `current` (fail safe) rather than route it to a model
+ * that would answer "Missing deployment configuration".
+ */
+export function resolveDeployedFallbackModel(
+  preferred: ChatModel | undefined,
+  current: ChatModel,
+): ChatModel | undefined {
+  const candidates = [
+    ...(preferred ? [preferred] : []),
+    ...FALLBACK_MODEL_CHAIN,
+  ];
+  return candidates.find((id) => id !== current && isDeployedModel(id));
 }
 
 /**

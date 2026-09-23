@@ -82,7 +82,8 @@ export function getDowngradeTargets(): DowngradeTargets {
     .filter((id) => MODEL_CONFIGS[id].hardCapEligible && isDeployed(id))
     // Cheapest-first by output price, then by input price, then by model id.
     // Output price alone leaves ties (gpt-5.6-luna and DeepSeek-V4-Pro are both
-    // 1.20/1M output), and a tie under Array.prototype.sort resolves by
+    // 1.20/1M output; gpt-6-luna, the fallback model, is cheapest at 0.50),
+    // and a tie under Array.prototype.sort resolves by
     // MODEL_CONFIGS declaration order — so which model a capped user landed on
     // depended on the order of an object literal. The extra keys make the
     // ordering a property of the prices, not of the file.

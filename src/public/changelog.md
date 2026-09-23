@@ -6,6 +6,7 @@
 - **Added:** GPT-6 Sol is now available: the flagship GPT-6 model for complex reasoning, coding and agentic work.
 - **Added:** GPT-6 Luna is now available: a fast and low-cost GPT-6 model for everyday tasks. It is also an automatic cost-cap downgrade target.
 - **Changed:** GPT-6 Sol is now the default model. If an environment has no GPT-6 Sol deployment, the default is GPT-5.6 Terra.
+- **Changed:** GPT-6 Luna is the fallback model. When a model reaches its daily limit, and for history summaries, GPT-6 Luna is used. If an environment has no GPT-6 Luna deployment, GPT-5.6 Luna is used.
 - **Added:** Claude Opus 5.5 is now available. It accepts the reasoning levels "xhigh" and "max" in addition to low, medium and high.
 - **Fixed:** The cost of Claude Opus 4.8 is now calculated at the correct price (input 5.00 USD and output 25.00 USD per 1M tokens).
 
