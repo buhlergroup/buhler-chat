@@ -21,6 +21,7 @@ import {
   ModelConfig,
   ProviderReasoningEffort,
   ReasoningEffort,
+  resolveDeployedFallbackModel,
 } from "../models";
 import { resolveReasoningEffort } from "../models/reasoning-effort";
 
@@ -171,23 +172,31 @@ export async function resolveModelAndLimits(
     if (!fallbackInfo.fellBack) {
       const limitCheck = await CheckLimits(userId, selectedModel);
       if (limitCheck.exceeded && limitCheck.fallbackModel) {
-        const fallbackConfig = MODEL_CONFIGS[limitCheck.fallbackModel];
-        if (fallbackConfig?.deploymentName) {
+        // The configured fallback (gpt-6-luna) may have no deployment in this
+        // environment; then the next deployed entry of FALLBACK_MODEL_CHAIN
+        // serves (gpt-5.6-luna), and with none the turn stays put.
+        const target = resolveDeployedFallbackModel(
+          limitCheck.fallbackModel,
+          selectedModel,
+        );
+        const fallbackConfig = target ? MODEL_CONFIGS[target] : undefined;
+        if (target && fallbackConfig?.deploymentName) {
           fallbackInfo = {
             fellBack: true,
             reason: "perModel",
             originalModel: selectedModel,
-            fallbackModel: limitCheck.fallbackModel,
-            message: `Daily ${limitCheck.limitType} limit reached for ${selectedModel}. Using ${limitCheck.fallbackModel} instead.`,
+            fallbackModel: target,
+            message: `Daily ${limitCheck.limitType} limit reached for ${selectedModel}. Using ${target} instead.`,
             limitType: limitCheck.limitType!,
             currentUsage: limitCheck.currentUsage!,
             limit: limitCheck.limit!,
           } satisfies FallbackInfo;
           logInfo("Limit exceeded, falling back", {
             originalModel: selectedModel,
-            fallbackModel: limitCheck.fallbackModel,
+            configuredFallback: limitCheck.fallbackModel,
+            fallbackModel: target,
           });
-          selectedModel = limitCheck.fallbackModel;
+          selectedModel = target;
           modelConfig = fallbackConfig;
         }
       }

@@ -104,6 +104,86 @@ describe("resolveModelAndLimits — falls back to thread.selectedModel when payl
   });
 });
 
+describe("resolveModelAndLimits — the fallback model must be deployed", () => {
+  // GPT-6 Luna is the configured fallback model, but an environment may not
+  // deploy it yet. Then gpt-5.6-luna serves; with neither, the turn stays on
+  // the model it asked for rather than go to one that cannot answer.
+  const LUNAS = ["gpt-6-luna", "gpt-5.6-luna"] as const;
+  const savedLuna: Record<string, string | undefined> = {};
+  beforeEach(() => {
+    for (const id of LUNAS) {
+      savedLuna[id] = MODEL_CONFIGS[id].deploymentName;
+      (MODEL_CONFIGS[id] as any).deploymentName = undefined;
+    }
+    mockCheckLimits.mockResolvedValue({
+      exceeded: true,
+      fallbackModel: "gpt-6-luna",
+      limitType: "cost",
+      currentUsage: 5,
+      limit: 1,
+    } as any);
+  });
+  afterEach(() => {
+    for (const id of LUNAS) (MODEL_CONFIGS[id] as any).deploymentName = savedLuna[id];
+  });
+
+  it("configures GPT-6 Luna as the fallback on every model that has one", () => {
+    for (const [id, config] of Object.entries(MODEL_CONFIGS)) {
+      if (config.fallbackModel === undefined) continue;
+      expect(config.fallbackModel, id).toBe("gpt-6-luna");
+    }
+  });
+
+  it("uses GPT-6 Luna when it is deployed", async () => {
+    (MODEL_CONFIGS["gpt-6-luna"] as any).deploymentName = "gpt6-luna-dep";
+    (MODEL_CONFIGS["gpt-5.6-luna"] as any).deploymentName = "luna56-dep";
+    const result = await resolveModelAndLimits(
+      { selectedModel: "gpt-5.5" },
+      makeThread({ selectedModel: "gpt-5.5" }),
+    );
+    expect(result.selectedModel).toBe("gpt-6-luna");
+    expect(result.modelDeployment).toBe("gpt6-luna-dep");
+    expect(result.fallbackInfo.fellBack && result.fallbackInfo.fallbackModel).toBe("gpt-6-luna");
+  });
+
+  it("goes to gpt-5.6-luna when GPT-6 Luna has no deployment", async () => {
+    (MODEL_CONFIGS["gpt-5.6-luna"] as any).deploymentName = "luna56-dep";
+    const result = await resolveModelAndLimits(
+      { selectedModel: "gpt-5.5" },
+      makeThread({ selectedModel: "gpt-5.5" }),
+    );
+    expect(result.selectedModel).toBe("gpt-5.6-luna");
+    expect(result.modelDeployment).toBe("luna56-dep");
+    if (result.fallbackInfo.fellBack) {
+      expect(result.fallbackInfo.reason).toBe("perModel");
+      expect(result.fallbackInfo.fallbackModel).toBe("gpt-5.6-luna");
+      expect(result.fallbackInfo.message).toContain("gpt-5.6-luna");
+    } else {
+      throw new Error("expected a fallback");
+    }
+  });
+
+  it("stays on the requested model when no fallback is deployed (negative)", async () => {
+    const result = await resolveModelAndLimits(
+      { selectedModel: "gpt-5.5" },
+      makeThread({ selectedModel: "gpt-5.5" }),
+    );
+    expect(result.fallbackInfo.fellBack).toBe(false);
+    expect(result.selectedModel).toBe("gpt-5.5");
+  });
+
+  it("never falls back to the model that is over its limit (negative)", async () => {
+    // A GPT-6 Luna turn over its own limit must not "fall back" to itself.
+    (MODEL_CONFIGS["gpt-6-luna"] as any).deploymentName = "gpt6-luna-dep";
+    (MODEL_CONFIGS["gpt-5.6-luna"] as any).deploymentName = "luna56-dep";
+    const result = await resolveModelAndLimits(
+      { selectedModel: "gpt-6-luna" },
+      makeThread({ selectedModel: "gpt-6-luna" }),
+    );
+    expect(result.selectedModel).toBe("gpt-5.6-luna");
+  });
+});
+
 describe("resolveModelAndLimits — limit exceeded triggers fallback", () => {
   it("returns fellBack:true and switches to fallbackModel when limit is exceeded", async () => {
     // gpt-5.5 has fallbackModel "gpt-5.4-mini"

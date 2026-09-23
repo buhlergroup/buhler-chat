@@ -83,6 +83,7 @@ export type HistorySummaryModelSource =
   | "thread"
   | "terra"
   | "luna"
+  | "luna-5.6"
   | "titles";
 
 export interface HistorySummaryModel {
@@ -127,7 +128,8 @@ function modelOwningDeployment(
  *
  * ## Order
  *
- * `HISTORY_SUMMARY_DEPLOYMENT_NAME` > the thread's own model > Terra > Luna >
+ * `HISTORY_SUMMARY_DEPLOYMENT_NAME` > the thread's own model > Terra > GPT-6
+ * Luna > gpt-5.6-luna >
  * the deployment already used for thread titles. A candidate that names a
  * deployment no model config owns is SKIPPED and logged — the seam could not
  * build a client for it, and a silent 404 on every trim is what this whole
@@ -156,7 +158,10 @@ export function resolveHistorySummaryModel(input?: {
     { source: "env", deploymentName: process.env.HISTORY_SUMMARY_DEPLOYMENT_NAME },
     { source: "thread", modelId: input?.selectedModel },
     { source: "terra", modelId: "gpt-5.6-terra" },
-    { source: "luna", modelId: "gpt-5.6-luna" },
+    // GPT-6 Luna is the fallback model; gpt-5.6-luna serves an environment
+    // that does not deploy it. An undeployed candidate is skipped below.
+    { source: "luna", modelId: "gpt-6-luna" },
+    { source: "luna-5.6", modelId: "gpt-5.6-luna" },
     {
       source: "titles",
       deploymentName: process.env.AZURE_OPENAI_API_MINI_DEPLOYMENT_NAME,
