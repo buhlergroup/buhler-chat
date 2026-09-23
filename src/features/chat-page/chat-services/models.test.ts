@@ -1,4 +1,4 @@
-import { describe, it, expect, vi } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 
 vi.mock("server-only", () => ({}));
 
@@ -13,6 +13,7 @@ vi.mock("@/features/common/services/logger", () => ({
 import {
   clampReasoningEffort,
   CODE_DEFAULT_MODEL,
+  CODE_FALLBACK_DEFAULT_MODEL,
   DEFAULT_MODEL,
   DEFAULT_REASONING_EFFORT_LEVELS,
   getPickableReasoningEfforts,
@@ -28,7 +29,8 @@ import {
 describe("resolveDefaultModel", () => {
   it("returns the code default when DEFAULT_MODEL_ID is unset", () => {
     expect(resolveDefaultModel(undefined)).toBe(CODE_DEFAULT_MODEL);
-    expect(CODE_DEFAULT_MODEL).toBe("gpt-5.6-terra");
+    expect(CODE_DEFAULT_MODEL).toBe("gpt-6-sol");
+    expect(CODE_FALLBACK_DEFAULT_MODEL).toBe("gpt-5.6-terra");
   });
 
   it("returns the code default for an empty or whitespace value", () => {
@@ -63,10 +65,20 @@ describe("resolveDefaultModel", () => {
 });
 
 describe("MODEL_CONFIGS — default reasoning effort", () => {
-  it("puts the default model on medium effort and its siblings on low", () => {
+  it("keeps terra (the fallback default) on medium and the Sol models on low", () => {
+    // Terra's "medium" is a property of Terra, set when it was the default.
+    // The Sol convention is "low": gpt-5.6-sol ran on low while it was the
+    // default, and GPT-6 Sol keeps that convention as the new default.
     expect(MODEL_CONFIGS["gpt-5.6-terra"].defaultReasoningEffort).toBe("medium");
     expect(MODEL_CONFIGS["gpt-5.6-sol"].defaultReasoningEffort).toBe("low");
     expect(MODEL_CONFIGS["gpt-5.5"].defaultReasoningEffort).toBe("low");
+  });
+
+  it("makes GPT-6 Sol the code default and puts the new models on low", () => {
+    expect(CODE_DEFAULT_MODEL).toBe("gpt-6-sol");
+    expect(MODEL_CONFIGS["gpt-6-sol"].defaultReasoningEffort).toBe("low");
+    expect(MODEL_CONFIGS["gpt-6-luna"].defaultReasoningEffort).toBe("low");
+    expect(MODEL_CONFIGS["claude-opus-5-5"].defaultReasoningEffort).toBe("low");
   });
 });
 
@@ -88,7 +100,7 @@ describe("chat-page.unit.models.pricing — the shipped price table holds its ow
   const entries = Object.entries(MODEL_CONFIGS);
 
   /** Families whose provider bills a prompt-cache write at a premium. */
-  const WRITE_BILLING_FAMILIES = ["gpt-5.6", "claude"];
+  const WRITE_BILLING_FAMILIES = ["gpt-6", "gpt-5.6", "claude"];
 
   it("prices every model", () => {
     for (const [id, config] of entries) {
@@ -111,7 +123,7 @@ describe("chat-page.unit.models.pricing — the shipped price table holds its ow
     const billing = entries.filter(([, c]) => WRITE_BILLING_FAMILIES.includes(c.family ?? ""));
     // Guards the guard: if the families are ever renamed this must not quietly
     // start asserting nothing.
-    expect(billing.length).toBeGreaterThanOrEqual(5);
+    expect(billing.length).toBeGreaterThanOrEqual(8);
 
     for (const [id, config] of billing) {
       expect(
@@ -133,6 +145,38 @@ describe("chat-page.unit.models.pricing — the shipped price table holds its ow
         `${id} is not in a write-billing family; a write price here would bill twice`,
       ).toBeUndefined();
     }
+  });
+
+  it("pins the list prices of the models added or corrected on 2026-09-23", () => {
+    // GPT-6: OpenAI list price (developers.openai.com/api/docs/pricing); the
+    // Azure meters were not published yet. Claude: platform.claude.com
+    // pricing. Opus 4.8 used to carry the retired Opus 4/4.1 price
+    // (15 / 75 / 1.50 / 18.75), which over-stated every Opus 4.8 turn 3x.
+    expect(MODEL_CONFIGS["gpt-6-sol"].pricing).toEqual({
+      inputPerMillion: 2.0,
+      outputPerMillion: 10.0,
+      cachedInputPerMillion: 0.2,
+      cacheWritePerMillion: 2.5,
+    });
+    expect(MODEL_CONFIGS["gpt-6-luna"].pricing).toEqual({
+      inputPerMillion: 0.1,
+      outputPerMillion: 0.5,
+      cachedInputPerMillion: 0.01,
+      cacheWritePerMillion: 0.125,
+    });
+    expect(MODEL_CONFIGS["claude-opus-5-5"].pricing).toEqual({
+      inputPerMillion: 4.0,
+      outputPerMillion: 20.0,
+      // 0.05x input on Opus 5.5, not the usual 0.1x.
+      cachedInputPerMillion: 0.2,
+      cacheWritePerMillion: 5.0,
+    });
+    expect(MODEL_CONFIGS["claude-opus-4-8"].pricing).toEqual({
+      inputPerMillion: 5.0,
+      outputPerMillion: 25.0,
+      cachedInputPerMillion: 0.5,
+      cacheWritePerMillion: 6.25,
+    });
   });
 
   it("gives every model a maxOutputTokens that leaves room for reasoning", () => {
@@ -174,6 +218,9 @@ describe("resolveDefaultModel — a deployment-aware override", () => {
     if (MODEL_CONFIGS[CODE_DEFAULT_MODEL].deploymentName?.trim()) {
       // A deployed alternative exists, so the undeployed override is refused.
       expect(resolved).toBe(CODE_DEFAULT_MODEL);
+    } else if (MODEL_CONFIGS[CODE_FALLBACK_DEFAULT_MODEL].deploymentName?.trim()) {
+      // The code default is undeployed too; the fallback default serves.
+      expect(resolved).toBe(CODE_FALLBACK_DEFAULT_MODEL);
     } else {
       // Nothing is deployed: honour the id and say so loudly.
       expect(resolved).toBe("gpt-5.6-luna");
@@ -193,6 +240,67 @@ describe("resolveDefaultModel — a deployment-aware override", () => {
     // Not an assertion about the app — a marker so a future reader knows why
     // the branches above are conditional.
     expect(typeof anyDeployed).toBe("boolean");
+  });
+});
+
+// ---------------------------------------------------------------------------
+
+describe("chat-page.unit.models.default-fallback — an undeployed code default falls back to terra", () => {
+  /**
+   * GPT-6 Sol is the code default, but an environment may not deploy it yet
+   * (no AZURE_OPENAI_API_GPT6_SOL_DEPLOYMENT_NAME). Then every unpinned chat
+   * must go to a model that CAN serve a turn — gpt-5.6-terra — and not to the
+   * undeployed default, which would 500 on every turn.
+   */
+  const ids = [CODE_DEFAULT_MODEL, CODE_FALLBACK_DEFAULT_MODEL, "gpt-5.6-luna"] as const;
+  const saved: Record<string, string | undefined> = {};
+
+  beforeEach(() => {
+    for (const id of ids) saved[id] = MODEL_CONFIGS[id].deploymentName;
+    for (const id of ids) (MODEL_CONFIGS[id] as { deploymentName?: string }).deploymentName = undefined;
+    mockLogError.mockClear();
+  });
+  afterEach(() => {
+    for (const id of ids) (MODEL_CONFIGS[id] as { deploymentName?: string }).deploymentName = saved[id];
+  });
+
+  const deploy = (id: (typeof ids)[number]) => {
+    (MODEL_CONFIGS[id] as { deploymentName?: string }).deploymentName = `${id}-dep`;
+  };
+
+  it("uses GPT-6 Sol when it is deployed", () => {
+    deploy("gpt-6-sol");
+    deploy("gpt-5.6-terra");
+    expect(resolveDefaultModel(undefined)).toBe("gpt-6-sol");
+    expect(mockLogError).not.toHaveBeenCalled();
+  });
+
+  it("falls back to terra when GPT-6 Sol has no deployment, and logs it", () => {
+    deploy("gpt-5.6-terra");
+    expect(resolveDefaultModel(undefined)).toBe("gpt-5.6-terra");
+    expect(resolveDefaultModel("   ")).toBe("gpt-5.6-terra");
+    expect(mockLogError).toHaveBeenCalledWith(
+      expect.stringMatching(/no deployment/i),
+      expect.objectContaining({ codeDefault: "gpt-6-sol", fallback: "gpt-5.6-terra" }),
+    );
+  });
+
+  it("falls back to terra for an unknown or undeployed DEFAULT_MODEL_ID when Sol is undeployed", () => {
+    deploy("gpt-5.6-terra");
+    expect(resolveDefaultModel("gpt-nope")).toBe("gpt-5.6-terra");
+    expect(resolveDefaultModel("gpt-5.6-luna")).toBe("gpt-5.6-terra");
+  });
+
+  it("still honours a deployed DEFAULT_MODEL_ID over both code defaults", () => {
+    deploy("gpt-5.6-terra");
+    deploy("gpt-5.6-luna");
+    expect(resolveDefaultModel("gpt-5.6-luna")).toBe("gpt-5.6-luna");
+  });
+
+  it("returns GPT-6 Sol unchanged when nothing is deployed (negative)", () => {
+    // A bare environment, or the client bundle: no better answer exists.
+    expect(resolveDefaultModel(undefined)).toBe("gpt-6-sol");
+    expect(mockLogError).not.toHaveBeenCalled();
   });
 });
 
@@ -244,7 +352,7 @@ describe("chat-page.unit.models.reasoning — every model can be asked to think"
     // Verbatim from the dev deployments. Widening either of these to suit the
     // UI is what caused the 400s, so they are pinned rather than derived.
     for (const [id, config] of entries) {
-      if (config.family === "gpt-5.6") {
+      if (config.family === "gpt-6" || config.family === "gpt-5.6") {
         expect(config.supportedReasoningEfforts, id).toEqual([
           "none", "low", "medium", "high", "xhigh", "max",
         ]);
@@ -255,6 +363,14 @@ describe("chat-page.unit.models.reasoning — every model can be asked to think"
         ]);
       }
     }
+    // Opus 5.5 is the one Claude model with a measured list (xhigh and max
+    // answered 200 on the dev deployment); the others keep the default set and
+    // the anthropic seam maps xhigh/max to high for them.
+    expect(MODEL_CONFIGS["claude-opus-5-5"].supportedReasoningEfforts).toEqual([
+      "low", "medium", "high", "xhigh", "max",
+    ]);
+    expect(MODEL_CONFIGS["claude-opus-4-8"].supportedReasoningEfforts).toBeUndefined();
+    expect(MODEL_CONFIGS["claude-sonnet-5"].supportedReasoningEfforts).toBeUndefined();
   });
 });
 
@@ -299,6 +415,21 @@ describe("chat-page.unit.models.effort-clamp — the picker follows the provider
     expect(clampReasoningEffort("gpt-5.6-terra", "max")).toBe("max");
     expect(clampReasoningEffort("gpt-5.6-terra", "xhigh")).toBe("xhigh");
     expect(clampReasoningEffort("gpt-5.4", "minimal")).toBe("minimal");
+    // Opus 5.5 was measured to accept xhigh and max; Anthropic has no minimal.
+    expect(clampReasoningEffort("claude-opus-5-5", "xhigh")).toBe("xhigh");
+    expect(clampReasoningEffort("claude-opus-5-5", "max")).toBe("max");
+    expect(clampReasoningEffort("claude-opus-5-5", "minimal")).toBe("low");
+    expect(clampReasoningEffort("gpt-6-sol", "minimal")).toBe("low");
+    expect(clampReasoningEffort("gpt-6-sol", "max")).toBe("max");
+  });
+
+  it("offers Opus 5.5 low / medium / high in the picker, not minimal", () => {
+    expect(getPickableReasoningEfforts("claude-opus-5-5")).toEqual([
+      "low",
+      "medium",
+      "high",
+    ]);
+    expect(getPickableReasoningEfforts("gpt-6-sol")).toEqual(["low", "medium", "high"]);
   });
 
   it("is idempotent and safe for an unknown model", () => {
@@ -313,8 +444,14 @@ describe("chat-page.unit.models.history-guard - the effective history budget per
   // afford to be handed: its long-context billing threshold minus a reserve,
   // else 60 % of its context window. These assert the real MODEL_CONFIGS
   // numbers, not fixtures, so a new model cannot quietly get an unguarded one.
-  it("gives every 5.6 model an effective budget of 256,000 (272k tier - 16k reserve)", () => {
-    for (const id of ["gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"] as const) {
+  it("gives every GPT-6 and 5.6 model an effective budget of 256,000 (272k tier - 16k reserve)", () => {
+    for (const id of [
+      "gpt-6-sol",
+      "gpt-6-luna",
+      "gpt-5.6-sol",
+      "gpt-5.6-terra",
+      "gpt-5.6-luna",
+    ] as const) {
       const config = MODEL_CONFIGS[id];
       expect(config.longContextThresholdTokens).toBe(272_000);
       expect(
@@ -328,7 +465,7 @@ describe("chat-page.unit.models.history-guard - the effective history budget per
   });
 
   it("leaves Claude on the configured default - its 1M window guards higher", () => {
-    for (const id of ["claude-opus-4-8", "claude-sonnet-5"] as const) {
+    for (const id of ["claude-opus-5-5", "claude-opus-4-8", "claude-sonnet-5"] as const) {
       const config = MODEL_CONFIGS[id];
       // No known billing cliff on the Azure /anthropic seam.
       expect(config.longContextThresholdTokens).toBeUndefined();

@@ -222,7 +222,13 @@ describe("provider-seam — Azure branch", () => {
     expect(openai.include).toEqual(["reasoning.encrypted_content"]);
   });
 
-  it.each(["gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"] as const)(
+  it.each([
+    "gpt-6-sol",
+    "gpt-6-luna",
+    "gpt-5.6-sol",
+    "gpt-5.6-terra",
+    "gpt-5.6-luna",
+  ] as const)(
     "sends promptCacheOptions { implicit, 30m } for %s",
     (modelId) => {
       const r = resolveProvider({
@@ -341,6 +347,40 @@ describe("provider-seam — Anthropic branch", () => {
     expect(anth.effort).toBe("high");
     expect(r.providerOptions.openai).toBeUndefined();
   });
+
+  it.each(["xhigh", "max"] as const)(
+    "passes '%s' through for Opus 5.5, whose deployment accepts it",
+    (effort) => {
+      const r = resolveProvider({
+        modelId: "claude-opus-5-5",
+        thread: baseThread,
+        toggles: offToggles,
+        reasoning: { supported: true, effort },
+      });
+      expect(mockResolveAnthropicModel).toHaveBeenCalledWith("claude-opus-5-5");
+      const anth = r.providerOptions.anthropic as Record<string, unknown>;
+      expect(anth.thinking).toEqual({ type: "adaptive" });
+      expect(anth.effort).toBe(effort);
+      expect(r.providerOptions.openai).toBeUndefined();
+    },
+  );
+
+  it.each(["xhigh", "max"] as const)(
+    "maps '%s' to 'high' for a Claude model that does not list it (negative)",
+    (effort) => {
+      for (const modelId of ["claude-opus-4-8", "claude-sonnet-5"] as const) {
+        const r = resolveProvider({
+          modelId,
+          thread: baseThread,
+          toggles: offToggles,
+          reasoning: { supported: true, effort },
+        });
+        expect((r.providerOptions.anthropic as Record<string, unknown>).effort, modelId).toBe(
+          "high",
+        );
+      }
+    },
+  );
 
   it("maps 'minimal' effort to 'low'", () => {
     const r = resolveProvider({

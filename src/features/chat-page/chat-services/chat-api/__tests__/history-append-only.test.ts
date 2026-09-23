@@ -800,3 +800,37 @@ describe("history.append-only.007 — the compaction row never enters the histor
     ).toBe(false);
   });
 });
+
+describe("history.append-only.008 — the models added on 2026-09-23 only ever append", () => {
+  // The loader branches on the thread's provider (the document-hint placement),
+  // so each new model is walked through the same prefix check as the default.
+  const documents = [{ id: "d1", name: "manual.pdf" }];
+
+  it.each([
+    ["gpt-6-sol", "tail-message"],
+    ["gpt-6-luna", "tail-message"],
+    ["claude-opus-5-5", "developer-message"],
+  ] as const)(
+    "%s: turn n is an exact prefix of turn n+1, with and without a tool turn",
+    async (selectedModel, placementWithDocuments) => {
+      const thread = makeThread({ selectedModel } as Partial<ChatThreadModel>);
+      let rows = [
+        ...persistedTurn("what is the throughput?", "About 40 t/h."),
+        ...persistedToolTurn("search the manual", "Found two hits."),
+      ];
+      let previous = await buildModelInput(rows, "question 1", thread);
+      for (let i = 1; i <= 3; i++) {
+        rows = [...rows, ...persistedToolTurn(`question ${i}`, `answer ${i}`)];
+        const next = await buildModelInput(rows, `question ${i + 1}`, thread);
+        expectExactPrefix(previous, next);
+        previous = next;
+      }
+
+      mockFindDocuments.mockResolvedValue({ status: "OK", response: documents });
+      mockEnsureThread.mockResolvedValue({ status: "OK", response: thread });
+      mockFindHistory.mockResolvedValue({ status: "OK", response: rows });
+      const ctx = await loadThreadContext(prompt("what does the manual say?"));
+      expect(ctx.documentHintPlacement).toBe(placementWithDocuments);
+    },
+  );
+});

@@ -11,6 +11,8 @@ export const MESSAGE_ATTRIBUTE = "CHAT_MESSAGE";
 export const CHAT_CITATION_ATTRIBUTE = "CHAT_CITATION";
 
 export type ChatModel =
+  | "gpt-6-sol"
+  | "gpt-6-luna"
   | "gpt-5.6-sol"
   | "gpt-5.6-terra"
   | "gpt-5.6-luna"
@@ -25,6 +27,7 @@ export type ChatModel =
   | "grok-4.3"
   // Anthropic Claude models served via the Azure /anthropic surface
   // (Messages API) through the "anthropic" provider seam.
+  | "claude-opus-5-5"
   | "claude-opus-4-8"
   | "claude-sonnet-5";
 
@@ -33,8 +36,8 @@ export interface ModelPricing {
   outputPerMillion: number;
   cachedInputPerMillion: number;
   /**
-   * Price per 1M tokens WRITTEN into the prompt cache. GPT-5.6 and Anthropic
-   * both bill a cache write at 1.25x the uncached input rate; the earlier GPT
+   * Price per 1M tokens WRITTEN into the prompt cache. GPT-6, GPT-5.6 and
+   * Anthropic all bill a cache write at 1.25x the uncached input rate; the earlier GPT
    * generations and the Foundry models don't bill writes separately. Absence
    * therefore means "no write surcharge" and the write tokens are billed at
    * `inputPerMillion` like any other input (see computeTokenCostUsd).
@@ -49,15 +52,41 @@ export interface ModelPricing {
 /**
  * Model generation ("family"). Gates provider features that are generation-
  * specific rather than per-model:
- *   - GPT-5.6 accepts the Responses-API `prompt_cache_options` block and
- *     bills cache writes; earlier generations reject it with HTTP 400.
- *   - the persona prompt-cache-key strategy only applies to GPT-5.6, whose
- *     implicit cache matches partial prefixes.
+ *   - GPT-6 and GPT-5.6 accept the Responses-API `prompt_cache_options` block
+ *     and bill cache writes; earlier generations reject it with HTTP 400.
+ *   - the persona prompt-cache-key strategy only applies to the generations
+ *     in PERSONA_CACHE_KEY_FAMILIES, whose implicit cache matches partial
+ *     prefixes.
  *   - each generation accepts a different set of reasoning-effort levels.
  * Absence means "unclassified"; every feature gated on a family treats an
  * absent family as "not that family", so old entries keep working.
+ *
+ * A NEW generation gets its own value rather than borrowing an old one, so
+ * each gate has to name it on purpose. The gates that read the family:
+ *   - PERSONA_CACHE_KEY_FAMILIES (below; read by prompt-cache-key.ts)
+ *   - WRITE_BILLING_FAMILIES and the pinned effort sets in models.test.ts
  */
-export type ModelFamily = "gpt-5.6" | "gpt-5.5" | "gpt-5.4" | "foundry" | "claude";
+export type ModelFamily =
+  | "gpt-6"
+  | "gpt-5.6"
+  | "gpt-5.5"
+  | "gpt-5.4"
+  | "foundry"
+  | "claude";
+
+/**
+ * Generations whose implicit prompt cache is shared by every request that
+ * sends the same `prompt_cache_key`, so the persona cache-key strategy
+ * (prompt-cache-key.ts) pays off for them. GPT-6 behaves like GPT-5.6 here:
+ * measured on the dev deployments 2026-09-23, two requests with one key, the
+ * same 5,200-token instructions and DIFFERENT user input: the second read
+ * 5,203 tokens from cache and wrote only the 23-token new tail, on both
+ * gpt-6-sol and gpt-6-luna.
+ */
+export const PERSONA_CACHE_KEY_FAMILIES: ReadonlySet<ModelFamily> = new Set<ModelFamily>([
+  "gpt-6",
+  "gpt-5.6",
+]);
 
 /**
  * The upstream provider that serves this model. Switches the route's
@@ -102,7 +131,7 @@ export interface ModelConfig {
   family?: ModelFamily;
   /**
    * True when the model accepts the Responses-API `prompt_cache_options`
-   * block (`{ mode, ttl }`). GPT-5.6 does. gpt-5.5 and older answer
+   * block (`{ mode, ttl }`). GPT-6 and GPT-5.6 do. gpt-5.5 and older answer
    * HTTP 400 "prompt_cache_options is not supported on this model", so this
    * capability is gated per model instead of being sent unconditionally.
    */
@@ -126,6 +155,12 @@ export interface ModelConfig {
    *                'gpt-5.5-2026-04-24' model. Supported values are: 'none',
    *                'low', 'medium', 'high', and 'xhigh'.
    *   gpt-5.6-*    same, with 'max' additionally supported.
+   *   gpt-6-*      same as gpt-5.6 ('gpt-6-sol-2026-09-22' and
+   *                'gpt-6-luna-2026-09-22'; measured 2026-09-23).
+   *
+   * On an Anthropic model the list also decides whether "xhigh"/"max" reach
+   * the wire: the anthropic seam passes them through only when the model
+   * names them here, and maps them to "high" otherwise.
    */
   supportedReasoningEfforts?: ReadonlyArray<ProviderReasoningEffort>;
   pricing: ModelPricing;
@@ -143,7 +178,7 @@ export interface ModelConfig {
    * letting that pass as a complete answer.
    *
    * The numbers, and why they differ:
-   *   32000  the 5.6 family and 5.5 — reasoning-heavy, and the models people
+   *   32000  GPT-6, the 5.6 family and 5.5 — reasoning-heavy, and the models people
    *          bring long-form work to. 16000 was measurably tight at high
    *          effort.
    *   16000  Claude (thinking is adaptive, so the cap is the bill guardrail
@@ -214,6 +249,65 @@ export interface ModelConfig {
 }
 
 export const MODEL_CONFIGS: Record<ChatModel, ModelConfig> = {
+  // ── GPT-6 family (2026-09-22) ───────────────────────────────────────────
+  // OpenAI list price, 2026-09-23. Azure meters not published yet
+  // (2026-09-23). Verify against the Azure retail API.
+  // Source: https://developers.openai.com/api/docs/pricing and the model
+  // pages https://developers.openai.com/api/docs/models/gpt-6-sol and
+  // https://developers.openai.com/api/docs/models/gpt-6-luna.
+  // Per 1M tokens (input / output / cached input / cache write):
+  //   Sol  2.00 / 10.00 / 0.20 / 2.50
+  //   Luna 0.10 /  0.50 / 0.01 / 0.125
+  // Cache writes are 1.25x input and cache reads 0.1x, the same shape as 5.6.
+  // Above 272k input tokens the request moves to the long-context tier: 2x
+  // input and cache rates, 1.5x output (OpenAI model pages).
+  // Measured on the dev deployments 2026-09-23: reasoning.effort takes none,
+  // low, medium, high, xhigh and max ('minimal' is HTTP 400);
+  // prompt_cache_options { implicit, 30m } is accepted and the usage reports
+  // cache_write_tokens.
+  "gpt-6-sol": {
+    id: "gpt-6-sol",
+    name: "GPT-6 Sol",
+    description: "Flagship GPT-6 model for complex reasoning, coding and agentic work",
+    getInstance: () => OpenAIV1ReasoningInstance(),
+    family: "gpt-6",
+    promptCacheOptionsSupported: true,
+    supportsReasoning: true,
+    supportsResponsesAPI: true,
+    supportsImageGeneration: true,
+    deploymentName: process.env.AZURE_OPENAI_API_GPT6_SOL_DEPLOYMENT_NAME,
+    defaultReasoningEffort: "low",
+    supportedReasoningEfforts: ["none", "low", "medium", "high", "xhigh", "max"],
+    pricing: { inputPerMillion: 2.00, outputPerMillion: 10.00, cachedInputPerMillion: 0.20, cacheWritePerMillion: 2.50 },
+    contextWindow: 1050000,
+    longContextThresholdTokens: 272000,
+    maxOutputTokens: 32000,
+    fallbackModel: "gpt-6-luna",
+    capabilities: ["vision", "imageGen", "webSearch", "code"],
+  },
+  "gpt-6-luna": {
+    id: "gpt-6-luna",
+    name: "GPT-6 Luna",
+    description: "Fast and efficient GPT-6 model for everyday tasks",
+    getInstance: () => OpenAIV1Instance(),
+    family: "gpt-6",
+    promptCacheOptionsSupported: true,
+    // Mirrors gpt-5.6-luna. The deployment does reason (measured 2026-09-23:
+    // 23 reasoning tokens at the API default "medium", 0 at "none"), and so
+    // does gpt-5.6-luna, which is also declared non-reasoning: no effort is
+    // sent and the picker shows no effort selector.
+    supportsReasoning: false,
+    supportsResponsesAPI: true,
+    deploymentName: process.env.AZURE_OPENAI_API_GPT6_LUNA_DEPLOYMENT_NAME,
+    defaultReasoningEffort: "low",
+    supportedReasoningEfforts: ["none", "low", "medium", "high", "xhigh", "max"],
+    pricing: { inputPerMillion: 0.10, outputPerMillion: 0.50, cachedInputPerMillion: 0.01, cacheWritePerMillion: 0.125 },
+    contextWindow: 1050000,
+    longContextThresholdTokens: 272000,
+    maxOutputTokens: 32000,
+    hardCapEligible: true,
+    capabilities: ["vision", "webSearch", "code"],
+  },
   // ── GPT-5.6 family (2026-07-09) ─────────────────────────────────────────
   // Official list prices per 1M tokens (input / output / cached input / cache
   // write): Sol 5.00 / 30.00 / 0.50 / 6.25, Terra 2.00 / 12.00 / 0.20 / 2.50,
@@ -254,8 +348,10 @@ export const MODEL_CONFIGS: Record<ChatModel, ModelConfig> = {
     supportsResponsesAPI: true,
     supportsImageGeneration: true,
     deploymentName: process.env.AZURE_OPENAI_API_GPT56_TERRA_DEPLOYMENT_NAME,
-    // Terra is the default model: "medium" is the effort at which it earns
-    // its keep on everyday work. Sol and Luna stay on "low".
+    // "medium" is the effort at which Terra earns its keep on everyday work
+    // (set when Terra was the default model, 2026-09-07). It stays on medium
+    // as the fallback default (CODE_FALLBACK_DEFAULT_MODEL). Sol and Luna
+    // stay on "low".
     defaultReasoningEffort: "medium",
     supportedReasoningEfforts: ["none", "low", "medium", "high", "xhigh", "max"],
     pricing: { inputPerMillion: 2.00, outputPerMillion: 12.00, cachedInputPerMillion: 0.20, cacheWritePerMillion: 2.50 },
@@ -401,8 +497,45 @@ export const MODEL_CONFIGS: Record<ChatModel, ModelConfig> = {
     maxOutputTokens: 8000,
   },
   // ── Anthropic Claude (Azure /anthropic Messages API) ───────────────────
-  // Premium selectable models — NOT downgrade targets (Opus is pricier than
-  // GPT-5.5). Served via the "anthropic" provider seam.
+  // Premium selectable models — NOT downgrade targets. Served via the
+  // "anthropic" provider seam. Prices are the Anthropic list prices
+  // (https://platform.claude.com/docs/en/about-claude/pricing, read
+  // 2026-09-23); Claude in Microsoft Foundry bills at the same per-token rates.
+  "claude-opus-5-5": {
+    id: "claude-opus-5-5",
+    name: "Claude Opus 5.5",
+    description: "Anthropic's most capable Opus model for complex work",
+    getInstance: () => {
+      throw new Error(
+        "Anthropic models run via the provider seam (streamText), not the legacy getInstance path",
+      );
+    },
+    provider: "anthropic",
+    family: "claude",
+    supportsReasoning: true,
+    supportsResponsesAPI: false,
+    // Same default as the other Claude models; see the note on
+    // claude-opus-4-8.
+    defaultReasoningEffort: "low",
+    // Adaptive thinking with output_config.effort. Measured on the dev
+    // deployment 2026-09-23: low, xhigh and max each answered HTTP 200 with a
+    // thinking block. Anthropic has no "minimal"/"none"; a stored one clamps
+    // to "low".
+    supportedReasoningEfforts: ["low", "medium", "high", "xhigh", "max"],
+    deploymentName: process.env.AZURE_ANTHROPIC_OPUS55_DEPLOYMENT_NAME,
+    // 5-minute cache write at 1.25x input. The cache READ is 0.05x input on
+    // Opus 5.5 (0.20), not the usual 0.1x.
+    pricing: {
+      inputPerMillion: 4.0,
+      outputPerMillion: 20.0,
+      cachedInputPerMillion: 0.2,
+      cacheWritePerMillion: 5.0,
+    },
+    contextWindow: 1000000,
+    maxOutputTokens: 16000,
+    // See the note on claude-opus-4-8.
+    capabilities: ["vision", "webSearch"],
+  },
   "claude-opus-4-8": {
     id: "claude-opus-4-8",
     name: "Claude Opus 4.8",
@@ -428,10 +561,10 @@ export const MODEL_CONFIGS: Record<ChatModel, ModelConfig> = {
     // at 1.0x — and prompt-builder.ts marks a cache_control breakpoint on
     // every Claude turn, so there are always writes to bill.
     pricing: {
-      inputPerMillion: 15.0,
-      outputPerMillion: 75.0,
-      cachedInputPerMillion: 1.5,
-      cacheWritePerMillion: 18.75,
+      inputPerMillion: 5.0,
+      outputPerMillion: 25.0,
+      cachedInputPerMillion: 0.5,
+      cacheWritePerMillion: 6.25,
     },
     contextWindow: 1000000,
     maxOutputTokens: 16000,
@@ -480,8 +613,40 @@ function isDeployedModel(id: ChatModel): boolean {
 /**
  * Model used when the request, the thread and the picker all say nothing.
  * This is the code default; `DEFAULT_MODEL_ID` overrides it at deploy time.
+ *
+ * GPT-6 Sol since 2026-09-23, chosen on the OpenAI list price (2.00 / 10.00,
+ * cache write 2.50) against gpt-5.6-terra's Azure meter (2.00 / 12.00, cache
+ * write 2.50). The Azure GPT-6 meters were not published yet; verify when they
+ * are.
  */
-export const CODE_DEFAULT_MODEL: ChatModel = "gpt-5.6-terra";
+export const CODE_DEFAULT_MODEL: ChatModel = "gpt-6-sol";
+
+/**
+ * Model the default falls back to when this environment has no deployment
+ * for CODE_DEFAULT_MODEL (e.g. no AZURE_OPENAI_API_GPT6_SOL_DEPLOYMENT_NAME).
+ * Without it every unpinned chat would go to a model with no deployment and
+ * fail with "Missing deployment configuration" on every turn.
+ */
+export const CODE_FALLBACK_DEFAULT_MODEL: ChatModel = "gpt-5.6-terra";
+
+/**
+ * The code default this environment can serve: CODE_DEFAULT_MODEL when it is
+ * deployed, else CODE_FALLBACK_DEFAULT_MODEL when that one is. When neither
+ * is deployed (a bare environment, the unit-test environment, or the client
+ * bundle, which cannot read server env vars) there is no better answer, so
+ * CODE_DEFAULT_MODEL is returned unchanged.
+ */
+export function resolveCodeDefaultModel(): ChatModel {
+  if (isDeployedModel(CODE_DEFAULT_MODEL)) return CODE_DEFAULT_MODEL;
+  if (isDeployedModel(CODE_FALLBACK_DEFAULT_MODEL)) {
+    logError("Code default model has no deployment in this environment — using the fallback", {
+      codeDefault: CODE_DEFAULT_MODEL,
+      fallback: CODE_FALLBACK_DEFAULT_MODEL,
+    });
+    return CODE_FALLBACK_DEFAULT_MODEL;
+  }
+  return CODE_DEFAULT_MODEL;
+}
 
 /**
  * Resolve the default model, letting the deployment override the code
@@ -507,25 +672,27 @@ export function resolveDefaultModel(
   raw: string | undefined = process.env.DEFAULT_MODEL_ID,
 ): ChatModel {
   const candidate = raw?.trim();
-  if (!candidate) return CODE_DEFAULT_MODEL;
+  if (!candidate) return resolveCodeDefaultModel();
   if (!Object.prototype.hasOwnProperty.call(MODEL_CONFIGS, candidate)) {
+    const fallback = resolveCodeDefaultModel();
     logError("DEFAULT_MODEL_ID is not a known model id — ignoring", {
       value: candidate,
-      fallback: CODE_DEFAULT_MODEL,
+      fallback,
     });
-    return CODE_DEFAULT_MODEL;
+    return fallback;
   }
   if (!isDeployedModel(candidate as ChatModel)) {
-    // Falling back is only an improvement if the code default can actually
-    // serve a turn. When it cannot either — a bare environment, or one that
-    // deploys neither — there is nothing better to offer, so honour the
+    // Falling back is only an improvement if the code default (or its
+    // fallback) can actually serve a turn. When neither can — a bare
+    // environment — there is nothing better to offer, so honour the
     // configured id and let the loud log be the signal.
-    if (isDeployedModel(CODE_DEFAULT_MODEL)) {
+    const fallback = resolveCodeDefaultModel();
+    if (isDeployedModel(fallback)) {
       logError("DEFAULT_MODEL_ID has no deployment in this environment — ignoring", {
         value: candidate,
-        fallback: CODE_DEFAULT_MODEL,
+        fallback,
       });
-      return CODE_DEFAULT_MODEL;
+      return fallback;
     }
     logError(
       "DEFAULT_MODEL_ID has no deployment, and neither does the code default — honouring it anyway",
@@ -829,8 +996,8 @@ export type ReasoningEffort = "minimal" | "low" | "medium" | "high";
 
 /**
  * Effort levels a provider will actually accept. Superset of the four values
- * the picker offers: GPT-5.6 also takes "none" / "xhigh" / "max" and GPT-5.5
- * takes "none" / "xhigh". Kept separate from ReasoningEffort so widening what
+ * the picker offers: GPT-6 and GPT-5.6 also take "none" / "xhigh" / "max",
+ * GPT-5.5 takes "none" / "xhigh", and Claude Opus 5.5 takes "xhigh" / "max". Kept separate from ReasoningEffort so widening what
  * a deployment may configure does not widen what the UI has to render.
  */
 export type ProviderReasoningEffort =
