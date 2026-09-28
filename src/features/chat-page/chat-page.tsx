@@ -16,7 +16,7 @@ import { Loader } from "@/components/ai-elements/loader";
 import { Reasoning, ReasoningTrigger, ReasoningContent } from "@/components/ai-elements/reasoning";
 import { ToolPartView, isToolPart } from "./tool-part-view";
 import { PromptInput, PromptInputTextarea, PromptInputToolbar, PromptInputTools, PromptInputButton, PromptInputSubmit, PromptInputModelSelect, PromptInputModelSelectTrigger, PromptInputModelSelectContent, PromptInputModelSelectItem, PromptInputModelSelectValue } from "@/components/ai-elements/prompt-input";
-import type { ChatDocumentModel, ChatMessageModel, ChatThreadModel } from "./chat-services/models";
+import type { ChatDocumentModel, ChatMessageModel, ChatThreadModel, ModelConfig } from "./chat-services/models";
 import { ExtensionModel } from "../extensions-page/extension-services/models";
 import { ChatHeader } from "./chat-header/chat-header";
 import { useProfilePicture } from "../common/hooks/useProfilePicture";
@@ -29,7 +29,8 @@ import { SoftDeleteChatDocumentsForCurrentUser } from "./chat-services/chat-thre
 import { RevalidateCache } from "@/features/common/navigation-helpers";
 import { InternetSearch } from "@/features/ui/chat/chat-input-area/internet-search";
 import { ReasoningEffortSelector } from "./chat-input/reasoning-effort-selector";
-import { MODEL_CONFIGS, DEFAULT_MODEL } from "./chat-services/models";
+import { MODEL_CONFIGS, DEFAULT_MODEL, getModelAvailability } from "./chat-services/models";
+import { ModelOptionContent } from "./chat-header/model-option";
 import { ToolToggles } from "./chat-input/tool-toggles";
 import { InputImageStore, useInputImage } from "@/features/ui/chat/chat-input-area/input-image-store";
 import Image from "next/image";
@@ -448,6 +449,21 @@ const ChatPageInner = (props: ChatPageProps) => {
 
   const effectiveModel = selectedModel && MODEL_CONFIGS[selectedModel] ? selectedModel : DEFAULT_MODEL;
 
+  // Availability state for the composer model picker, fetched from the server
+  // so it matches the header picker (hidden/undeployed models excluded).
+  const [composerModels, setComposerModels] = useState<Record<string, ModelConfig>>({});
+  const [composerDisabledModels, setComposerDisabledModels] = useState<Record<string, { reason: string }>>({});
+  useEffect(() => {
+    getModelAvailability().then(({ availableModels, disabledModels }) => {
+      setComposerModels(availableModels);
+      setComposerDisabledModels(disabledModels);
+    }).catch(() => {
+      // Fallback: show all models
+      setComposerModels(MODEL_CONFIGS);
+      setComposerDisabledModels({});
+    });
+  }, []);
+
   const internetSearch = useMemo(
     () => props.extensions.find((e) => e.name === "Bing Search"),
     [props.extensions]
@@ -752,12 +768,37 @@ const ChatPageInner = (props: ChatPageProps) => {
                 <PromptInputModelSelectTrigger className="h-8 px-2 text-xs">
                   <PromptInputModelSelectValue placeholder="Model" />
                 </PromptInputModelSelectTrigger>
-                <PromptInputModelSelectContent>
-                  {(Object.keys(MODEL_CONFIGS) as Array<keyof typeof MODEL_CONFIGS>).map((m) => (
-                    <PromptInputModelSelectItem key={m} value={m}>
-                      {MODEL_CONFIGS[m].name}
-                    </PromptInputModelSelectItem>
-                  ))}
+                <PromptInputModelSelectContent
+                  // Wider than the default Select to accommodate the richer
+                  // metadata (pricing, task area, excels at, details link).
+                  className="w-[28rem] max-w-[calc(100vw-2rem)]"
+                >
+                  {Object.entries(composerModels).length > 0
+                    ? Object.entries(composerModels).map(([id, model]) => {
+                        const isDisabled = !!composerDisabledModels[id];
+                        return (
+                          <PromptInputModelSelectItem
+                            key={id}
+                            value={id}
+                            disabled={isDisabled}
+                            className="py-3 px-3"
+                          >
+                            <ModelOptionContent
+                              model={model}
+                              isSelected={effectiveModel === id}
+                              isDisabled={isDisabled}
+                              disabledReason={composerDisabledModels[id]?.reason}
+                              showDisabledReasonInline={isDisabled}
+                            />
+                          </PromptInputModelSelectItem>
+                        );
+                      })
+                    : // Fallback when availability hasn't loaded yet
+                      (Object.keys(MODEL_CONFIGS) as Array<keyof typeof MODEL_CONFIGS>).map((m) => (
+                        <PromptInputModelSelectItem key={m} value={m}>
+                          {MODEL_CONFIGS[m].name}
+                        </PromptInputModelSelectItem>
+                      ))}
                 </PromptInputModelSelectContent>
               </PromptInputModelSelect>
             </PromptInputTools>

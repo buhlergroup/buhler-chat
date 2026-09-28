@@ -35,6 +35,8 @@ export interface ModelPricing {
   inputPerMillion: number;
   outputPerMillion: number;
   cachedInputPerMillion: number;
+  /** UTC timestamp when these published price values were last verified. */
+  priceLastCheckedUtc?: string;
   /**
    * Price per 1M tokens WRITTEN into the prompt cache. GPT-6, GPT-5.6 and
    * Anthropic all bill a cache write at 1.25x the uncached input rate; the earlier GPT
@@ -207,6 +209,38 @@ export interface ModelConfig {
   /** Capability badges rendered in the picker (text is implicit for all). */
   capabilities?: ModelCapability[];
   /**
+   * Short qualitative label shown as a badge in the picker, e.g.
+   * "Best value", "Deep reasoning", "Fast". One per model, kept concise.
+   */
+  badge?: string;
+  /**
+   * Task area this model is recommended for, aligned with the GitHub
+   * Copilot model comparison taxonomy:
+   *   - "General-purpose coding and writing"
+   *   - "Fast help with simple or repetitive tasks"
+   *   - "Deep reasoning and debugging"
+   *   - "Working with visuals (diagrams, screenshots)"
+   *   - "Agentic software development"
+   *   - "Long-horizon, autonomous coding and agentic tasks"
+   *   - "General-purpose coding and agent tasks"
+   *   - "Interactive and agentic coding"
+   *   - "Long-running agentic coding and knowledge work"
+   * Absent means "unclassified" and the picker omits the task-area row.
+   */
+  taskArea?: string;
+  /**
+   * Primary use case / "excels at" description, shown in the picker to
+   * help users choose the right model for their task. Concise, factual,
+   * and aligned with the model's configured capabilities.
+   */
+  excelsAt?: string;
+  /**
+   * URL to authoritative model documentation (vendor model card, system
+   * card, or documentation page). Shown as a "Learn more" link in the
+   * picker. Absent means no link is rendered.
+   */
+  detailsUrl?: string;
+  /**
    * Ceiling on ESTIMATED history tokens carried into a prompt for threads on
    * this model. Absent means the shared default in history-budget.ts
    * (256,000); `HISTORY_TOKEN_BUDGET` overrides both.
@@ -278,7 +312,11 @@ export const MODEL_CONFIGS: Record<ChatModel, ModelConfig> = {
   "gpt-6-sol": {
     id: "gpt-6-sol",
     name: "GPT-6 Sol",
-    description: "Flagship GPT-6 model for complex reasoning, coding and agentic work",
+    description: "GPT‑6 Sol is OpenAI's production-ready frontier model for enterprise agents, coding, complex knowledge work, and multi-step reasoning",
+    badge: "Deep reasoning",
+    taskArea: "Interactive and agentic coding",
+    excelsAt: "All-round development tasks that benefit from careful, multistep validation",
+    detailsUrl: "https://developers.openai.com/api/docs/models/gpt-6-sol",
     getInstance: () => OpenAIV1ReasoningInstance(),
     family: "gpt-6",
     promptCacheOptionsSupported: true,
@@ -288,7 +326,7 @@ export const MODEL_CONFIGS: Record<ChatModel, ModelConfig> = {
     deploymentName: process.env.AZURE_OPENAI_API_GPT6_SOL_DEPLOYMENT_NAME,
     defaultReasoningEffort: "low",
     supportedReasoningEfforts: ["none", "low", "medium", "high", "xhigh", "max"],
-    pricing: { inputPerMillion: 2.00, outputPerMillion: 10.00, cachedInputPerMillion: 0.20, cacheWritePerMillion: 2.50 },
+    pricing: { inputPerMillion: 2.00, outputPerMillion: 10.00, cachedInputPerMillion: 0.20, cacheWritePerMillion: 2.50, priceLastCheckedUtc: "2026-09-28T00:00:00Z" },
     contextWindow: 1050000,
     longContextThresholdTokens: 272000,
     maxOutputTokens: 32000,
@@ -298,7 +336,11 @@ export const MODEL_CONFIGS: Record<ChatModel, ModelConfig> = {
   "gpt-6-luna": {
     id: "gpt-6-luna",
     name: "GPT-6 Luna",
-    description: "Fast and efficient GPT-6 model for everyday tasks",
+    description: "GPT‑6 Luna is OpenAI’s efficient GPT‑6 reasoning model, designed for high-volume workloads where responsiveness and cost efficiency matter.",
+    badge: "Best value",
+    taskArea: "Fast help with simple or repetitive tasks",
+    excelsAt: "Quick, cost-efficient responses for smaller, faster tasks",
+    detailsUrl: "https://developers.openai.com/api/docs/models/gpt-6-luna",
     getInstance: () => OpenAIV1Instance(),
     family: "gpt-6",
     promptCacheOptionsSupported: true,
@@ -311,7 +353,7 @@ export const MODEL_CONFIGS: Record<ChatModel, ModelConfig> = {
     deploymentName: process.env.AZURE_OPENAI_API_GPT6_LUNA_DEPLOYMENT_NAME,
     defaultReasoningEffort: "low",
     supportedReasoningEfforts: ["none", "low", "medium", "high", "xhigh", "max"],
-    pricing: { inputPerMillion: 0.10, outputPerMillion: 0.50, cachedInputPerMillion: 0.01, cacheWritePerMillion: 0.125 },
+    pricing: { inputPerMillion: 0.10, outputPerMillion: 0.50, cachedInputPerMillion: 0.01, cacheWritePerMillion: 0.125, priceLastCheckedUtc: "2026-09-28T00:00:00Z" },
     contextWindow: 1050000,
     longContextThresholdTokens: 272000,
     maxOutputTokens: 32000,
@@ -330,7 +372,11 @@ export const MODEL_CONFIGS: Record<ChatModel, ModelConfig> = {
   "gpt-5.6-sol": {
     id: "gpt-5.6-sol",
     name: "GPT-5.6 Sol",
-    description: "Flagship GPT-5.6 model with state-of-the-art capabilities",
+    description: "GPT‑5.6-sol is OpenAI's most capable frontier model, built to deliver faster, more reliable results for complex professional work.",
+    badge: "Deep reasoning",
+    taskArea: "Deep reasoning and debugging",
+    excelsAt: "Complex reasoning over large codebases and long-running agentic work",
+    detailsUrl: "https://developers.openai.com/api/docs/models/gpt-5.6-sol",
     getInstance: () => OpenAIV1ReasoningInstance(),
     family: "gpt-5.6",
     promptCacheOptionsSupported: true,
@@ -340,7 +386,7 @@ export const MODEL_CONFIGS: Record<ChatModel, ModelConfig> = {
     deploymentName: process.env.AZURE_OPENAI_API_GPT56_SOL_DEPLOYMENT_NAME,
     defaultReasoningEffort: "low",
     supportedReasoningEfforts: ["none", "low", "medium", "high", "xhigh", "max"],
-    pricing: { inputPerMillion: 5.00, outputPerMillion: 30.00, cachedInputPerMillion: 0.50, cacheWritePerMillion: 6.25 },
+    pricing: { inputPerMillion: 4.00, outputPerMillion: 20.00, cachedInputPerMillion: 0.40, cacheWritePerMillion: 5.00, priceLastCheckedUtc: "2026-09-28T00:00:00Z" },
     contextWindow: 1050000,
     longContextThresholdTokens: 272000,
     maxOutputTokens: 32000,
@@ -350,7 +396,11 @@ export const MODEL_CONFIGS: Record<ChatModel, ModelConfig> = {
   "gpt-5.6-terra": {
     id: "gpt-5.6-terra",
     name: "GPT-5.6 Terra",
-    description: "Balanced GPT-5.6 model for everyday advanced tasks",
+    description: "GPT‑5.6-terra is OpenAI's most capable frontier model, built to deliver faster, more reliable results for complex professional work.",
+    badge: "Balanced",
+    taskArea: "General-purpose coding and agent tasks",
+    excelsAt: "Balanced everyday interactive and agentic coding",
+    detailsUrl: "https://developers.openai.com/api/docs/models/gpt-5.6-terra",
     getInstance: () => OpenAIV1ReasoningInstance(),
     family: "gpt-5.6",
     promptCacheOptionsSupported: true,
@@ -364,7 +414,7 @@ export const MODEL_CONFIGS: Record<ChatModel, ModelConfig> = {
     // stay on "low".
     defaultReasoningEffort: "medium",
     supportedReasoningEfforts: ["none", "low", "medium", "high", "xhigh", "max"],
-    pricing: { inputPerMillion: 2.00, outputPerMillion: 12.00, cachedInputPerMillion: 0.20, cacheWritePerMillion: 2.50 },
+    pricing: { inputPerMillion: 2.00, outputPerMillion: 12.00, cachedInputPerMillion: 0.20, cacheWritePerMillion: 2.50, priceLastCheckedUtc: "2026-09-28T00:00:00Z" },
     contextWindow: 1050000,
     longContextThresholdTokens: 272000,
     maxOutputTokens: 32000,
@@ -374,7 +424,11 @@ export const MODEL_CONFIGS: Record<ChatModel, ModelConfig> = {
   "gpt-5.6-luna": {
     id: "gpt-5.6-luna",
     name: "GPT-5.6 Luna",
-    description: "Fast and efficient GPT-5.6 model for everyday tasks",
+    description: "GPT‑5.6-luna is OpenAI's most capable frontier model, built to deliver faster, more reliable results for complex professional work.",
+    badge: "Best value",
+    taskArea: "Fast help with simple or repetitive tasks",
+    excelsAt: "Quick, cost-efficient responses for smaller, faster coding tasks",
+    detailsUrl: "https://developers.openai.com/api/docs/models/gpt-5.6-luna",
     getInstance: () => OpenAIV1Instance(),
     family: "gpt-5.6",
     promptCacheOptionsSupported: true,
@@ -383,7 +437,7 @@ export const MODEL_CONFIGS: Record<ChatModel, ModelConfig> = {
     deploymentName: process.env.AZURE_OPENAI_API_GPT56_LUNA_DEPLOYMENT_NAME,
     defaultReasoningEffort: "low",
     supportedReasoningEfforts: ["none", "low", "medium", "high", "xhigh", "max"],
-    pricing: { inputPerMillion: 0.20, outputPerMillion: 1.20, cachedInputPerMillion: 0.02, cacheWritePerMillion: 0.25 },
+    pricing: { inputPerMillion: 0.20, outputPerMillion: 1.20, cachedInputPerMillion: 0.02, cacheWritePerMillion: 0.25, priceLastCheckedUtc: "2026-09-28T00:00:00Z" },
     contextWindow: 400000,
     longContextThresholdTokens: 272000,
     maxOutputTokens: 32000,
@@ -393,7 +447,11 @@ export const MODEL_CONFIGS: Record<ChatModel, ModelConfig> = {
   "gpt-5.5": {
     id: "gpt-5.5",
     name: "GPT-5.5",
-    description: "Latest GPT-5.5 model with state-of-the-art capabilities",
+    description: "GPT‑5.5 is OpenAI’s most capable frontier model, built to deliver faster, more reliable results for complex professional work.",
+    badge: "Deep reasoning",
+    taskArea: "Deep reasoning and debugging",
+    excelsAt: "Multi-step problem solving and architecture-level code analysis",
+    detailsUrl: "https://deploymentsafety.openai.com/gpt-5-5/gpt-5-5.pdf",
     getInstance: () => OpenAIV1ReasoningInstance(),
     family: "gpt-5.5",
     supportsReasoning: true,
@@ -403,7 +461,7 @@ export const MODEL_CONFIGS: Record<ChatModel, ModelConfig> = {
     defaultReasoningEffort: "low",
     supportedReasoningEfforts: ["none", "low", "medium", "high", "xhigh"],
     // No cacheWritePerMillion: gpt-5.5 does not bill cache writes separately.
-    pricing: { inputPerMillion: 5.00, outputPerMillion: 30.00, cachedInputPerMillion: 0.50 },
+    pricing: { inputPerMillion: 2.50, outputPerMillion: 15.00, cachedInputPerMillion: 0.25, priceLastCheckedUtc: "2026-09-28T00:00:00Z" },
     contextWindow: 1050000,
     maxOutputTokens: 32000,
     fallbackModel: "gpt-6-luna",
@@ -412,7 +470,11 @@ export const MODEL_CONFIGS: Record<ChatModel, ModelConfig> = {
   "gpt-5.4": {
     id: "gpt-5.4",
     name: "GPT-5.4",
-    description: "Latest GPT-5.4 model with state-of-the-art capabilities",
+    description: "GPT‑5.4 is OpenAI’s most capable frontier model, built to deliver faster, more reliable results for complex professional work.",
+    badge: "Deep reasoning",
+    taskArea: "Deep reasoning and debugging",
+    excelsAt: "Multi-step problem solving and architecture-level code analysis",
+    detailsUrl: "https://deploymentsafety.openai.com/gpt-5-4-thinking/introduction",
     getInstance: () => OpenAIV1ReasoningInstance(),
     family: "gpt-5.4",
     supportsReasoning: true,
@@ -420,7 +482,7 @@ export const MODEL_CONFIGS: Record<ChatModel, ModelConfig> = {
     supportsImageGeneration: true,
     deploymentName: process.env.AZURE_OPENAI_API_GPT54_DEPLOYMENT_NAME,
     defaultReasoningEffort: "low",
-    pricing: { inputPerMillion: 2.50, outputPerMillion: 15.00, cachedInputPerMillion: 0.25 },
+    pricing: { inputPerMillion: 2.50, outputPerMillion: 15.00, cachedInputPerMillion: 0.25, priceLastCheckedUtc: "2026-09-28T00:00:00Z" },
     contextWindow: 1050000,
     maxOutputTokens: 16000,
     fallbackModel: "gpt-6-luna",
@@ -429,14 +491,18 @@ export const MODEL_CONFIGS: Record<ChatModel, ModelConfig> = {
   "gpt-5.4-mini": {
     id: "gpt-5.4-mini",
     name: "GPT-5.4 Mini",
-    description: "Fast and efficient GPT-5.4 model for everyday tasks",
+    description: "GPT‑5.4‑mini is a compact, cost‑efficient model designed for reliable performance across high‑volume, everyday AI workloads.",
+    badge: "Fast",
+    taskArea: "Agentic software development",
+    excelsAt: "Codebase exploration and is especially effective when using grep-style tools",
+    detailsUrl: "https://deploymentsafety.openai.com/gpt-5-4-thinking/gpt-5-4-thinking.pdf",
     getInstance: () => OpenAIV1Instance(),
     family: "gpt-5.4",
     supportsReasoning: false,
     supportsResponsesAPI: true,
     deploymentName: process.env.AZURE_OPENAI_API_GPT54_MINI_DEPLOYMENT_NAME,
     defaultReasoningEffort: "medium",
-    pricing: { inputPerMillion: 0.75, outputPerMillion: 4.50, cachedInputPerMillion: 0.075 },
+    pricing: { inputPerMillion: 0.375, outputPerMillion: 2.25, cachedInputPerMillion: 0.075, priceLastCheckedUtc: "2026-09-28T00:00:00Z" },
     contextWindow: 400000,
     maxOutputTokens: 8000,
     capabilities: ["vision", "webSearch", "code"],
@@ -449,7 +515,11 @@ export const MODEL_CONFIGS: Record<ChatModel, ModelConfig> = {
   "DeepSeek-V4-Pro": {
     id: "DeepSeek-V4-Pro",
     name: "DeepSeek V4 Pro",
-    description: "Fast, efficient general-purpose model",
+    description: "DeepSeek V4 is an efficient MoE model family with 1M context and near state-of-the-art open-source reasoning performance.",
+    badge: "Fast",
+    taskArea: "General-purpose coding and writing",
+    excelsAt: "Fast, accurate code completions and explanations",
+    detailsUrl: "https://api-docs.deepseek.com/",
     getInstance: () => {
       throw new Error(
         "Foundry models run via the provider seam (streamText), not the legacy getInstance path",
@@ -460,7 +530,7 @@ export const MODEL_CONFIGS: Record<ChatModel, ModelConfig> = {
     supportsReasoning: false,
     supportsResponsesAPI: false,
     deploymentName: process.env.FOUNDRY_DEEPSEEK_DEPLOYMENT_NAME,
-    pricing: { inputPerMillion: 0.30, outputPerMillion: 1.20, cachedInputPerMillion: 0.03 },
+    pricing: { inputPerMillion: 0.3, outputPerMillion: 1.2, cachedInputPerMillion: 0.03, priceLastCheckedUtc: "2026-09-28T00:00:00Z" },
     contextWindow: 163840,
     maxOutputTokens: 8000,
     hardCapEligible: true,
@@ -469,7 +539,11 @@ export const MODEL_CONFIGS: Record<ChatModel, ModelConfig> = {
   "Kimi-K2.6": {
     id: "Kimi-K2.6",
     name: "Kimi K2.6",
-    description: "Large-context conversational model",
+    description: "Kimi K2.6 is an open-source, native multimodal agentic model that advances practical capabilities in long-horizon coding, coding-driven design, proactive autonomous execution, and swarm-based task orchestration.",
+    badge: "Best value",
+    taskArea: "General-purpose coding and agent tasks",
+    excelsAt: "Fast, reliable answers to lightweight coding questions",
+    detailsUrl: "https://huggingface.co/moonshotai/Kimi-K2.6",
     getInstance: () => {
       throw new Error(
         "Foundry models run via the provider seam (streamText), not the legacy getInstance path",
@@ -480,7 +554,7 @@ export const MODEL_CONFIGS: Record<ChatModel, ModelConfig> = {
     supportsReasoning: false,
     supportsResponsesAPI: false,
     deploymentName: process.env.FOUNDRY_KIMI_DEPLOYMENT_NAME,
-    pricing: { inputPerMillion: 0.15, outputPerMillion: 2.50, cachedInputPerMillion: 0.015 },
+    pricing: { inputPerMillion: 0.66, outputPerMillion: 3.30, cachedInputPerMillion: 0.11, priceLastCheckedUtc: "2026-09-28T00:00:00Z" },
     contextWindow: 262144,
     maxOutputTokens: 8000,
     hardCapEligible: true,
@@ -489,7 +563,11 @@ export const MODEL_CONFIGS: Record<ChatModel, ModelConfig> = {
   "grok-4.3": {
     id: "grok-4.3",
     name: "Grok 4.3",
-    description: "xAI Grok 4.3 (Foundry) — reasoning model",
+    description: "Grok 4.3 is the latest model from xAI, with advanced reasoning, productivity, and multi-agent capabilities, enabling it to achieve state-of-the-art performance across challenging academic and industry benchmarks.",
+    badge: "Balanced",
+    taskArea: "General-purpose coding and agent tasks",
+    excelsAt: "Complex problem-solving challenges, sophisticated reasoning",
+    detailsUrl: "https://docs.x.ai/",
     getInstance: () => {
       throw new Error(
         "Foundry models run via the provider seam (streamText), not the legacy getInstance path",
@@ -502,7 +580,7 @@ export const MODEL_CONFIGS: Record<ChatModel, ModelConfig> = {
     supportsResponsesAPI: false,
     deploymentName: process.env.FOUNDRY_GROK_DEPLOYMENT_NAME,
     // TODO: confirm Grok pricing before relying on cost tracking (placeholder).
-    pricing: { inputPerMillion: 3.0, outputPerMillion: 15.0, cachedInputPerMillion: 0.75 },
+    pricing: { inputPerMillion: 3.0, outputPerMillion: 15.0, cachedInputPerMillion: 0.75, priceLastCheckedUtc: "2026-09-28T00:00:00Z" },
     contextWindow: 256000,
     maxOutputTokens: 8000,
   },
@@ -514,7 +592,11 @@ export const MODEL_CONFIGS: Record<ChatModel, ModelConfig> = {
   "claude-opus-5-5": {
     id: "claude-opus-5-5",
     name: "Claude Opus 5.5",
-    description: "Anthropic's most capable Opus model for complex work",
+    description: "Claude Opus 5.5 is Anthropic's most capable Opus modeland a better collaborator. It handles long-running coding and knowledge work, and reports back clearly on what it did, what it found, and what it needs next.",
+    badge: "Agentic",
+    taskArea: "Long-running agentic coding and knowledge work",
+    excelsAt: "Efficient multistep tasks, error recovery, and collaboration",
+    detailsUrl: "https://www-cdn.anthropic.com/fc1b44717c85dc068bc6ba5024219938094694bd/Claude%20Opus%205.5%20System%20Card.pdf",
     getInstance: () => {
       throw new Error(
         "Anthropic models run via the provider seam (streamText), not the legacy getInstance path",
@@ -540,6 +622,7 @@ export const MODEL_CONFIGS: Record<ChatModel, ModelConfig> = {
       outputPerMillion: 20.0,
       cachedInputPerMillion: 0.2,
       cacheWritePerMillion: 5.0,
+      priceLastCheckedUtc: "2026-09-28T00:00:00Z",
     },
     contextWindow: 1000000,
     maxOutputTokens: 16000,
@@ -549,7 +632,11 @@ export const MODEL_CONFIGS: Record<ChatModel, ModelConfig> = {
   "claude-opus-4-8": {
     id: "claude-opus-4-8",
     name: "Claude Opus 4.8",
-    description: "Anthropic's most capable model for complex work",
+    description: "Claude Opus 4.8 is our most intelligent Opus model and the best generally available model for coding and agents, with deeper reasoning for enterprise workflows.",
+    badge: "Deep reasoning",
+    taskArea: "Deep reasoning and debugging",
+    excelsAt: "Complex problem-solving challenges, sophisticated reasoning",
+    detailsUrl: "https://www-cdn.anthropic.com/0b4915911bb0d19eca5b5ee635c80fef830a37ea.pdf",
     getInstance: () => {
       throw new Error(
         "Anthropic models run via the provider seam (streamText), not the legacy getInstance path",
@@ -575,6 +662,7 @@ export const MODEL_CONFIGS: Record<ChatModel, ModelConfig> = {
       outputPerMillion: 25.0,
       cachedInputPerMillion: 0.5,
       cacheWritePerMillion: 6.25,
+      priceLastCheckedUtc: "2026-09-28T00:00:00Z",
     },
     contextWindow: 1000000,
     maxOutputTokens: 16000,
@@ -586,7 +674,11 @@ export const MODEL_CONFIGS: Record<ChatModel, ModelConfig> = {
   "claude-sonnet-5": {
     id: "claude-sonnet-5",
     name: "Claude Sonnet 5",
-    description: "Balanced Anthropic model — fast, strong general performance",
+    description: "Claude Sonnet 5 is Anthropic's most capable Sonnet model yet, built for coding, agents, and professional work at scale. It brings near-Opus intelligence to the model teams run every day, with the same balance of capability, cost, and speed teams already rely on Sonnet for.",
+    badge: "Balanced",
+    taskArea: "General-purpose coding and agent tasks",
+    excelsAt: "Complex problem-solving challenges, sophisticated reasoning",
+    detailsUrl: "https://www-cdn.anthropic.com/9e6a1044980d8c4ed85669faf9c2a8342e2e9f1e/Claude%20Sonnet%205%20System%20Card.pdf",
     getInstance: () => {
       throw new Error(
         "Anthropic models run via the provider seam (streamText), not the legacy getInstance path",
@@ -606,6 +698,7 @@ export const MODEL_CONFIGS: Record<ChatModel, ModelConfig> = {
       outputPerMillion: 15.0,
       cachedInputPerMillion: 0.3,
       cacheWritePerMillion: 3.75,
+      priceLastCheckedUtc: "2026-09-28T00:00:00Z",
     },
     contextWindow: 1000000,
     maxOutputTokens: 16000,
@@ -779,8 +872,8 @@ export async function getAvailableModels(): Promise<Record<ChatModel, ModelConfi
     const data = await response.json();
     return data.availableModels;
   } catch (error) {
-    logError("Error fetching available models", { 
-      error: error instanceof Error ? error.message : String(error) 
+    logError("Error fetching available models", {
+      error: error instanceof Error ? error.message : String(error)
     });
     // Fallback to all models if API fails
     return MODEL_CONFIGS;
@@ -799,8 +892,8 @@ export async function getAvailableModelIds(): Promise<ChatModel[]> {
     const data = await response.json();
     return data.availableModelIds;
   } catch (error) {
-    logError("Error fetching available model IDs", { 
-      error: error instanceof Error ? error.message : String(error) 
+    logError("Error fetching available model IDs", {
+      error: error instanceof Error ? error.message : String(error)
     });
     // Fallback to all model IDs if API fails
     return Object.keys(MODEL_CONFIGS) as ChatModel[];
@@ -819,8 +912,8 @@ export async function getDefaultModel(): Promise<ChatModel> {
     const data = await response.json();
     return data.defaultModel;
   } catch (error) {
-    logError("Error fetching default model", { 
-      error: error instanceof Error ? error.message : String(error) 
+    logError("Error fetching default model", {
+      error: error instanceof Error ? error.message : String(error)
     });
     return DEFAULT_MODEL;
   }
@@ -834,9 +927,9 @@ export async function isModelAvailable(modelId: ChatModel): Promise<boolean> {
     const availableModels = await getAvailableModels();
     return !!availableModels[modelId];
   } catch (error) {
-    logError("Error checking model availability", { 
+    logError("Error checking model availability", {
       modelId,
-      error: error instanceof Error ? error.message : String(error) 
+      error: error instanceof Error ? error.message : String(error)
     });
     // Fallback to checking if model exists in config
     return !!MODEL_CONFIGS[modelId];

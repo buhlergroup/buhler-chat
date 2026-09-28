@@ -184,4 +184,47 @@ describe("/api/models route", () => {
 
     (mod.MODEL_CONFIGS as any)["gpt-a"].defaultReasoningEffort = "low";
   });
+
+  // api.unit.models.008 — metadata fields are preserved in the response
+  it("preserves picker metadata (badge, taskArea, excelsAt, detailsUrl) in the response", async () => {
+    const mod = await import("@/features/chat-page/chat-services/models");
+    // Add metadata to gpt-a for this test
+    (mod.MODEL_CONFIGS as any)["gpt-a"].badge = "Best value";
+    (mod.MODEL_CONFIGS as any)["gpt-a"].taskArea = "Fast help with simple or repetitive tasks";
+    (mod.MODEL_CONFIGS as any)["gpt-a"].excelsAt = "Quick, cost-efficient responses";
+    (mod.MODEL_CONFIGS as any)["gpt-a"].detailsUrl = "https://example.com/model-card";
+
+    try {
+      const res = await GET(makeRequest());
+      const body = await res.json();
+      const model = body.availableModels["gpt-a"];
+      expect(model.badge).toBe("Best value");
+      expect(model.taskArea).toBe("Fast help with simple or repetitive tasks");
+      expect(model.excelsAt).toBe("Quick, cost-efficient responses");
+      expect(model.detailsUrl).toBe("https://example.com/model-card");
+    } finally {
+      delete (mod.MODEL_CONFIGS as any)["gpt-a"].badge;
+      delete (mod.MODEL_CONFIGS as any)["gpt-a"].taskArea;
+      delete (mod.MODEL_CONFIGS as any)["gpt-a"].excelsAt;
+      delete (mod.MODEL_CONFIGS as any)["gpt-a"].detailsUrl;
+    }
+  });
+
+  // api.unit.models.009 — hidden models are excluded even when deployed
+  it("excludes hiddenFromPicker models from the response", async () => {
+    const mod = await import("@/features/chat-page/chat-services/models");
+    // Make gpt-c hidden and deployed
+    (mod.MODEL_CONFIGS as any)["gpt-c"].hiddenFromPicker = true;
+    (mod.MODEL_CONFIGS as any)["gpt-c"].deploymentName = "deploy-c";
+
+    try {
+      const res = await GET(makeRequest());
+      const body = await res.json();
+      expect(body.availableModelIds).not.toContain("gpt-c");
+      expect(body.availableModels["gpt-c"]).toBeUndefined();
+    } finally {
+      delete (mod.MODEL_CONFIGS as any)["gpt-c"].hiddenFromPicker;
+      (mod.MODEL_CONFIGS as any)["gpt-c"].deploymentName = undefined;
+    }
+  });
 });
