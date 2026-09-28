@@ -29,6 +29,13 @@
         "uriFormat": "%s",
         "webRoot": "${workspaceFolder}"
       }
+    },
+    {
+      "name": "Compare-BuhlerChatModelPricing",
+      "type": "PowerShell",
+      "request": "launch",
+      "script": "${workspaceFolder}/tools/Compare-BuhlerChatModelPricing.ps1",
+      "args": ["-SkipExchangeRate", "-IncludeAnthropic"]
     }
   ]
 }
