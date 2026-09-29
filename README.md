@@ -209,15 +209,9 @@ console.log("API response events:", streamEvents);
 - [Personas](/docs/6-persona.md) - AI assistant customization with SharePoint integration
 - [Extensions](/docs/8-extensions.md) - Extensibility framework
 
-## Advanced Features
-
-- [Reasoning Models & Summaries](/docs/reasoning-summaries.md) - o3, o4-mini with thought processes
-- [Environment-Based Model Selection](/docs/environment-based-model-selection.md) - Dynamic model configuration
-
 ## Configuration & Migration
 
 - [Environment Variables](/docs/9-environment-variables.md) - Complete configuration reference
-- [Migration Guide](/docs/migration.md) - Upgrade instructions and breaking changes
 
 ## API References
 
