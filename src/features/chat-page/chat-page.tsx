@@ -30,7 +30,11 @@ import { RevalidateCache } from "@/features/common/navigation-helpers";
 import { InternetSearch } from "@/features/ui/chat/chat-input-area/internet-search";
 import { ReasoningEffortSelector } from "./chat-input/reasoning-effort-selector";
 import { MODEL_CONFIGS, DEFAULT_MODEL, getModelAvailability } from "./chat-services/models";
-import { ModelOptionContent } from "./chat-header/model-option";
+import { ModelOptionContent, ModelOptionName } from "./chat-header/model-option";
+import {
+  DefaultModelReminder,
+  shouldShowDefaultModelReminder,
+} from "./default-model-reminder";
 import { ToolToggles } from "./chat-input/tool-toggles";
 import { InputImageStore, useInputImage } from "@/features/ui/chat/chat-input-area/input-image-store";
 import Image from "next/image";
@@ -448,6 +452,9 @@ const ChatPageInner = (props: ChatPageProps) => {
   const isStreaming = status === "streaming" || status === "submitted";
 
   const effectiveModel = selectedModel && MODEL_CONFIGS[selectedModel] ? selectedModel : DEFAULT_MODEL;
+  const [showDefaultModelReminder, setShowDefaultModelReminder] = useState(() => {
+    return shouldShowDefaultModelReminder(props.chatThread.selectedModel);
+  });
 
   // Availability state for the composer model picker, fetched from the server
   // so it matches the header picker (hidden/undeployed models excluded).
@@ -601,6 +608,7 @@ const ChatPageInner = (props: ChatPageProps) => {
           chatThread={props.chatThread}
           chatDocuments={props.chatDocuments}
           extensions={props.extensions}
+          onModelSelected={() => setShowDefaultModelReminder(false)}
         />
       )}
 
@@ -612,6 +620,9 @@ const ChatPageInner = (props: ChatPageProps) => {
       <div className="sticky bottom-3 max-w-4xl mx-auto w-full">
         {/* Fade gradient above input to indicate scrollable content */}
         <div className="pointer-events-none h-8 -mb-0 bg-gradient-to-t from-background to-transparent -translate-y-full" />
+        <DefaultModelReminder
+          show={showDefaultModelReminder}
+        />
         <PromptInput onSubmit={handleSubmit}>
           {/* Attachments preview */}
           {previewImages.length > 0 && (
@@ -753,6 +764,7 @@ const ChatPageInner = (props: ChatPageProps) => {
                 value={effectiveModel}
                 onValueChange={async (v) => {
                   const model = v as typeof effectiveModel;
+                  setShowDefaultModelReminder(false);
                   setSelectedModel(model);
                   try {
                     const r = await UpdateChatThreadSelectedModel(chatThreadId, model);
@@ -780,6 +792,8 @@ const ChatPageInner = (props: ChatPageProps) => {
                           <PromptInputModelSelectItem
                             key={id}
                             value={id}
+                            textValue={model.name}
+                            compactText={<ModelOptionName model={model} />}
                             disabled={isDisabled}
                             className="py-3 px-3"
                           >
@@ -788,6 +802,7 @@ const ChatPageInner = (props: ChatPageProps) => {
                               isSelected={effectiveModel === id}
                               isDisabled={isDisabled}
                               disabledReason={composerDisabledModels[id]?.reason}
+                              showName={false}
                               showDisabledReasonInline={isDisabled}
                             />
                           </PromptInputModelSelectItem>
