@@ -4,9 +4,9 @@ import { ExternalLink } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
 import { Badge } from "@/features/ui/badge";
 import {
-  ChatModel,
   ModelConfig,
   ModelCapability,
+  ModelPricing,
 } from "../chat-services/models";
 import { Code, Cpu, Eye, Globe, ImagePlus, Zap } from "lucide-react";
 
@@ -16,6 +16,28 @@ const CAPABILITY_META: Record<ModelCapability, { icon: LucideIcon; label: string
   imageGen: { icon: ImagePlus, label: "Image generation" },
   webSearch: { icon: Globe, label: "Web search" },
   code: { icon: Code, label: "Code / Python" },
+};
+
+export const PRICING_TIER_THRESHOLDS = {
+  low: 1,
+  middle: 10,
+} as const;
+
+export type PricingTier = "low" | "middle" | "high";
+
+/** Classify by the more expensive of input and output tokens. */
+export function getPricingTier(pricing: ModelPricing): PricingTier {
+  const score = Math.max(pricing.inputPerMillion, pricing.outputPerMillion);
+
+  if (score <= PRICING_TIER_THRESHOLDS.low) return "low";
+  if (score <= PRICING_TIER_THRESHOLDS.middle) return "middle";
+  return "high";
+}
+
+export const PRICING_TIER_CLASSES: Record<PricingTier, string> = {
+  low: "text-green-600 dark:text-green-400",
+  middle: "text-amber-600 dark:text-amber-400",
+  high: "text-red-600 dark:text-red-400",
 };
 
 /** Badge variant for each model badge label. */
@@ -43,8 +65,13 @@ export interface ModelOptionProps {
   isSelected: boolean;
   isDisabled: boolean;
   disabledReason?: string;
+  showName?: boolean;
   /** When true, the disabled reason replaces the description/metadata. */
   showDisabledReasonInline: boolean;
+}
+
+export function ModelOptionName({ model }: { model: ModelConfig }) {
+  return <span className="font-medium text-sm">{model.name}</span>;
 }
 
 /**
@@ -61,6 +88,7 @@ export function ModelOptionContent({
   isSelected,
   isDisabled,
   disabledReason,
+  showName = true,
   showDisabledReasonInline,
 }: ModelOptionProps) {
   const pricing = model.pricing;
@@ -80,7 +108,7 @@ export function ModelOptionContent({
       <div className="flex flex-col gap-1 flex-1 min-w-0">
         {/* Row 1: name + badges */}
         <div className="flex items-center gap-2 flex-wrap">
-          <span className="font-medium text-sm">{model.name}</span>
+          {showName && <ModelOptionName model={model} />}
           {model.badge && (
             <Badge variant={badgeVariantForLabel(model.badge)} className="text-[10px] leading-none px-1.5 py-0.5">
               {model.badge}
@@ -110,28 +138,30 @@ export function ModelOptionContent({
             {/* Task area + excels at */}
             {model.taskArea && (
               <div className="text-xs text-muted-foreground/80">
-                <span className="font-medium">Task: </span>
+                <span className="font-semibold">Task: </span>
                 {model.taskArea}
               </div>
             )}
             {model.excelsAt && (
               <div className="text-xs text-muted-foreground/80">
-                <span className="font-medium">Excels at: </span>
+                <span className="font-semibold">Excels at: </span>
                 {model.excelsAt}
               </div>
             )}
 
             {/* Pricing row */}
             <div className="text-xs text-muted-foreground/70">
-              <span className="font-medium">Pricing: </span>
-              ${pricing.inputPerMillion.toFixed(2)} in / $
-              {pricing.outputPerMillion.toFixed(2)} out
-              {pricing.cachedInputPerMillion !== undefined &&
-                pricing.cachedInputPerMillion < pricing.inputPerMillion && (
-                  <span className="ml-1">
-                    (${pricing.cachedInputPerMillion.toFixed(2)} cached)
-                  </span>
-                )}
+              <span className="font-semibold">Pricing: </span>
+              <span className={PRICING_TIER_CLASSES[getPricingTier(pricing)]}>
+                ${pricing.inputPerMillion.toFixed(2)} in / $
+                {pricing.outputPerMillion.toFixed(2)} out
+                {pricing.cachedInputPerMillion !== undefined &&
+                  pricing.cachedInputPerMillion < pricing.inputPerMillion && (
+                    <span className="ml-1">
+                      (${pricing.cachedInputPerMillion.toFixed(2)} cached)
+                    </span>
+                  )}
+              </span>
               <span className="ml-1">per 1M tokens</span>
             </div>
 

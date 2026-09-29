@@ -157,11 +157,15 @@ describe("chat-page.unit.components.001 — ModelSelector", () => {
       />
     );
 
+    const trigger = screen.getByRole("button");
+    expect(trigger).toHaveTextContent(modelWithMetadata.name);
+    expect(trigger).not.toHaveTextContent(/Task:|Excels at:|Pricing:|Learn more/);
+
     await waitFor(() =>
       expect(screen.queryByText("Loading models...")).not.toBeInTheDocument()
     );
 
-    await userEvent.click(screen.getByRole("button"));
+    await userEvent.click(trigger);
 
     // Badge label should be visible (use getAllByText and check at least one)
     const badges = screen.getAllByText(modelWithMetadata.badge!);
@@ -177,6 +181,8 @@ describe("chat-page.unit.components.001 — ModelSelector", () => {
     // Pricing should be visible (appears on every model row)
     const pricingLabels = screen.getAllByText(/Pricing:/);
     expect(pricingLabels.length).toBeGreaterThan(0);
+    expect(trigger).toHaveTextContent(modelWithMetadata.name);
+    expect(trigger).not.toHaveTextContent(/Task:|Excels at:|Pricing:|Learn more/);
   });
 
   it("renders a details link for models with a detailsUrl", async () => {
