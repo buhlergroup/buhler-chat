@@ -316,7 +316,7 @@ export const MODEL_CONFIGS: Record<ChatModel, ModelConfig> = {
     badge: "Deep reasoning",
     taskArea: "Interactive and agentic coding",
     excelsAt: "All-round development tasks that benefit from careful, multistep validation",
-    detailsUrl: "https://developers.openai.com/api/docs/models/gpt-6-sol",
+    detailsUrl: "https://ai.azure.com/catalog/models/gpt-6-sol",
     getInstance: () => OpenAIV1ReasoningInstance(),
     family: "gpt-6",
     promptCacheOptionsSupported: true,
@@ -340,7 +340,7 @@ export const MODEL_CONFIGS: Record<ChatModel, ModelConfig> = {
     badge: "Best value",
     taskArea: "Fast help with simple or repetitive tasks",
     excelsAt: "Quick, cost-efficient responses for smaller, faster tasks",
-    detailsUrl: "https://developers.openai.com/api/docs/models/gpt-6-luna",
+    detailsUrl: "https://ai.azure.com/catalog/models/gpt-6-luna",
     getInstance: () => OpenAIV1Instance(),
     family: "gpt-6",
     promptCacheOptionsSupported: true,
@@ -376,7 +376,7 @@ export const MODEL_CONFIGS: Record<ChatModel, ModelConfig> = {
     badge: "Deep reasoning",
     taskArea: "Deep reasoning and debugging",
     excelsAt: "Complex reasoning over large codebases and long-running agentic work",
-    detailsUrl: "https://developers.openai.com/api/docs/models/gpt-5.6-sol",
+    detailsUrl: "https://ai.azure.com/catalog/models/gpt-5.6-sol",
     getInstance: () => OpenAIV1ReasoningInstance(),
     family: "gpt-5.6",
     promptCacheOptionsSupported: true,
@@ -400,7 +400,7 @@ export const MODEL_CONFIGS: Record<ChatModel, ModelConfig> = {
     badge: "Balanced",
     taskArea: "General-purpose coding and agent tasks",
     excelsAt: "Balanced everyday interactive and agentic coding",
-    detailsUrl: "https://developers.openai.com/api/docs/models/gpt-5.6-terra",
+    detailsUrl: "https://ai.azure.com/catalog/models/gpt-5.6-terra",
     getInstance: () => OpenAIV1ReasoningInstance(),
     family: "gpt-5.6",
     promptCacheOptionsSupported: true,
@@ -428,7 +428,7 @@ export const MODEL_CONFIGS: Record<ChatModel, ModelConfig> = {
     badge: "Best value",
     taskArea: "Fast help with simple or repetitive tasks",
     excelsAt: "Quick, cost-efficient responses for smaller, faster coding tasks",
-    detailsUrl: "https://developers.openai.com/api/docs/models/gpt-5.6-luna",
+    detailsUrl: "https://ai.azure.com/catalog/models/gpt-5.6-luna",
     getInstance: () => OpenAIV1Instance(),
     family: "gpt-5.6",
     promptCacheOptionsSupported: true,
@@ -451,7 +451,7 @@ export const MODEL_CONFIGS: Record<ChatModel, ModelConfig> = {
     badge: "Deep reasoning",
     taskArea: "Deep reasoning and debugging",
     excelsAt: "Multi-step problem solving and architecture-level code analysis",
-    detailsUrl: "https://deploymentsafety.openai.com/gpt-5-5/gpt-5-5.pdf",
+    detailsUrl: "https://ai.azure.com/catalog/models/gpt-5.5",
     getInstance: () => OpenAIV1ReasoningInstance(),
     family: "gpt-5.5",
     supportsReasoning: true,
@@ -474,7 +474,7 @@ export const MODEL_CONFIGS: Record<ChatModel, ModelConfig> = {
     badge: "Deep reasoning",
     taskArea: "Deep reasoning and debugging",
     excelsAt: "Multi-step problem solving and architecture-level code analysis",
-    detailsUrl: "https://deploymentsafety.openai.com/gpt-5-4-thinking/introduction",
+    detailsUrl: "https://ai.azure.com/catalog/models/gpt-5.4",
     getInstance: () => OpenAIV1ReasoningInstance(),
     family: "gpt-5.4",
     supportsReasoning: true,
@@ -495,7 +495,7 @@ export const MODEL_CONFIGS: Record<ChatModel, ModelConfig> = {
     badge: "Fast",
     taskArea: "Agentic software development",
     excelsAt: "Codebase exploration and is especially effective when using grep-style tools",
-    detailsUrl: "https://deploymentsafety.openai.com/gpt-5-4-thinking/gpt-5-4-thinking.pdf",
+    detailsUrl: "https://ai.azure.com/catalog/models/gpt-5.4-mini",
     getInstance: () => OpenAIV1Instance(),
     family: "gpt-5.4",
     supportsReasoning: false,
@@ -519,7 +519,7 @@ export const MODEL_CONFIGS: Record<ChatModel, ModelConfig> = {
     badge: "Fast",
     taskArea: "General-purpose coding and writing",
     excelsAt: "Fast, accurate code completions and explanations",
-    detailsUrl: "https://api-docs.deepseek.com/",
+    detailsUrl: "https://ai.azure.com/catalog/models/DeepSeek-V4-Pro",
     getInstance: () => {
       throw new Error(
         "Foundry models run via the provider seam (streamText), not the legacy getInstance path",
@@ -543,7 +543,7 @@ export const MODEL_CONFIGS: Record<ChatModel, ModelConfig> = {
     badge: "Best value",
     taskArea: "General-purpose coding and agent tasks",
     excelsAt: "Fast, reliable answers to lightweight coding questions",
-    detailsUrl: "https://huggingface.co/moonshotai/Kimi-K2.6",
+    detailsUrl: "https://ai.azure.com/catalog/models/Kimi-K2.6",
     getInstance: () => {
       throw new Error(
         "Foundry models run via the provider seam (streamText), not the legacy getInstance path",
@@ -567,7 +567,7 @@ export const MODEL_CONFIGS: Record<ChatModel, ModelConfig> = {
     badge: "Balanced",
     taskArea: "General-purpose coding and agent tasks",
     excelsAt: "Complex problem-solving challenges, sophisticated reasoning",
-    detailsUrl: "https://docs.x.ai/",
+    detailsUrl: "https://ai.azure.com/catalog/models/grok-4.3",
     getInstance: () => {
       throw new Error(
         "Foundry models run via the provider seam (streamText), not the legacy getInstance path",
@@ -596,7 +596,7 @@ export const MODEL_CONFIGS: Record<ChatModel, ModelConfig> = {
     badge: "Agentic",
     taskArea: "Long-running agentic coding and knowledge work",
     excelsAt: "Efficient multistep tasks, error recovery, and collaboration",
-    detailsUrl: "https://www-cdn.anthropic.com/fc1b44717c85dc068bc6ba5024219938094694bd/Claude%20Opus%205.5%20System%20Card.pdf",
+    detailsUrl: "https://ai.azure.com/catalog/models/claude-opus-5-5",
     getInstance: () => {
       throw new Error(
         "Anthropic models run via the provider seam (streamText), not the legacy getInstance path",
@@ -636,7 +636,7 @@ export const MODEL_CONFIGS: Record<ChatModel, ModelConfig> = {
     badge: "Deep reasoning",
     taskArea: "Deep reasoning and debugging",
     excelsAt: "Complex problem-solving challenges, sophisticated reasoning",
-    detailsUrl: "https://www-cdn.anthropic.com/0b4915911bb0d19eca5b5ee635c80fef830a37ea.pdf",
+    detailsUrl: "https://ai.azure.com/catalog/models/claude-opus-4-8",
     getInstance: () => {
       throw new Error(
         "Anthropic models run via the provider seam (streamText), not the legacy getInstance path",
@@ -678,7 +678,7 @@ export const MODEL_CONFIGS: Record<ChatModel, ModelConfig> = {
     badge: "Balanced",
     taskArea: "General-purpose coding and agent tasks",
     excelsAt: "Complex problem-solving challenges, sophisticated reasoning",
-    detailsUrl: "https://www-cdn.anthropic.com/9e6a1044980d8c4ed85669faf9c2a8342e2e9f1e/Claude%20Sonnet%205%20System%20Card.pdf",
+    detailsUrl: "https://ai.azure.com/catalog/models/claude-sonnet-5",
     getInstance: () => {
       throw new Error(
         "Anthropic models run via the provider seam (streamText), not the legacy getInstance path",

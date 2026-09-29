@@ -6,7 +6,7 @@
     /models endpoint, reporting any discrepancies.
 
 .DESCRIPTION
-    This script performs three tasks:
+    This script performs four tasks:
 
     1. PRICE COMPARISON — Parses the MODEL_CONFIGS table from models.ts and
        queries the Azure Retail Prices API (prices.azure.com) for each model
@@ -20,6 +20,11 @@
     3. DESCRIPTION LOOKUP — Optionally fetches model descriptions from the
        Foundry endpoint (OpenAI-compatible /models returns id, object, and
        created timestamp; some Foundry deployments also serve description).
+
+     4. DETAIL URL VALIDATION — Checks each configured detailsUrl over HTTP
+         (HEAD, falling back to GET) and verifies that Azure AI catalog URLs
+         end with the matching model ID. This uses public URLs and needs no
+         deployed Foundry endpoint or credentials.
 
     The script is designed to be run from the buhler-chat repo root.
 
@@ -139,6 +144,73 @@ function Write-Error   { param([string]$m) Write-Host "✗ $m" -ForegroundColor 
 function Write-Info    { param([string]$m) Write-Host "ℹ $m" -ForegroundColor Cyan }
 function Write-Diff    { param([string]$m) Write-Host "Δ $m" -ForegroundColor Magenta }
 
+function Test-DetailsUrl {
+    param(
+        [Parameter(Mandatory)]
+        [string]$ModelId,
+
+        [Parameter(Mandatory)]
+        [string]$Url
+    )
+
+    $parsedUri = $null
+    if (-not [uri]::TryCreate($Url, [UriKind]::Absolute, [ref]$parsedUri)) {
+        return [PSCustomObject]@{
+            Reachable = $false
+            HttpStatus = $null
+            Method = ''
+            IdMatches = $null
+            Slug = ''
+            Error = 'Invalid absolute URL'
+        }
+    }
+
+    $catalogPrefix = '/catalog/models/'
+    $isCatalogUrl = $parsedUri.Host -ieq 'ai.azure.com' -and
+        $parsedUri.AbsolutePath.StartsWith($catalogPrefix, [StringComparison]::OrdinalIgnoreCase)
+    $slug = ''
+    $idMatches = $null
+    if ($isCatalogUrl) {
+        $slug = [uri]::UnescapeDataString($parsedUri.AbsolutePath.Substring($catalogPrefix.Length).Trim('/'))
+        $idMatches = [string]::Equals($slug, $ModelId, [StringComparison]::OrdinalIgnoreCase)
+    }
+
+    $lastStatus = $null
+    $lastError = ''
+    foreach ($method in @('Head', 'Get')) {
+        try {
+            $response = Invoke-WebRequest -Uri $Url -Method $method -MaximumRedirection 5 -TimeoutSec 10 -ErrorAction Stop
+            $status = [int]$response.StatusCode
+            return [PSCustomObject]@{
+                Reachable = $status -ge 200 -and $status -lt 400
+                HttpStatus = $status
+                Method = $method
+                IdMatches = $idMatches
+                Slug = $slug
+                Error = ''
+            }
+        } catch {
+            $lastError = $_.Exception.Message
+            $responseProperty = $_.Exception.PSObject.Properties['Response']
+            if ($responseProperty -and $responseProperty.Value) {
+                $statusProperty = $responseProperty.Value.PSObject.Properties['StatusCode']
+                if ($statusProperty) {
+                    try { $lastStatus = [int]$statusProperty.Value } catch { }
+                }
+            }
+        }
+    }
+
+    return [PSCustomObject]@{
+        Reachable = $false
+        HttpStatus = $lastStatus
+        Method = 'Get'
+        IdMatches = $idMatches
+        Slug = $slug
+        Error = $lastError
+    }
+}
+
 # ═══════════════════════════════════════════════════════════════════════════
 # STEP 1 — Parse MODEL_CONFIGS from models.ts
 # ═══════════════════════════════════════════════════════════════════════════
@@ -192,10 +264,11 @@ for ($i = 0; $i -lt $entryStarts.Count; $i++) {
     $wrt = [regex]::Match($pricingText, 'cacheWritePerMillion\s*:\s*([\d.]+)')
     $plc = [regex]::Match($pricingText, 'priceLastCheckedUtc\s*:\s*"([^"]+)"')
 
-    # Extract provider, family, description, deploymentName
+    # Extract provider, family, description, detail URL, deploymentName
     $prov = [regex]::Match($entryBody, 'provider\s*:\s*"([^"]+)"')
     $fam  = [regex]::Match($entryBody, 'family\s*:\s*"([^"]+)"')
     $desc = [regex]::Match($entryBody, 'description\s*:\s*"([^"]+)"')
+    $url  = [regex]::Match($entryBody, 'detailsUrl\s*:\s*"([^"]+)"')
     $dep  = [regex]::Match($entryBody, 'deploymentName\s*:\s*process\.env\.([A-Z_]+)')
 
     $modelEntry = [PSCustomObject]@{
@@ -203,6 +276,13 @@ for ($i = 0; $i -lt $entryStarts.Count; $i++) {
         Provider             = if ($prov.Success) { $prov.Groups[1].Value } else { 'azure' }
         Family               = if ($fam.Success) { $fam.Groups[1].Value } else { '' }
         Description          = if ($desc.Success) { $desc.Groups[1].Value } else { '' }
+        DetailsUrl           = if ($url.Success) { $url.Groups[1].Value } else { $null }
+        DetailsUrlReachable  = $null
+        DetailsUrlHttpStatus = $null
+        DetailsUrlCheckMethod = ''
+        DetailsUrlIdMatches  = $null
+        DetailsUrlSlug       = ''
+        DetailsUrlError      = ''
         DeploymentEnvVar     = if ($dep.Success) { $dep.Groups[1].Value } else { '' }
         InputPerMillion      = if ($inp.Success) { [double]$inp.Groups[1].Value } else { 0 }
         OutputPerMillion     = if ($out.Success) { [double]$out.Groups[1].Value } else { 0 }
@@ -214,6 +294,61 @@ for ($i = 0; $i -lt $entryStarts.Count; $i++) {
 }
 
 Write-Success "Parsed $($modelEntries.Count) model configs from models.ts"
+Write-Host ""
+
+$detailsUrlResults = [System.Collections.Generic.List[PSCustomObject]]::new()
+Write-Host "── Public detail URL checks ──────────────────────────────────" -ForegroundColor White
+foreach ($model in $modelEntries) {
+    if ($model.DetailsUrl) {
+        $urlCheck = Test-DetailsUrl -ModelId $model.Id -Url $model.DetailsUrl
+    } else {
+        $urlCheck = [PSCustomObject]@{
+            Reachable = $false
+            HttpStatus = $null
+            Method = ''
+            IdMatches = $null
+            Slug = ''
+            Error = 'No detailsUrl configured'
+        }
+    }
+
+    $model.DetailsUrlReachable = $urlCheck.Reachable
+    $model.DetailsUrlHttpStatus = $urlCheck.HttpStatus
+    $model.DetailsUrlCheckMethod = $urlCheck.Method
+    $model.DetailsUrlIdMatches = $urlCheck.IdMatches
+    $model.DetailsUrlSlug = $urlCheck.Slug
+    $model.DetailsUrlError = $urlCheck.Error
+
+    $detailsUrlResults.Add([PSCustomObject]@{
+        ModelId = $model.Id
+        DetailsUrl = $model.DetailsUrl
+        Reachable = $urlCheck.Reachable
+        HttpStatus = $urlCheck.HttpStatus
+        Method = $urlCheck.Method
+        CatalogSlug = $urlCheck.Slug
+        IdMatchesCatalogSlug = $urlCheck.IdMatches
+        Error = $urlCheck.Error
+    })
+
+    $httpResult = if ($null -ne $urlCheck.HttpStatus) { "HTTP $($urlCheck.HttpStatus)" } else { 'no HTTP response' }
+    $methodResult = if ($urlCheck.Method) { " via $($urlCheck.Method)" } else { '' }
+    $slugResult = if ($null -eq $urlCheck.IdMatches) {
+        'catalog slug check not applicable'
+    } elseif ($urlCheck.IdMatches) {
+        "catalog slug '$($urlCheck.Slug)' matches ID"
+    } else {
+        "catalog slug '$($urlCheck.Slug)' does not match ID '$($model.Id)'"
+    }
+
+    if ($urlCheck.Reachable -and ($null -ne $urlCheck.IdMatches -and -not $urlCheck.IdMatches)) {
+        Write-Warn "$($model.Id): $httpResult$methodResult; $slugResult; $($model.DetailsUrl)"
+    } elseif ($urlCheck.Reachable) {
+        Write-Success "$($model.Id): $httpResult$methodResult; $slugResult; $($model.DetailsUrl)"
+    } else {
+        Write-Warn "$($model.Id): URL check failed ($httpResult$methodResult); $slugResult; $($model.DetailsUrl)"
+        if ($urlCheck.Error) { Write-Host "         $($urlCheck.Error)" -ForegroundColor DarkGray }
+    }
+}
 Write-Host ""
 
 if ($VerboseOutput) {
@@ -385,6 +520,12 @@ foreach ($model in $azureModels) {
         CodeOutput          = $model.OutputPerMillion
         CodeCacheWrite      = $model.CacheWritePerMillion
         PriceLastCheckedUtc = $model.PriceLastCheckedUtc
+        DetailsUrl          = $model.DetailsUrl
+        DetailsUrlReachable = $model.DetailsUrlReachable
+        DetailsUrlHttpStatus = $model.DetailsUrlHttpStatus
+        DetailsUrlCheckMethod = $model.DetailsUrlCheckMethod
+        DetailsUrlIdMatches = $model.DetailsUrlIdMatches
+        DetailsUrlSlug      = $model.DetailsUrlSlug
         MeterNames          = ($tokenItems | Select-Object -ExpandProperty meterName -Unique) -join '; '
         SkuNames            = ($tokenItems | Select-Object -ExpandProperty skuName -Unique) -join '; '
     })
@@ -416,22 +557,23 @@ foreach ($model in $azureModels) {
 
     if ($hasDiff) {
         $diffResults.Add([PSCustomObject]@{
-            ModelId          = $model.Id
-            Provider         = $model.Provider
-            Family           = $model.Family
-            Description      = $model.Description
-            CodeInput        = $model.InputPerMillion
-            ApiInput         = $apiInput
-            DiffInput        = $diffInput
-            CodeCached       = $model.CachedPerMillion
-            ApiCached        = $apiCached
-            DiffCached       = $diffCached
-            CodeOutput       = $model.OutputPerMillion
-            ApiOutput        = $apiOutput
-            DiffOutput       = $diffOutput
-            CodeCacheWrite   = $codeWrt
-            ApiCacheWrite    = $apiCacheWrite
-            DiffCacheWrite   = $diffCacheWrite
+            ModelId        = $model.Id
+            Provider       = $model.Provider
+            Family         = $model.Family
+            Description    = $model.Description
+            DetailsUrl     = $model.DetailsUrl
+            CodeInput      = $model.InputPerMillion
+            ApiInput       = $apiInput
+            DiffInput      = $diffInput
+            CodeCached     = $model.CachedPerMillion
+            ApiCached      = $apiCached
+            DiffCached     = $diffCached
+            CodeOutput     = $model.OutputPerMillion
+            ApiOutput      = $apiOutput
+            DiffOutput     = $diffOutput
+            CodeCacheWrite = $codeWrt
+            ApiCacheWrite  = $apiCacheWrite
+            DiffCacheWrite = $diffCacheWrite
         })
     }
 }
@@ -476,20 +618,21 @@ if ($IncludeAnthropic) {
             Write-Diff "$($model.Id):"
             $diffs | ForEach-Object { Write-Host "         $_" -ForegroundColor Magenta }
             $diffResults.Add([PSCustomObject]@{
-                ModelId          = $model.Id
-                Provider         = $model.Provider
-                Family           = $model.Family
-                Description      = $model.Description
-                CodeInput        = $model.InputPerMillion
-                ApiInput         = $pub.In
-                DiffInput        = [Math]::Round($pub.In - $model.InputPerMillion, 4)
-                CodeCached       = $model.CachedPerMillion
-                ApiCached        = $pub.Cac
-                DiffCached       = [Math]::Round($pub.Cac - $model.CachedPerMillion, 4)
-                CodeOutput       = $model.OutputPerMillion
-                ApiOutput        = $pub.Out
-                DiffOutput       = [Math]::Round($pub.Out - $model.OutputPerMillion, 4)
-                CodeCacheWrite   = $model.CacheWritePerMillion
+                ModelId        = $model.Id
+                Provider       = $model.Provider
+                Family         = $model.Family
+                Description    = $model.Description
+                DetailsUrl     = $model.DetailsUrl
+                CodeInput      = $model.InputPerMillion
+                ApiInput       = $pub.In
+                DiffInput      = [Math]::Round($pub.In - $model.InputPerMillion, 4)
+                CodeCached     = $model.CachedPerMillion
+                ApiCached      = $pub.Cac
+                DiffCached     = [Math]::Round($pub.Cac - $model.CachedPerMillion, 4)
+                CodeOutput     = $model.OutputPerMillion
+                ApiOutput      = $pub.Out
+                DiffOutput     = [Math]::Round($pub.Out - $model.OutputPerMillion, 4)
+                CodeCacheWrite = $model.CacheWritePerMillion
             })
         } else {
             Write-Success "$($model.Id): prices match published list prices"
@@ -681,6 +824,10 @@ if ($IncludeDescriptions -and -not ($IncludeFoundryModels -and $FoundryBaseUrl -
             Write-Host "  $($me.Id):" -ForegroundColor White
             Write-Host "    (no description)$plc" -ForegroundColor Yellow
         }
+        $configuredUrl = if ($me.DetailsUrl) { $me.DetailsUrl } else { '(not configured)' }
+        $urlStatus = if ($me.DetailsUrlReachable) { "HTTP $($me.DetailsUrlHttpStatus)" } else { 'unreachable' }
+        $slugStatus = if ($null -eq $me.DetailsUrlIdMatches) { 'n/a' } elseif ($me.DetailsUrlIdMatches) { 'ID matches slug' } else { "ID mismatch (slug: $($me.DetailsUrlSlug))" }
+        Write-Host "    detailsUrl:         $configuredUrl [$urlStatus; $slugStatus]" -ForegroundColor Cyan
         Write-Host ""
     }
     Write-Host "  Tip: Use -IncludeFoundryModels -FoundryBaseUrl <url> -FoundryApiKey <key> to fetch" -ForegroundColor DarkGray
@@ -762,6 +909,7 @@ if ($OutputFormat -eq 'Json') {
         DeploymentType    = $DeploymentType
         ModelsChecked     = $modelEntries.Count
         MatchingPrices    = $matchingModels.Count
+        DetailsUrlChecks  = $detailsUrlResults
         PriceDifferences  = $diffResults
         RetailApiResults  = $retailResults
         AllModelConfigs   = $modelEntries
@@ -770,6 +918,8 @@ if ($OutputFormat -eq 'Json') {
 }
 
 if ($OutputFormat -eq 'Csv') {
+    $detailsUrlResults | Export-Csv -Path "details-url-checks-$((Get-Date).ToString('yyyyMMdd-HHmmss')).csv" -NoTypeInformation
+    Write-Success "Exported detail URL checks to CSV"
     if ($diffResults.Count -gt 0) {
         $diffResults | Export-Csv -Path "pricing-diffs-$((Get-Date).ToString('yyyyMMdd-HHmmss')).csv" -NoTypeInformation
         Write-Success "Exported differences to CSV"
@@ -787,4 +937,6 @@ Write-Host "  Matched in Retail API:   $($retailResults.Count)" -ForegroundColor
 Write-Host "  Prices matching:         $($matchingModels.Count)" -ForegroundColor Green
 Write-Host "  Prices differing:        $($diffResults.Count)" -ForegroundColor $(if ($diffResults.Count -gt 0) { 'Yellow' } else { 'Green' })
 Write-Host "  Not found in API:        $($notFound.Count)" -ForegroundColor $(if ($notFound.Count -gt 0) { 'Yellow' } else { 'Green' })
+$detailsUrlFailures = @($detailsUrlResults | Where-Object { -not $_.Reachable -or ($null -ne $_.IdMatchesCatalogSlug -and -not $_.IdMatchesCatalogSlug) }).Count
+Write-Host "  Detail URL check failures: $detailsUrlFailures" -ForegroundColor $(if ($detailsUrlFailures -gt 0) { 'Yellow' } else { 'Green' })
 Write-Host "`nDone." -ForegroundColor White
