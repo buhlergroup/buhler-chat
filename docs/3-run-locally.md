@@ -13,9 +13,11 @@ Clone this repository locally or fork to your GitHub account. Run all of the ste
 
 1. Change directory to the `src` folder
 2. Copy `.env.example` to `.env.local` and populate the environment variables:
+
    ```bash
    cp .env.example .env.local
    ```
+
 3. At minimum, configure:
    - `AZURE_COSMOSDB_URI` — Cosmos DB connection string
    - `AZURE_OPENAI_API_KEY` — Azure OpenAI API key
@@ -23,14 +25,18 @@ Clone this repository locally or fork to your GitHub account. Run all of the ste
    - At least one model deployment name (e.g. `AZURE_OPENAI_API_GPT6_LUNA_DEPLOYMENT_NAME=gpt-6-luna`)
    - `NEXTAUTH_SECRET` — any random string for session encryption
    - `NEXTAUTH_URL=http://localhost:3000`
-4. Install npm packages:
+4. Install npm packages
+
    ```bash
    npm install
    ```
+
 5. Start the app:
+
    ```bash
    npm run dev
    ```
+
 6. Access the app on [http://localhost:3000](http://localhost:3000)
 
 You should now be prompted to login. With Basic Auth (DEV ONLY), any username you enter will create a new user id (hash of username@localhost). You can use this to simulate multiple users.
