@@ -110,10 +110,14 @@ const SelectLabel = React.forwardRef<
 ));
 SelectLabel.displayName = SelectPrimitive.Label.displayName;
 
+type SelectItemProps = React.ComponentPropsWithoutRef<typeof SelectPrimitive.Item> & {
+  compactText?: React.ReactNode;
+};
+
 const SelectItem = React.forwardRef<
   React.ElementRef<typeof SelectPrimitive.Item>,
-  React.ComponentPropsWithoutRef<typeof SelectPrimitive.Item>
->(({ className, children, ...props }, ref) => (
+  SelectItemProps
+>(({ className, children, compactText, ...props }, ref) => (
   <SelectPrimitive.Item
     ref={ref}
     className={cn(
@@ -128,7 +132,14 @@ const SelectItem = React.forwardRef<
       </SelectPrimitive.ItemIndicator>
     </span>
 
-    <SelectPrimitive.ItemText>{children}</SelectPrimitive.ItemText>
+    {compactText === undefined ? (
+      <SelectPrimitive.ItemText>{children}</SelectPrimitive.ItemText>
+    ) : (
+      <div className="flex min-w-0 flex-1 flex-col gap-1">
+        <SelectPrimitive.ItemText>{compactText}</SelectPrimitive.ItemText>
+        <div className="min-w-0 flex-1">{children}</div>
+      </div>
+    )}
   </SelectPrimitive.Item>
 ));
 SelectItem.displayName = SelectPrimitive.Item.displayName;

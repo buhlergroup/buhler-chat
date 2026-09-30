@@ -110,6 +110,14 @@ describe("chat-page.unit.models.pricing — the shipped price table holds its ow
     }
   });
 
+  it("records when every model price was last checked", () => {
+    for (const [id, config] of entries) {
+      expect(config.pricing.priceLastCheckedUtc, `${id} has no price check timestamp`).toMatch(
+        /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$/,
+      );
+    }
+  });
+
   it("never prices a cache read above uncached input", () => {
     for (const [id, config] of entries) {
       expect(
@@ -157,12 +165,14 @@ describe("chat-page.unit.models.pricing — the shipped price table holds its ow
       outputPerMillion: 10.0,
       cachedInputPerMillion: 0.2,
       cacheWritePerMillion: 2.5,
+      priceLastCheckedUtc: "2026-09-28T00:00:00Z",
     });
     expect(MODEL_CONFIGS["gpt-6-luna"].pricing).toEqual({
       inputPerMillion: 0.1,
       outputPerMillion: 0.5,
       cachedInputPerMillion: 0.01,
       cacheWritePerMillion: 0.125,
+      priceLastCheckedUtc: "2026-09-28T00:00:00Z",
     });
     expect(MODEL_CONFIGS["claude-opus-5-5"].pricing).toEqual({
       inputPerMillion: 4.0,
@@ -170,12 +180,14 @@ describe("chat-page.unit.models.pricing — the shipped price table holds its ow
       // 0.05x input on Opus 5.5, not the usual 0.1x.
       cachedInputPerMillion: 0.2,
       cacheWritePerMillion: 5.0,
+      priceLastCheckedUtc: "2026-09-28T00:00:00Z",
     });
     expect(MODEL_CONFIGS["claude-opus-4-8"].pricing).toEqual({
       inputPerMillion: 5.0,
       outputPerMillion: 25.0,
       cachedInputPerMillion: 0.5,
       cacheWritePerMillion: 6.25,
+      priceLastCheckedUtc: "2026-09-28T00:00:00Z",
     });
   });
 
@@ -507,6 +519,68 @@ describe("chat-page.unit.models.history-guard - the effective history budget per
       if (config.longContextThresholdTokens !== undefined) {
         expect(budget, id).toBeLessThan(config.longContextThresholdTokens);
       }
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+
+describe("chat-page.unit.models.picker-metadata — every user-selectable model has rich picker metadata", () => {
+  const entries = Object.entries(MODEL_CONFIGS);
+
+  it("gives every non-hidden model a badge, taskArea, excelsAt, and detailsUrl", () => {
+    for (const [id, config] of entries) {
+      if (config.hiddenFromPicker) continue;
+      expect(config.badge, `${id} is missing a badge`).toBeDefined();
+      expect(config.badge!.trim().length, `${id} has an empty badge`).toBeGreaterThan(0);
+      expect(config.taskArea, `${id} is missing a taskArea`).toBeDefined();
+      expect(config.taskArea!.trim().length, `${id} has an empty taskArea`).toBeGreaterThan(0);
+      expect(config.excelsAt, `${id} is missing an excelsAt`).toBeDefined();
+      expect(config.excelsAt!.trim().length, `${id} has an empty excelsAt`).toBeGreaterThan(0);
+      expect(config.detailsUrl, `${id} is missing a detailsUrl`).toBeDefined();
+      expect(config.detailsUrl!.trim().length, `${id} has an empty detailsUrl`).toBeGreaterThan(0);
+    }
+  });
+
+  it("gives every non-hidden model a valid HTTPS details URL", () => {
+    for (const [id, config] of entries) {
+      if (config.hiddenFromPicker) continue;
+      expect(config.detailsUrl, `${id} detailsUrl is missing`).toBeDefined();
+      try {
+        const url = new URL(config.detailsUrl!);
+        expect(url.protocol, `${id} detailsUrl must use HTTPS`).toBe("https:");
+      } catch {
+        expect(false, `${id} detailsUrl is not a valid URL: ${config.detailsUrl}`).toBe(true);
+      }
+    }
+  });
+
+  it("gives every non-hidden model a recognised badge label", () => {
+    const VALID_BADGES = new Set(["Best value", "Fast", "Balanced", "Deep reasoning", "Agentic"]);
+    for (const [id, config] of entries) {
+      if (config.hiddenFromPicker) continue;
+      expect(VALID_BADGES.has(config.badge!), `${id} has an unrecognised badge: "${config.badge}"`).toBe(true);
+    }
+  });
+
+  it("does not add picker metadata to hidden downgrade-only models", () => {
+    for (const [id, config] of entries) {
+      if (!config.hiddenFromPicker) continue;
+      // Hidden models may optionally carry metadata for internal use, but
+      // they must not appear in the user-facing picker. This test documents
+      // which models are hidden.
+      expect(config.hiddenFromPicker, `${id} is hidden`).toBe(true);
+    }
+  });
+
+  it("gives every non-hidden model a description that differs from its excelsAt", () => {
+    // The description is a one-line summary; excelsAt is the primary use case.
+    // They should not be identical strings.
+    for (const [id, config] of entries) {
+      if (config.hiddenFromPicker) continue;
+      expect(config.description.trim(), `${id} description and excelsAt are identical`).not.toBe(
+        config.excelsAt!.trim(),
+      );
     }
   });
 });

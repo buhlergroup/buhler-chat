@@ -24,16 +24,32 @@ Bühler Chat allows the organisation to run a private chat environment with a fa
 ## Latest Features
 
 ### Advanced Reasoning Models
+
 - **Auto-summarization** of model reasoning process
 - **Expandable reasoning thoughts** in the chat interface
-- **Multiple effort levels** (low, medium, high) for reasoning tasks
+- **Multiple effort levels** (low, medium, high, xhigh, max) for reasoning tasks
 
 ### Smart Model Selection
+
 - **Environment-based model availability** - only configured models appear in the selector
 - **Automatic model filtering** based on deployment environment variables
 - **Dynamic model configuration** without code changes
+- **Rich model picker** with pricing, task area, excels-at use cases, and details links
+
+### Multi-Provider Support
+
+- **Azure OpenAI** (GPT-6, GPT-5.6, GPT-5.5, GPT-5.4) via Responses API
+- **Anthropic Claude** (Opus 5.5, Opus 4.8, Sonnet 5) via Azure /anthropic Messages API
+- **Foundry-hosted models** (DeepSeek V4 Pro, Kimi K2.6, Grok 4.3) via OpenAI-compatible Chat Completions
+
+### Cost Controls
+
+- **Per-user daily/weekly budget caps** with automatic hard-cap downgrade
+- **Intent-based model downgrade** (coding, translation, summarisation, etc.)
+- **Prompt cache billing** support for GPT-6, GPT-5.6, and Claude families
 
 ### SharePoint Integration
+
 - **Direct SharePoint file access** for persona knowledge bases
 - **SharePoint group-based access control** for secure document sharing
 - **Real-time file picker** with native SharePoint interface
@@ -59,15 +75,17 @@ Bühler Chat allows the organisation to run a private chat environment with a fa
 ## Quick Start for Developers
 
 1. **Clone and Setup**:
+
    ```bash
-   git clone https://github.com/buhlergroup/azurechat
-   cd azurechat/src
+   git clone <repo-url>
+   cd <repo>/src
    cp .env.example .env.local
-   # Configure your environment variables
+   # Configure your environment variables (see .env.example for all options)
    npm install
    ```
 
 2. **Run with Debugging**:
+
    ```bash
    # Standard development with Turbopack
    npm run dev
@@ -78,6 +96,8 @@ Bühler Chat allows the organisation to run a private chat environment with a fa
    # Debug mode with Turbopack and Node inspector
    npm run dev:turbo-debug
    ```
+
+3. **Access the app** at [http://localhost:3000](http://localhost:3000)
 
 ## VS Code Debugging
 
@@ -97,59 +117,74 @@ The project includes preconfigured VS Code debugging setups in `.vscode/launch.j
 - **Console output** with integrated terminal
 - **Hot reload** with debugging active
 
-## Model Development & Testing
+## Model Configuration
 
-### Environment-Based Model Selection
-Configure which models appear in your chat interface by setting environment variables:
+### Enabling Models
 
-```bash
-# Enable specific models in .env.local
-AZURE_OPENAI_API_GPT55_DEPLOYMENT_NAME=gpt55-deployment
-AZURE_OPENAI_API_O3_DEPLOYMENT_NAME=o3-deployment
-AZURE_OPENAI_API_O3_PRO_DEPLOYMENT_NAME=o3-pro-deployment
-AZURE_OPENAI_API_GPT41_DEPLOYMENT_NAME=gpt41-deployment
-AZURE_OPENAI_API_GPT41_MINI_DEPLOYMENT_NAME=gpt41-mini-deployment
-```
-
-Only models with configured deployment names will appear in the model selector.
-
-### Reasoning Models
-Test advanced reasoning capabilities with o3 and o4-mini models:
+Models appear in the picker only when their deployment environment variable is set. Configure the ones you need in `.env.local`:
 
 ```bash
-# Configure reasoning model deployment
-AZURE_OPENAI_API_O3_DEPLOYMENT_NAME=your-o3-deployment
-AZURE_OPENAI_API_O3_PRO_DEPLOYMENT_NAME=your-o3-pro-deployment
+# GPT-6 family (Responses API)
+AZURE_OPENAI_API_GPT6_SOL_DEPLOYMENT_NAME=gpt-6-sol
+AZURE_OPENAI_API_GPT6_LUNA_DEPLOYMENT_NAME=gpt-6-luna
+
+# GPT-5.6 family (Responses API)
+AZURE_OPENAI_API_GPT56_SOL_DEPLOYMENT_NAME=gpt-5.6-sol
+AZURE_OPENAI_API_GPT56_TERRA_DEPLOYMENT_NAME=gpt-5.6-terra
+AZURE_OPENAI_API_GPT56_LUNA_DEPLOYMENT_NAME=gpt-5.6-luna
+
+# GPT-5.5 (Responses API)
+AZURE_OPENAI_API_GPT55_DEPLOYMENT_NAME=gpt-5.5
+
+# GPT-5.4 family (Responses API)
+AZURE_OPENAI_API_GPT54_DEPLOYMENT_NAME=gpt-5.4
+AZURE_OPENAI_API_GPT54_MINI_DEPLOYMENT_NAME=gpt-5.4-mini
+
+# Anthropic Claude (Azure /anthropic Messages API)
+AZURE_ANTHROPIC_OPUS55_DEPLOYMENT_NAME=claude-opus-5-5
+AZURE_ANTHROPIC_OPUS48_DEPLOYMENT_NAME=claude-opus-4-8
+AZURE_ANTHROPIC_SONNET5_DEPLOYMENT_NAME=claude-sonnet-5
+
+# Foundry-hosted low-cost models (OpenAI-compatible Chat Completions)
+FOUNDRY_OPENAI_BASE_URL=https://<resource>.services.ai.azure.com/openai/v1
+FOUNDRY_API_KEY=
+FOUNDRY_DEEPSEEK_DEPLOYMENT_NAME=DeepSeek-V4-Pro
+FOUNDRY_KIMI_DEPLOYMENT_NAME=Kimi-K2.6-1
+FOUNDRY_GROK_DEPLOYMENT_NAME=grok-4.3
 ```
 
-Features include:
-- **Reasoning summaries** with expandable thought processes
-- **Effort level control** (low/medium/high)
-- **Debug logging** for reasoning content extraction
+Only models with a non-empty deployment name will appear in the model selector.
 
-### SharePoint Integration
-Configure SharePoint document access for personas:
+### Cost Controls
 
 ```bash
-# Enable SharePoint integration in .env.local
-NEXT_PUBLIC_SHAREPOINT_URL=https://yourtenant.sharepoint.com
+# Per-user daily/weekly budget (USD). 0 or unset disables that window.
+DOWNGRADE_DAILY_COST_USD=3
+DOWNGRADE_WEEKLY_COST_USD=7
+
+# Intent-based downgrade targets (applied when no explicit model is picked)
+DOWNGRADE_INTENT_CODING_MODEL=
+DOWNGRADE_INTENT_DEFAULT_MODEL=
 ```
 
-Features include:
-- **Direct file access** from SharePoint libraries
-- **Group-based access control** for secure sharing
-- **Native file picker** interface
-- **Automatic document processing** for persona knowledge bases
+### Default Model
+
+Set the default model for new threads via `DEFAULT_MODEL_ID`:
+
+```bash
+DEFAULT_MODEL_ID=gpt-6-sol
+```
 
 ## Troubleshooting
 
 ### Common Issues
 
-1. **Models not appearing**: Check environment variables are set correctly
+1. **Models not appearing**: Check that the deployment name env vars are set and non-empty in `.env.local`
 2. **Debugging not working**: Ensure VS Code is configured and ports are available
-3. **Reasoning not showing**: Verify model supports reasoning and deployment is correct
-4. **API errors**: Check OpenAI resource region and API version compatibility
+3. **Reasoning not showing**: Verify the model supports reasoning (`supportsReasoning: true` in config) and the deployment is correct
+4. **API errors**: Check Azure OpenAI resource region, API version, and key
 5. **SharePoint access issues**: Verify SharePoint URL and user permissions are configured correctly
+6. **Budget-disabled models**: If a model is greyed out with a budget reason, check `DOWNGRADE_DAILY_COST_USD` / `DOWNGRADE_WEEKLY_COST_USD`
 
 ### Debug Logging
 
@@ -167,21 +202,19 @@ console.log("API response events:", streamEvents);
 # Documentation
 
 ## Core Features
+
 - [Run Locally](/docs/3-run-locally.md) - Local development setup
 - [Identity Provider](/docs/5-add-identity.md) - Authentication setup
 - [Chat over Files](/docs/6-chat-over-file.md) - Document chat functionality
 - [Personas](/docs/6-persona.md) - AI assistant customization with SharePoint integration
 - [Extensions](/docs/8-extensions.md) - Extensibility framework
 
-## Advanced Features
-- [Reasoning Models & Summaries](/docs/reasoning-summaries.md) - o3, o4-mini with thought processes
-- [Environment-Based Model Selection](/docs/environment-based-model-selection.md) - Dynamic model configuration
-
 ## Configuration & Migration
+
 - [Environment Variables](/docs/9-environment-variables.md) - Complete configuration reference
-- [Migration Guide](/docs/migration.md) - Upgrade instructions and breaking changes
 
 ## API References
+
 - [OpenAI SDK Migration](/docs/openai-sdk-migration.md) - SDK upgrade guide
 - [OpenAI Responses API Streaming](/docs/openai-responses-api-streaming.md) - Streaming implementation
 - [Chat API Sequence Diagram](/docs/chat-api-sequence-diagram.md) - API flow documentation

@@ -142,4 +142,140 @@ describe("chat-page.unit.components.001 — ModelSelector", () => {
 
     expect(screen.getByRole("button")).toBeDisabled();
   });
+
+  it("renders the badge, task area, excels at, and pricing for a model", async () => {
+    const { MODEL_CONFIGS } = await import("../chat-services/models");
+    const models = Object.values(MODEL_CONFIGS);
+    // Pick a model with a unique badge to avoid multiple matches
+    const modelWithMetadata = models.find((m) => m.badge === "Best value" && m.taskArea && m.excelsAt);
+    if (!modelWithMetadata) return;
+
+    render(
+      <ModelSelector
+        selectedModel={modelWithMetadata.id as any}
+        onModelChange={onModelChange}
+      />
+    );
+
+    const trigger = screen.getByRole("button");
+    expect(trigger).toHaveTextContent(modelWithMetadata.name);
+    expect(trigger).not.toHaveTextContent(/Task:|Excels at:|Pricing:|Learn more/);
+
+    await waitFor(() =>
+      expect(screen.queryByText("Loading models...")).not.toBeInTheDocument()
+    );
+
+    await userEvent.click(trigger);
+
+    // Badge label should be visible (use getAllByText and check at least one)
+    const badges = screen.getAllByText(modelWithMetadata.badge!);
+    expect(badges.length).toBeGreaterThan(0);
+
+    // Task area should be visible (may appear on multiple models)
+    const taskAreas = screen.getAllByText(modelWithMetadata.taskArea!);
+    expect(taskAreas.length).toBeGreaterThan(0);
+
+    // Excels at should be visible
+    expect(screen.getByText(modelWithMetadata.excelsAt!)).toBeInTheDocument();
+
+    // Pricing should be visible (appears on every model row)
+    const pricingLabels = screen.getAllByText(/Pricing:/);
+    expect(pricingLabels.length).toBeGreaterThan(0);
+    expect(trigger).toHaveTextContent(modelWithMetadata.name);
+    expect(trigger).not.toHaveTextContent(/Task:|Excels at:|Pricing:|Learn more/);
+  });
+
+  it("renders a details link for models with a detailsUrl", async () => {
+    const { MODEL_CONFIGS } = await import("../chat-services/models");
+    const models = Object.values(MODEL_CONFIGS);
+    // Pick a model whose detailsUrl is unique enough to identify the link
+    const modelWithLink = models.find((m) => m.detailsUrl && m.badge === "Best value");
+    if (!modelWithLink) return;
+
+    render(
+      <ModelSelector
+        selectedModel={modelWithLink.id as any}
+        onModelChange={onModelChange}
+      />
+    );
+
+    await waitFor(() =>
+      expect(screen.queryByText("Loading models...")).not.toBeInTheDocument()
+    );
+
+    await userEvent.click(screen.getByRole("button"));
+
+    // Find the link by its href attribute
+    const links = screen.getAllByText("Learn more");
+    const matchingLink = links.find(
+      (l) => l.closest("a")?.getAttribute("href") === modelWithLink.detailsUrl
+    );
+    expect(matchingLink).toBeDefined();
+    expect(matchingLink!.closest("a")).toHaveAttribute("target", "_blank");
+    expect(matchingLink!.closest("a")).toHaveAttribute("rel", "noopener noreferrer");
+  });
+
+  it("opens a details link without selecting that model", async () => {
+    const { MODEL_CONFIGS } = await import("../chat-services/models");
+    const models = Object.values(MODEL_CONFIGS);
+    const selected = models[0];
+    const other = models.find((m) => m.id !== selected.id && m.detailsUrl);
+    if (!other) return;
+
+    render(
+      <ModelSelector
+        selectedModel={selected.id as any}
+        onModelChange={onModelChange}
+      />
+    );
+
+    await waitFor(() =>
+      expect(screen.queryByText("Loading models...")).not.toBeInTheDocument()
+    );
+    await userEvent.click(screen.getByRole("button"));
+
+    const link = screen
+      .getAllByText("Learn more")
+      .map((l) => l.closest("a")!)
+      .find((a) => a.getAttribute("href") === other.detailsUrl)!;
+    const linkClicks = vi.fn((e: MouseEvent) => e.preventDefault());
+    link.addEventListener("click", linkClicks);
+
+    await userEvent.click(link);
+
+    expect(linkClicks).toHaveBeenCalledTimes(1);
+    expect(onModelChange).not.toHaveBeenCalled();
+  });
+
+  it("shows the disabled reason inline for a budget-disabled model", async () => {
+    const { MODEL_CONFIGS } = await import("../chat-services/models");
+    mockGetModelAvailability.mockResolvedValue({
+      availableModels: MODEL_CONFIGS,
+      disabledModels: {
+        "gpt-5.5": {
+          reason: "Daily cost budget reached — only low-cost models are available until it resets.",
+        },
+      },
+    });
+
+    render(
+      <ModelSelector
+        selectedModel={"gpt-5.4-mini" as any}
+        onModelChange={onModelChange}
+      />
+    );
+
+    await waitFor(() =>
+      expect(screen.queryByText("Loading models...")).not.toBeInTheDocument()
+    );
+    await userEvent.click(screen.getByRole("button"));
+
+    // The disabled reason should be visible inline (not just in a tooltip).
+    // Use getAllByText and check that at least one is visible (not sr-only).
+    const reasons = screen.getAllByText(/Daily cost budget reached/);
+    const visibleReason = reasons.find(
+      (el) => !el.classList.contains("sr-only")
+    );
+    expect(visibleReason).toBeDefined();
+  });
 });

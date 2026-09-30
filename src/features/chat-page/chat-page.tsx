@@ -16,7 +16,7 @@ import { Loader } from "@/components/ai-elements/loader";
 import { Reasoning, ReasoningTrigger, ReasoningContent } from "@/components/ai-elements/reasoning";
 import { ToolPartView, isToolPart } from "./tool-part-view";
 import { PromptInput, PromptInputTextarea, PromptInputToolbar, PromptInputTools, PromptInputButton, PromptInputSubmit, PromptInputModelSelect, PromptInputModelSelectTrigger, PromptInputModelSelectContent, PromptInputModelSelectItem, PromptInputModelSelectValue } from "@/components/ai-elements/prompt-input";
-import type { ChatDocumentModel, ChatMessageModel, ChatThreadModel } from "./chat-services/models";
+import type { ChatDocumentModel, ChatMessageModel, ChatModel, ChatThreadModel, ModelConfig } from "./chat-services/models";
 import { ExtensionModel } from "../extensions-page/extension-services/models";
 import { ChatHeader } from "./chat-header/chat-header";
 import { useProfilePicture } from "../common/hooks/useProfilePicture";
@@ -29,7 +29,12 @@ import { SoftDeleteChatDocumentsForCurrentUser } from "./chat-services/chat-thre
 import { RevalidateCache } from "@/features/common/navigation-helpers";
 import { InternetSearch } from "@/features/ui/chat/chat-input-area/internet-search";
 import { ReasoningEffortSelector } from "./chat-input/reasoning-effort-selector";
-import { MODEL_CONFIGS, DEFAULT_MODEL } from "./chat-services/models";
+import { MODEL_CONFIGS, DEFAULT_MODEL, getModelAvailability } from "./chat-services/models";
+import { ModelOptionContent, ModelOptionName } from "./chat-header/model-option";
+import {
+  DefaultModelReminder,
+  shouldShowDefaultModelReminder,
+} from "./default-model-reminder";
 import { ToolToggles } from "./chat-input/tool-toggles";
 import { InputImageStore, useInputImage } from "@/features/ui/chat/chat-input-area/input-image-store";
 import Image from "next/image";
@@ -58,6 +63,12 @@ interface ChatPageProps {
    * assembled server-side in thread-context.ts.
    */
   compactionMarker?: ThreadCompactionMarker | null;
+  /**
+   * The server default model (DEFAULT_MODEL resolved on the server with
+   * DEFAULT_MODEL_ID). New threads are saved with it; the client bundle only
+   * knows the code default.
+   */
+  defaultModel: ChatModel;
 }
 
 // ---------------------------------------------------------------------------
@@ -442,11 +453,34 @@ const ChatPageInner = (props: ChatPageProps) => {
   const fileInputRef = useRef<HTMLInputElement | null>(null);
 
   // New AI SDK session — used for submit/stop/messages.
-  const { sendMessage, stop, status } = useChatSession();
+  const { sendMessage, stop, status, messages } = useChatSession();
 
   const isStreaming = status === "streaming" || status === "submitted";
 
   const effectiveModel = selectedModel && MODEL_CONFIGS[selectedModel] ? selectedModel : DEFAULT_MODEL;
+  // New chats only: the reminder hides once the thread has a message.
+  const [showDefaultModelReminder, setShowDefaultModelReminder] = useState(() => {
+    return shouldShowDefaultModelReminder(
+      props.chatThread.selectedModel,
+      props.defaultModel,
+      props.messages.length,
+    );
+  });
+
+  // Availability state for the composer model picker, fetched from the server
+  // so it matches the header picker (hidden/undeployed models excluded).
+  const [composerModels, setComposerModels] = useState<Record<string, ModelConfig>>({});
+  const [composerDisabledModels, setComposerDisabledModels] = useState<Record<string, { reason: string }>>({});
+  useEffect(() => {
+    getModelAvailability().then(({ availableModels, disabledModels }) => {
+      setComposerModels(availableModels);
+      setComposerDisabledModels(disabledModels);
+    }).catch(() => {
+      // Fallback: show all models
+      setComposerModels(MODEL_CONFIGS);
+      setComposerDisabledModels({});
+    });
+  }, []);
 
   const internetSearch = useMemo(
     () => props.extensions.find((e) => e.name === "Bing Search"),
@@ -585,6 +619,7 @@ const ChatPageInner = (props: ChatPageProps) => {
           chatThread={props.chatThread}
           chatDocuments={props.chatDocuments}
           extensions={props.extensions}
+          onModelSelected={() => setShowDefaultModelReminder(false)}
         />
       )}
 
@@ -596,6 +631,10 @@ const ChatPageInner = (props: ChatPageProps) => {
       <div className="sticky bottom-3 max-w-4xl mx-auto w-full">
         {/* Fade gradient above input to indicate scrollable content */}
         <div className="pointer-events-none h-8 -mb-0 bg-gradient-to-t from-background to-transparent -translate-y-full" />
+        <DefaultModelReminder
+          show={showDefaultModelReminder && messages.length === 0}
+          defaultModel={props.defaultModel}
+        />
         <PromptInput onSubmit={handleSubmit}>
           {/* Attachments preview */}
           {previewImages.length > 0 && (
@@ -737,6 +776,7 @@ const ChatPageInner = (props: ChatPageProps) => {
                 value={effectiveModel}
                 onValueChange={async (v) => {
                   const model = v as typeof effectiveModel;
+                  setShowDefaultModelReminder(false);
                   setSelectedModel(model);
                   try {
                     const r = await UpdateChatThreadSelectedModel(chatThreadId, model);
@@ -750,14 +790,47 @@ const ChatPageInner = (props: ChatPageProps) => {
                 }}
               >
                 <PromptInputModelSelectTrigger className="h-8 px-2 text-xs">
-                  <PromptInputModelSelectValue placeholder="Model" />
+                  {/* Render the current model's name explicitly: it may be
+                      missing from composerModels (hidden or not deployed),
+                      and then Radix has no item text to show. */}
+                  <PromptInputModelSelectValue placeholder="Model">
+                    <ModelOptionName model={MODEL_CONFIGS[effectiveModel]} />
+                  </PromptInputModelSelectValue>
                 </PromptInputModelSelectTrigger>
-                <PromptInputModelSelectContent>
-                  {(Object.keys(MODEL_CONFIGS) as Array<keyof typeof MODEL_CONFIGS>).map((m) => (
-                    <PromptInputModelSelectItem key={m} value={m}>
-                      {MODEL_CONFIGS[m].name}
-                    </PromptInputModelSelectItem>
-                  ))}
+                <PromptInputModelSelectContent
+                  // Wider than the default Select to accommodate the richer
+                  // metadata (pricing, task area, excels at, details link).
+                  className="w-[28rem] max-w-[calc(100vw-2rem)]"
+                >
+                  {Object.entries(composerModels).length > 0
+                    ? Object.entries(composerModels).map(([id, model]) => {
+                        const isDisabled = !!composerDisabledModels[id];
+                        return (
+                          <PromptInputModelSelectItem
+                            key={id}
+                            value={id}
+                            textValue={model.name}
+                            compactText={<ModelOptionName model={model} />}
+                            disabled={isDisabled}
+                            className="py-3 px-3"
+                          >
+                            <ModelOptionContent
+                              model={model}
+                              isSelected={effectiveModel === id}
+                              isDisabled={isDisabled}
+                              disabledReason={composerDisabledModels[id]?.reason}
+                              showName={false}
+                              showDisabledReasonInline={isDisabled}
+                            />
+                          </PromptInputModelSelectItem>
+                        );
+                      })
+                    : // Fallback when availability hasn't loaded yet
+                      (Object.keys(MODEL_CONFIGS) as Array<keyof typeof MODEL_CONFIGS>).map((m) => (
+                        <PromptInputModelSelectItem key={m} value={m}>
+                          {MODEL_CONFIGS[m].name}
+                        </PromptInputModelSelectItem>
+                      ))}
                 </PromptInputModelSelectContent>
               </PromptInputModelSelect>
             </PromptInputTools>

@@ -22,9 +22,12 @@ interface Props {
   chatThread: ChatThreadModel;
   chatDocuments: Array<ChatDocumentModel>;
   extensions: Array<ExtensionModel>;
+  onModelSelected?: () => void;
 }
 
 export const ChatHeader: FC<Props> = (props) => {
+  const chatThreadId = props.chatThread.id;
+  const onModelSelected = props.onModelSelected;
   const selectedModel = useChatStore((s) => s.selectedModel);
   const setSelectedModel = useChatStore((s) => s.setSelectedModel);
   // The model the last turn actually ran on; differs from selectedModel when a
@@ -37,18 +40,19 @@ export const ChatHeader: FC<Props> = (props) => {
 
   const handleModelChange = useCallback(
     async (model: ChatModel) => {
+      onModelSelected?.();
       setSelectedModel(model);
       try {
-        const r = await UpdateChatThreadSelectedModel(props.chatThread.id, model);
+        const r = await UpdateChatThreadSelectedModel(chatThreadId, model);
         if (r.status !== "OK") showError("Failed to save model selection");
         const defaultEffort =
           MODEL_CONFIGS[model]?.defaultReasoningEffort ?? "low";
-        await UpdateChatThreadReasoningEffort(props.chatThread.id, defaultEffort);
+        await UpdateChatThreadReasoningEffort(chatThreadId, defaultEffort);
       } catch (err) {
         showError("Failed to save model selection: " + err);
       }
     },
-    [props.chatThread.id, setSelectedModel],
+    [chatThreadId, onModelSelected, setSelectedModel],
   );
 
   const persona =
