@@ -215,6 +215,38 @@ describe("chat-page.unit.components.001 — ModelSelector", () => {
     expect(matchingLink!.closest("a")).toHaveAttribute("rel", "noopener noreferrer");
   });
 
+  it("opens a details link without selecting that model", async () => {
+    const { MODEL_CONFIGS } = await import("../chat-services/models");
+    const models = Object.values(MODEL_CONFIGS);
+    const selected = models[0];
+    const other = models.find((m) => m.id !== selected.id && m.detailsUrl);
+    if (!other) return;
+
+    render(
+      <ModelSelector
+        selectedModel={selected.id as any}
+        onModelChange={onModelChange}
+      />
+    );
+
+    await waitFor(() =>
+      expect(screen.queryByText("Loading models...")).not.toBeInTheDocument()
+    );
+    await userEvent.click(screen.getByRole("button"));
+
+    const link = screen
+      .getAllByText("Learn more")
+      .map((l) => l.closest("a")!)
+      .find((a) => a.getAttribute("href") === other.detailsUrl)!;
+    const linkClicks = vi.fn((e: MouseEvent) => e.preventDefault());
+    link.addEventListener("click", linkClicks);
+
+    await userEvent.click(link);
+
+    expect(linkClicks).toHaveBeenCalledTimes(1);
+    expect(onModelChange).not.toHaveBeenCalled();
+  });
+
   it("shows the disabled reason inline for a budget-disabled model", async () => {
     const { MODEL_CONFIGS } = await import("../chat-services/models");
     mockGetModelAvailability.mockResolvedValue({

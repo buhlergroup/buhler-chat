@@ -192,9 +192,16 @@ export function ModelOptionContent({
                 target="_blank"
                 rel="noopener noreferrer"
                 className="inline-flex items-center gap-1 text-xs text-primary hover:underline mt-0.5"
+                onPointerUp={(e) => {
+                  // Radix Select selects a mouse pick on pointerup, before the
+                  // click, and then closes the list. Stop it here so the
+                  // native click still reaches the link and opens it.
+                  e.stopPropagation();
+                }}
                 onClick={(e) => {
                   // Stop propagation so clicking the link doesn't also select
-                  // the model in the dropdown.
+                  // the model in the dropdown (touch pick in Select, any pick
+                  // in DropdownMenu).
                   e.stopPropagation();
                 }}
               >
