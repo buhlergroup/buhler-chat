@@ -1,4 +1,5 @@
 import { ChatPage } from "@/features/chat-page/chat-page";
+import { DEFAULT_MODEL } from "@/features/chat-page/chat-services/models";
 import { FindAllChatDocuments } from "@/features/chat-page/chat-services/chat-document-service";
 import { FindAllChatMessagesForCurrentUser } from "@/features/chat-page/chat-services/chat-message-service";
 import { FindChatThreadForCurrentUser } from "@/features/chat-page/chat-services/chat-thread-service";
@@ -66,6 +67,7 @@ export default async function Home(props: HomeParams) {
       chatThread={chatThreadResponse.response}
       chatDocuments={docsResponse.response}
       extensions={extensionResponse.response}
+      defaultModel={DEFAULT_MODEL}
       compactionMarker={threadCompactionMarker(historySummary)}
     />
   );

@@ -48,4 +48,19 @@ describe("SelectItem compactText", () => {
     expect(option).toHaveTextContent("Pricing: $1.00 in / $4.00 out");
     expect(option).toHaveTextContent("Learn more");
   });
+
+  it("shows explicit SelectValue text when the current value has no item", () => {
+    render(
+      <Select value="hidden-model" onValueChange={vi.fn()}>
+        <SelectTrigger>
+          <SelectValue placeholder="Model">Hidden Model</SelectValue>
+        </SelectTrigger>
+        <SelectContent>
+          <SelectItem value="model-a">Model A</SelectItem>
+        </SelectContent>
+      </Select>
+    );
+
+    expect(screen.getByRole("combobox")).toHaveTextContent("Hidden Model");
+  });
 });

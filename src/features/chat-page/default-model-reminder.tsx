@@ -1,22 +1,35 @@
 "use client";
 
-import { DEFAULT_MODEL, MODEL_CONFIGS } from "./chat-services/models";
+import { MODEL_CONFIGS } from "./chat-services/models";
 
 interface DefaultModelReminderProps {
   show: boolean;
+  /**
+   * The server default model (DEFAULT_MODEL resolved on the server, which
+   * honours DEFAULT_MODEL_ID). The client bundle only knows the code default.
+   */
+  defaultModel: string;
 }
 
+/**
+ * The reminder is for new chats only: a thread with no messages yet whose
+ * model is the server default (or missing / unknown, which also falls back to
+ * the default).
+ */
 export function shouldShowDefaultModelReminder(
   initialModel: string | undefined,
+  defaultModel: string,
+  messageCount: number,
 ): boolean {
+  if (messageCount > 0) return false;
   return (
     !initialModel ||
-    initialModel === DEFAULT_MODEL ||
+    initialModel === defaultModel ||
     !MODEL_CONFIGS[initialModel as keyof typeof MODEL_CONFIGS]
   );
 }
 
-export function DefaultModelReminder({ show }: DefaultModelReminderProps) {
+export function DefaultModelReminder({ show, defaultModel }: DefaultModelReminderProps) {
   if (!show) return null;
 
   return (
@@ -27,7 +40,7 @@ export function DefaultModelReminder({ show }: DefaultModelReminderProps) {
     >
       This chat is using the configured default model: {" "}
       <span className="font-semibold text-foreground">
-        {MODEL_CONFIGS[DEFAULT_MODEL]?.name ?? DEFAULT_MODEL}
+        {MODEL_CONFIGS[defaultModel as keyof typeof MODEL_CONFIGS]?.name ?? defaultModel}
       </span>.
     </div>
   );

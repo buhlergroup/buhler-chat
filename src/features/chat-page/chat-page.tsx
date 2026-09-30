@@ -16,7 +16,7 @@ import { Loader } from "@/components/ai-elements/loader";
 import { Reasoning, ReasoningTrigger, ReasoningContent } from "@/components/ai-elements/reasoning";
 import { ToolPartView, isToolPart } from "./tool-part-view";
 import { PromptInput, PromptInputTextarea, PromptInputToolbar, PromptInputTools, PromptInputButton, PromptInputSubmit, PromptInputModelSelect, PromptInputModelSelectTrigger, PromptInputModelSelectContent, PromptInputModelSelectItem, PromptInputModelSelectValue } from "@/components/ai-elements/prompt-input";
-import type { ChatDocumentModel, ChatMessageModel, ChatThreadModel, ModelConfig } from "./chat-services/models";
+import type { ChatDocumentModel, ChatMessageModel, ChatModel, ChatThreadModel, ModelConfig } from "./chat-services/models";
 import { ExtensionModel } from "../extensions-page/extension-services/models";
 import { ChatHeader } from "./chat-header/chat-header";
 import { useProfilePicture } from "../common/hooks/useProfilePicture";
@@ -63,6 +63,12 @@ interface ChatPageProps {
    * assembled server-side in thread-context.ts.
    */
   compactionMarker?: ThreadCompactionMarker | null;
+  /**
+   * The server default model (DEFAULT_MODEL resolved on the server with
+   * DEFAULT_MODEL_ID). New threads are saved with it; the client bundle only
+   * knows the code default.
+   */
+  defaultModel: ChatModel;
 }
 
 // ---------------------------------------------------------------------------
@@ -447,13 +453,18 @@ const ChatPageInner = (props: ChatPageProps) => {
   const fileInputRef = useRef<HTMLInputElement | null>(null);
 
   // New AI SDK session — used for submit/stop/messages.
-  const { sendMessage, stop, status } = useChatSession();
+  const { sendMessage, stop, status, messages } = useChatSession();
 
   const isStreaming = status === "streaming" || status === "submitted";
 
   const effectiveModel = selectedModel && MODEL_CONFIGS[selectedModel] ? selectedModel : DEFAULT_MODEL;
+  // New chats only: the reminder hides once the thread has a message.
   const [showDefaultModelReminder, setShowDefaultModelReminder] = useState(() => {
-    return shouldShowDefaultModelReminder(props.chatThread.selectedModel);
+    return shouldShowDefaultModelReminder(
+      props.chatThread.selectedModel,
+      props.defaultModel,
+      props.messages.length,
+    );
   });
 
   // Availability state for the composer model picker, fetched from the server
@@ -621,7 +632,8 @@ const ChatPageInner = (props: ChatPageProps) => {
         {/* Fade gradient above input to indicate scrollable content */}
         <div className="pointer-events-none h-8 -mb-0 bg-gradient-to-t from-background to-transparent -translate-y-full" />
         <DefaultModelReminder
-          show={showDefaultModelReminder}
+          show={showDefaultModelReminder && messages.length === 0}
+          defaultModel={props.defaultModel}
         />
         <PromptInput onSubmit={handleSubmit}>
           {/* Attachments preview */}
@@ -778,7 +790,12 @@ const ChatPageInner = (props: ChatPageProps) => {
                 }}
               >
                 <PromptInputModelSelectTrigger className="h-8 px-2 text-xs">
-                  <PromptInputModelSelectValue placeholder="Model" />
+                  {/* Render the current model's name explicitly: it may be
+                      missing from composerModels (hidden or not deployed),
+                      and then Radix has no item text to show. */}
+                  <PromptInputModelSelectValue placeholder="Model">
+                    <ModelOptionName model={MODEL_CONFIGS[effectiveModel]} />
+                  </PromptInputModelSelectValue>
                 </PromptInputModelSelectTrigger>
                 <PromptInputModelSelectContent
                   // Wider than the default Select to accommodate the richer
