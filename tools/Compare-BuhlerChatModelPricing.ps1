@@ -384,34 +384,87 @@ function ConvertTo-PerMillionPrice {
     }
 }
 
+# Deployment-type tokens as they appear in skuName / meterName. Global and
+# DataZone are kept apart: a DataZone meter must never price a Global model.
 $deployPattern = switch ($DeploymentType) {
-    'Global' { '(?i)\b(glbl|Glbl|global|Gl|DZone|Dz|Data\s+Zone)\b' }
-    'DataZone' { '(?i)(\bDZone\b|\bDz\b|Data\s+Zone)' }
+    'Global' { '(?i)\b(gl|glbl|global)\b' }
+    'DataZone' { '(?i)(\b(dz|dzone)\b|\bdata\s+zone\b)' }
     'Regional' { '(?i)\b(regnl|regional)\b' }
 }
 
-function Extract-ModelNameFromSku {
-    param([string]$Sku)
-    $m = [regex]::Match($Sku, '^(.*?)[\s-]+(?:(?:Cached|cchd|cd)[\s-]+)?(?i)(?:Inp|Inpt|Outp|outpt|input|output|opt|Batch)\b')
-    if ($m.Success) { return $m.Groups[1].Value.Trim('- ') }
-    return $Sku
+# Non-standard billing tiers: Batch, long-context (LongCo), priority
+# processing (PP / Priority) and Flex. These meters are excluded unless the
+# model is listed in $modelMeterTier, which then asks for that one tier.
+$nonStandardTierPattern = '(?i)\b(batch|longco|pp|priority|flex)\b'
+$modelMeterTier = @{
+    # 'model-id' = 'Batch'
 }
 
-# Map model IDs to Retail API meter-name search terms.
+# Tokens that describe the meter, not the model. Removing them from the
+# skuName leaves the model stem, e.g. '5.4 mini cd Inp Gl' -> '5.4 mini'.
+# 'ShortCo' and 'Std' mark the standard short-context tier.
+$meterTokenPattern = '(?i)\bdata\s+zone\b|\b(gl|glbl|global|dz|dzone|regnl|regional|inp|inpt|input|in|outp|outpt|output|opt|cd|cached|cache|ch|cchd|wr|write|std|shortco|tokens)\b'
+
+function Get-MeterModelStem {
+    param([string]$Sku)
+    $stem = [regex]::Replace($Sku, $nonStandardTierPattern, ' ')
+    $stem = [regex]::Replace($stem, $meterTokenPattern, ' ')
+    return ($stem.Trim(' -').ToLower() -replace '[\s-]+', '-')
+}
+
+# Map model IDs to the model stems used in Retail API skuNames.
 # The Azure Retail Prices API uses short names like '5.6 sol', '6 luna', '5.4 mini'
 # rather than the full model IDs like 'gpt-5.6-sol' or 'gpt-6-luna'.
+# A meter counts only when its stem equals one of these terms exactly, so
+# '5.4' does not match '5.4 mini' or '5.4 pro', and 'K2.6' does not match 'K2.5'.
+# Kimi K2.6 is sold by Azure under the product 'Azure Kimi' as 'K2.6 Thinking'
+# (input/output) and 'K2.6' (cached); the Fireworks 'FW Kimi K2.6' meters are
+# DataZone only.
 $modelSearchTerms = @{
-    'gpt-6-sol'       = @('6 sol', '6-sol')
-    'gpt-6-luna'      = @('6 luna', '6-luna')
-    'gpt-5.6-sol'     = @('5.6 sol', '5.6-sol')
-    'gpt-5.6-terra'   = @('5.6 terra', '5.6-terra')
-    'gpt-5.6-luna'    = @('5.6 luna', '5.6-luna')
-    'gpt-5.5'         = @('5.5 ShortCo', '5.5 LongCo', 'gpt-5.5')
-    'gpt-5.4'         = @('5.4 inp', '5.4 opt', '5.4 cd')
-    'gpt-5.4-mini'    = @('5.4 mini inp', '5.4 mini opt', '5.4 mini cd')
-    'DeepSeek-V4-Pro' = @('DeepSeek-V4-Pro', 'DeepSeek V4 Pro', 'FW DeepSeek')
-    'Kimi-K2.6'       = @('Kimi K2.6', 'Kimi-K2.6', 'FW Kimi')
-    'grok-4.3'        = @('Grok 4', 'Grok-4', 'FW Grok')
+    'gpt-6-sol'       = @('6 sol')
+    'gpt-6-luna'      = @('6 luna')
+    'gpt-5.6-sol'     = @('5.6 sol')
+    'gpt-5.6-terra'   = @('5.6 terra')
+    'gpt-5.6-luna'    = @('5.6 luna')
+    'gpt-5.5'         = @('5.5')
+    'gpt-5.4'         = @('5.4')
+    'gpt-5.4-mini'    = @('5.4 mini')
+    'DeepSeek-V4-Pro' = @('DeepSeek-V4-Pro', 'FW DeepSeek-V4-Pro')
+    'Kimi-K2.6'       = @('K2.6 Thinking', 'K2.6')
+    'grok-4.3'        = @('Grok 4.3', 'Grok-4.3')
+}
+
+# Fetch all Foundry Models consumption meters for the region once, following
+# NextPageLink. Matching is done here in PowerShell, where -match is
+# case-insensitive; OData contains() is case-sensitive.
+$retailFilter = "serviceName eq 'Foundry Models' and priceType eq 'Consumption' and armRegionName eq '$Region'"
+$retailUrl = "https://prices.azure.com/api/retail/prices?api-version=2023-01-01-preview&`$filter=$([uri]::EscapeDataString($retailFilter))"
+$allRetailItems = [System.Collections.Generic.List[object]]::new()
+$retailPages = 0
+try {
+    while ($retailUrl) {
+        $resp = Invoke-RestMethod -Uri $retailUrl -Method Get -ErrorAction Stop
+        foreach ($item in @($resp.Items)) { $allRetailItems.Add($item) }
+        $retailUrl = $resp.NextPageLink
+        $retailPages++
+    }
+} catch {
+    Write-Warn "Retail API query failed: $_"
+}
+Write-Info "Retail API returned $($allRetailItems.Count) Foundry Models meters for '$Region' ($retailPages pages)"
+
+# Returns the single meter of one kind. When the remaining meters of that kind
+# have different prices, no meter is picked, so a wrong price is never used.
+function Select-SingleMeter {
+    param([object[]]$Items, [string]$Kind, [string]$ModelId)
+    $Items = @($Items | Where-Object { $null -ne $_ })
+    if ($Items.Count -eq 0) { return $null }
+    $prices = @($Items | Select-Object -ExpandProperty retailPrice -Unique)
+    if ($prices.Count -gt 1) {
+        Write-Warn "$ModelId`: $($Items.Count) $Kind meters with different prices ($(($Items | Select-Object -ExpandProperty meterName -Unique) -join '; ')) - no $Kind price picked"
+        return $null
+    }
+    return $Items[0]
 }
 
 foreach ($model in $azureModels) {
@@ -420,81 +473,42 @@ foreach ($model in $azureModels) {
         $searchTerms = @($model.Id, ($model.Id -replace '-', ' '))
     }
 
-    # Build OR filter from all search terms.
-    # OData `contains` IS case-sensitive, so keep the original casing.
-    $termFilters = $searchTerms | ForEach-Object {
-        $dashTerm = $_
-        $spaceTerm = $dashTerm -replace '-', ' '
-        if ($spaceTerm -ne $dashTerm) {
-            "(contains(meterName, '$dashTerm') or contains(meterName, '$spaceTerm'))"
-        } else {
-            "contains(meterName, '$dashTerm')"
-        }
-    }
-    $meterFilter = $termFilters -join ' or '
-    $oDataFilter = "serviceName eq 'Foundry Models' and priceType eq 'Consumption' and armRegionName eq '$Region' and ($meterFilter)"
-    $encodedFilter = [uri]::EscapeDataString($oDataFilter)
-    $url = "https://prices.azure.com/api/retail/prices?api-version=2023-01-01-preview&`$filter=$encodedFilter"
-
-    if ($VerboseOutput) { Write-DebugInfo "Querying Retail API for '$($model.Id)' with search terms: $($searchTerms -join ', ')" }
-
-    try {
-        $resp = Invoke-RestMethod -Uri $url -Method Get -ErrorAction Stop
-    } catch {
-        Write-Warn "Retail API query failed for '$($model.Id)': $_"
-        continue
-    }
-
-    $items = @($resp.Items)
-    if ($VerboseOutput) { Write-DebugInfo "  Raw API returned $($items.Count) items" }
-    if ($items.Count -eq 0) {
-        Write-Warn "No retail pricing data for '$($model.Id)' in region '$Region'"
-        continue
-    }
+    if ($VerboseOutput) { Write-DebugInfo "Matching Retail API meters for '$($model.Id)' with search terms: $($searchTerms -join ', ')" }
 
     # Filter to token-priced items for the requested deployment type
-    $tokenItems = @($items | Where-Object {
-        $_.unitOfMeasure -match '^1\s*[KM]' -and $_.meterName -match $deployPattern
+    $tokenItems = @($allRetailItems | Where-Object {
+        $_.unitOfMeasure -match '^1\s*[KM]' -and $_.skuName -match $deployPattern
     })
 
-    if ($VerboseOutput) { Write-DebugInfo "  After deployment-type filter: $($tokenItems.Count) items" }
-    if ($tokenItems.Count -eq 0) {
-        Write-Warn "No token-priced items for '$($model.Id)' / $DeploymentType"
-        if ($VerboseOutput) {
-            Write-DebugInfo "  Available meter names (first 10):"
-            $items | Select-Object -First 10 -ExpandProperty meterName | ForEach-Object { Write-DebugInfo "    $_" }
-        }
-        continue
+    # Keep only the standard tier, or the tier the model config asks for.
+    $wantedTier = $modelMeterTier[$model.Id]
+    if ($wantedTier) {
+        $tokenItems = @($tokenItems | Where-Object { $_.skuName -match "(?i)\b$([regex]::Escape($wantedTier))\b" })
+    } else {
+        $tokenItems = @($tokenItems | Where-Object { $_.skuName -notmatch $nonStandardTierPattern })
     }
 
-    # Narrow to exact model name match by extracting model from skuName.
-    # The skuName uses short names like '5.4 inp Gl' while model IDs are
-    # 'gpt-5.4'. Match against both the full model ID and the search terms.
+    # Narrow to the exact model: the stem left after removing the meter tokens
+    # from skuName must equal the model ID or one of the search terms.
     $normModel = $model.Id.ToLower() -replace '[\s-]+', '-'
-    $normTerms = $searchTerms | ForEach-Object { $_.ToLower() -replace '[\s-]+', '-' }
-    $exactPattern = '^(.*?)[\s-]+(?:(?:Cached|cchd|cd)[\s-]+)?(?i)(?:Inp|Inpt|Outp|outpt|input|output|opt|Batch)\b'
+    $normTerms = @($searchTerms | ForEach-Object { $_.ToLower() -replace '[\s-]+', '-' })
     $exactItems = @($tokenItems | Where-Object {
-        $m = [regex]::Match($_.skuName, $exactPattern)
-        if ($m.Success) {
-            $extracted = $m.Groups[1].Value.Trim(' -').ToLower() -replace '[\s-]+', '-'
-            $extracted -eq $normModel -or $extracted -in $normTerms
-        }
-        else { $false }
+        $stem = Get-MeterModelStem -Sku $_.skuName
+        $stem -eq $normModel -or $stem -in $normTerms
     })
-    if ($exactItems.Count -gt 0) {
-        if ($VerboseOutput) { Write-DebugInfo "  After exact-name filter: $($exactItems.Count) items (from $($tokenItems.Count))"; $tokenItems = $exactItems }
-        else { $tokenItems = $exactItems }
-    } elseif ($VerboseOutput) { Write-DebugInfo "  Exact-name filter matched 0 items — using all $($tokenItems.Count) token items" }
+
+    if ($exactItems.Count -eq 0) {
+        Write-Warn "No $DeploymentType standard meter in '$Region' matches '$($model.Id)' (terms: $($searchTerms -join ', ')) - no API price for this model"
+        continue
+    }
+    $tokenItems = $exactItems
+    if ($VerboseOutput) { Write-DebugInfo "  After exact-name filter: $($tokenItems.Count) items" }
 
     # Classify
-    $inputItem = $tokenItems | Where-Object { $_.meterName -match '(?i)\b(Inp|Inpt|input)\b' -and $_.meterName -notmatch '(?i)\b(cached|cache|cchd|cd|cd[\s-]+wr)\b' } |
-        Sort-Object retailPrice | Select-Object -First 1
-    $cachedItem = $tokenItems | Where-Object { $_.meterName -match '(?i)\b(cached|cache|cchd|cd)\b' -and $_.meterName -notmatch '(?i)\bcd[\s-]+wr\b' } |
-        Sort-Object retailPrice | Select-Object -First 1
-    $outputItem = $tokenItems | Where-Object { $_.meterName -match '(?i)\b(Outp|outpt|output|opt)\b' } |
-        Sort-Object retailPrice | Select-Object -First 1
-    $cacheWriteItem = $tokenItems | Where-Object { $_.meterName -match '(?i)\bcd[\s-]+wr\b' } |
-        Sort-Object retailPrice | Select-Object -First 1
+    $inputItem = Select-SingleMeter -ModelId $model.Id -Kind 'input' -Items @($tokenItems | Where-Object { $_.meterName -match '(?i)\b(Inp|Inpt|input|In)\b' -and $_.meterName -notmatch '(?i)\b(cached|cache|cchd|cd|ch)\b' })
+    $cachedItem = Select-SingleMeter -ModelId $model.Id -Kind 'cached' -Items @($tokenItems | Where-Object { $_.meterName -match '(?i)\b(cached|cache|cchd|cd|ch)\b' -and $_.meterName -notmatch '(?i)\bcd[\s-]+wr\b' })
+    $outputItem = Select-SingleMeter -ModelId $model.Id -Kind 'output' -Items @($tokenItems | Where-Object { $_.meterName -match '(?i)\b(Outp|outpt|output|opt)\b' })
+    $cacheWriteItem = Select-SingleMeter -ModelId $model.Id -Kind 'cacheWrite' -Items @($tokenItems | Where-Object { $_.meterName -match '(?i)\bcd[\s-]+wr\b' })
 
     if ($VerboseOutput) {
         Write-DebugInfo "  Classified meters:"
