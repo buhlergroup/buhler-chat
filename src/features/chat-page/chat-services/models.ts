@@ -396,7 +396,7 @@ export const MODEL_CONFIGS: Record<ChatModel, ModelConfig> = {
   "gpt-5.6-terra": {
     id: "gpt-5.6-terra",
     name: "GPT-5.6 Terra",
-    description: "GPT‑5.6-terra is OpenAI's most capable frontier model, built to deliver faster, more reliable results for complex professional work.",
+    description: "Balanced GPT-5.6 model for everyday advanced tasks",
     badge: "Balanced",
     taskArea: "General-purpose coding and agent tasks",
     excelsAt: "Balanced everyday interactive and agentic coding",
@@ -424,7 +424,7 @@ export const MODEL_CONFIGS: Record<ChatModel, ModelConfig> = {
   "gpt-5.6-luna": {
     id: "gpt-5.6-luna",
     name: "GPT-5.6 Luna",
-    description: "GPT‑5.6-luna is OpenAI's most capable frontier model, built to deliver faster, more reliable results for complex professional work.",
+    description: "Fast and efficient GPT-5.6 model for everyday tasks",
     badge: "Best value",
     taskArea: "Fast help with simple or repetitive tasks",
     excelsAt: "Quick, cost-efficient responses for smaller, faster coding tasks",
@@ -447,7 +447,7 @@ export const MODEL_CONFIGS: Record<ChatModel, ModelConfig> = {
   "gpt-5.5": {
     id: "gpt-5.5",
     name: "GPT-5.5",
-    description: "GPT‑5.5 is OpenAI’s most capable frontier model, built to deliver faster, more reliable results for complex professional work.",
+    description: "GPT‑5.5 is a previous-generation OpenAI reasoning model for complex professional work.",
     badge: "Deep reasoning",
     taskArea: "Deep reasoning and debugging",
     excelsAt: "Multi-step problem solving and architecture-level code analysis",
@@ -461,7 +461,8 @@ export const MODEL_CONFIGS: Record<ChatModel, ModelConfig> = {
     defaultReasoningEffort: "low",
     supportedReasoningEfforts: ["none", "low", "medium", "high", "xhigh"],
     // No cacheWritePerMillion: gpt-5.5 does not bill cache writes separately.
-    pricing: { inputPerMillion: 2.50, outputPerMillion: 15.00, cachedInputPerMillion: 0.25, priceLastCheckedUtc: "2026-09-28T00:00:00Z" },
+    // Standard Global (ShortCo) list price, not the Batch price.
+    pricing: { inputPerMillion: 5.00, outputPerMillion: 30.00, cachedInputPerMillion: 0.50, priceLastCheckedUtc: "2026-09-30T00:00:00Z" },
     contextWindow: 1050000,
     maxOutputTokens: 32000,
     fallbackModel: "gpt-6-luna",
@@ -470,7 +471,7 @@ export const MODEL_CONFIGS: Record<ChatModel, ModelConfig> = {
   "gpt-5.4": {
     id: "gpt-5.4",
     name: "GPT-5.4",
-    description: "GPT‑5.4 is OpenAI’s most capable frontier model, built to deliver faster, more reliable results for complex professional work.",
+    description: "GPT‑5.4 is an older previous-generation OpenAI reasoning model for multi-step analysis and coding.",
     badge: "Deep reasoning",
     taskArea: "Deep reasoning and debugging",
     excelsAt: "Multi-step problem solving and architecture-level code analysis",
@@ -502,7 +503,7 @@ export const MODEL_CONFIGS: Record<ChatModel, ModelConfig> = {
     supportsResponsesAPI: true,
     deploymentName: process.env.AZURE_OPENAI_API_GPT54_MINI_DEPLOYMENT_NAME,
     defaultReasoningEffort: "medium",
-    pricing: { inputPerMillion: 0.375, outputPerMillion: 2.25, cachedInputPerMillion: 0.075, priceLastCheckedUtc: "2026-09-28T00:00:00Z" },
+    pricing: { inputPerMillion: 0.75, outputPerMillion: 4.50, cachedInputPerMillion: 0.075, priceLastCheckedUtc: "2026-09-30T00:00:00Z" },
     contextWindow: 400000,
     maxOutputTokens: 8000,
     capabilities: ["vision", "webSearch", "code"],
@@ -554,7 +555,10 @@ export const MODEL_CONFIGS: Record<ChatModel, ModelConfig> = {
     supportsReasoning: false,
     supportsResponsesAPI: false,
     deploymentName: process.env.FOUNDRY_KIMI_DEPLOYMENT_NAME,
-    pricing: { inputPerMillion: 0.66, outputPerMillion: 3.30, cachedInputPerMillion: 0.11, priceLastCheckedUtc: "2026-09-28T00:00:00Z" },
+    // Azure Retail Prices, 'Azure Kimi' K2.6 Global meters in swedencentral
+    // (per 1K tokens): Thinking Inp glbl 0.00095, Thinking Outp glbl 0.004,
+    // cached glbl 0.00016.
+    pricing: { inputPerMillion: 0.95, outputPerMillion: 4.00, cachedInputPerMillion: 0.16, priceLastCheckedUtc: "2026-09-30T00:00:00Z" },
     contextWindow: 262144,
     maxOutputTokens: 8000,
     hardCapEligible: true,
@@ -592,7 +596,7 @@ export const MODEL_CONFIGS: Record<ChatModel, ModelConfig> = {
   "claude-opus-5-5": {
     id: "claude-opus-5-5",
     name: "Claude Opus 5.5",
-    description: "Claude Opus 5.5 is Anthropic's most capable Opus modeland a better collaborator. It handles long-running coding and knowledge work, and reports back clearly on what it did, what it found, and what it needs next.",
+    description: "Claude Opus 5.5 is Anthropic's most capable Opus model and a better collaborator. It handles long-running coding and knowledge work, and reports back clearly on what it did, what it found, and what it needs next.",
     badge: "Agentic",
     taskArea: "Long-running agentic coding and knowledge work",
     excelsAt: "Efficient multistep tasks, error recovery, and collaboration",
@@ -632,7 +636,7 @@ export const MODEL_CONFIGS: Record<ChatModel, ModelConfig> = {
   "claude-opus-4-8": {
     id: "claude-opus-4-8",
     name: "Claude Opus 4.8",
-    description: "Claude Opus 4.8 is our most intelligent Opus model and the best generally available model for coding and agents, with deeper reasoning for enterprise workflows.",
+    description: "Claude Opus 4.8 is Anthropic's previous-generation Opus model for coding, agents and enterprise workflows.",
     badge: "Deep reasoning",
     taskArea: "Deep reasoning and debugging",
     excelsAt: "Complex problem-solving challenges, sophisticated reasoning",
