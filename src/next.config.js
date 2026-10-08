@@ -18,9 +18,15 @@ const nextConfig = {
     localPatterns: [{ pathname: "/**" }],
   },
   experimental: {
+    // Document upload goes through the CrackDocument server action. Keep in
+    // line with MAX_UPLOAD_DOCUMENT_SIZE (50MB in prod).
     serverActions: {
-      bodySizeLimit: "10mb",
+      bodySizeLimit: "50mb",
     },
+    // src/proxy.ts runs on every route, so Next buffers each request body for
+    // it and cuts it at this size (default 10MB). Without this, uploads over
+    // 10MB to /api/code-interpreter/upload and /api/chat arrive truncated.
+    proxyClientMaxBodySize: "50mb",
     // Disable the Next.js client-side router cache for dynamic routes.
     // Default is 30s, which makes /chat/[id] show stale "no assistant" state
     // for half a minute after the background generation persisted a message.

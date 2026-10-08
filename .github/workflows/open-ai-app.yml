@@ -32,6 +32,7 @@ jobs:
           NEXT_PUBLIC_MAX_PERSONA_CI_DOCUMENT_LIMIT: ${{ secrets.NEXT_PUBLIC_PERSONA_CI_DOCUMENT_LIMIT }}
           NEXT_PUBLIC_AI_RULES: ${{ secrets.NEXT_PUBLIC_AI_RULES }}
           NEXT_PUBLIC_SHAREPOINT_URL: ${{ secrets.NEXT_PUBLIC_SHAREPOINT_URL }}
+          NEXT_PUBLIC_MAX_UPLOAD_DOCUMENT_SIZE: 52428800
         run: |
           cd ./src
           npm install
