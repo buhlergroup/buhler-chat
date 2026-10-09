@@ -19,7 +19,20 @@ import {
   SupportedFileExtensionsTextFiles,
 } from "./models";
 
-const MAX_UPLOAD_DOCUMENT_SIZE: number = 10485760; // 10MB in bytes
+const DEFAULT_MAX_UPLOAD_DOCUMENT_SIZE: number = 10485760; // 10MB in bytes
+
+// Effective upload limit in bytes: MAX_UPLOAD_DOCUMENT_SIZE from the
+// environment, or the 10MB default when it is unset or not a positive number.
+// Not exported: a "use server" file may export only async functions.
+const getMaxUploadDocumentSize = (): number => {
+  const configured = Number(process.env.MAX_UPLOAD_DOCUMENT_SIZE);
+  return Number.isFinite(configured) && configured > 0
+    ? configured
+    : DEFAULT_MAX_UPLOAD_DOCUMENT_SIZE;
+};
+
+const formatMegabytes = (bytes: number): string =>
+  `${Math.round((bytes / (1024 * 1024)) * 10) / 10} MB`;
 const CHUNK_SIZE = 2300;
 // 25% overlap
 const CHUNK_OVERLAP = CHUNK_SIZE * 0.25;
@@ -99,9 +112,7 @@ const LoadFile = async (
       throw new Error("Unsupported File Type");
     }
 
-    const fileSize = process.env.MAX_UPLOAD_DOCUMENT_SIZE
-      ? Number(process.env.MAX_UPLOAD_DOCUMENT_SIZE)
-      : MAX_UPLOAD_DOCUMENT_SIZE;
+    const fileSize = getMaxUploadDocumentSize();
 
     if (file && file.size < fileSize) {
       logDebug("Initializing Document Intelligence client");
@@ -143,7 +154,7 @@ const LoadFile = async (
         status: "ERROR",
         errors: [
           {
-            message: `File is too large and must be less than ${MAX_UPLOAD_DOCUMENT_SIZE} bytes.`,
+            message: `File is too large and must be less than ${formatMegabytes(fileSize)}.`,
           },
         ],
       };

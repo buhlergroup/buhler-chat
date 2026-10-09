@@ -168,4 +168,35 @@ describe("chat-page.unit.document-service.005 — Upload over MAX_UPLOAD_DOCUMEN
     // The MAX_UPLOAD_DOCUMENT_SIZE check is inside LoadFile
     expect(result.status).toBe("ERROR");
   });
+
+  it("error message shows the default 10 MB limit when MAX_UPLOAD_DOCUMENT_SIZE is unset", async () => {
+    vi.stubEnv("MAX_UPLOAD_DOCUMENT_SIZE", "");
+    try {
+      const file = new File([new Uint8Array(10485761)], "big.pdf", { type: "application/pdf" });
+      const formData = new FormData();
+      formData.append("file", file);
+      const result = await CrackDocument(formData);
+      expect(result.status).toBe("ERROR");
+      if (result.status !== "ERROR") return;
+      expect(result.errors[0].message).toBe("File is too large and must be less than 10 MB.");
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
+  it("error message shows the configured MAX_UPLOAD_DOCUMENT_SIZE in MB", async () => {
+    // 1 MB limit keeps the test file small.
+    vi.stubEnv("MAX_UPLOAD_DOCUMENT_SIZE", "1048576");
+    try {
+      const file = new File([new Uint8Array(1048577)], "big.pdf", { type: "application/pdf" });
+      const formData = new FormData();
+      formData.append("file", file);
+      const result = await CrackDocument(formData);
+      expect(result.status).toBe("ERROR");
+      if (result.status !== "ERROR") return;
+      expect(result.errors[0].message).toBe("File is too large and must be less than 1 MB.");
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
 });
