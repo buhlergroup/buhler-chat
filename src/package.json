@@ -24,7 +24,7 @@
     "@azure/cosmos": "^4.9.0",
     "@azure/identity": "^4.13.0",
     "@azure/keyvault-secrets": "^4.10.0",
-    "@azure/monitor-opentelemetry": "^1.18.2",
+    "@azure/monitor-opentelemetry": "^1.20.1",
     "@azure/search-documents": "^12.2.0",
     "@azure/storage-blob": "^12.29.1",
     "@codemirror/lang-javascript": "^6.2.4",
