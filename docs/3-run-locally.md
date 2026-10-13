@@ -6,7 +6,7 @@ Clone this repository locally or fork to your GitHub account. Run all of the ste
 
 - **Node.js**: v18+ (the project uses Next.js 16)
 - **History Database**: You must have a Cosmos DB instance configured to store chat history. Set the connection string via the `AZURE_COSMOSDB_URI` environment variable.
-- **Azure OpenAI resource**: At least one model deployment (e.g. `gpt-6-sol`, `gpt-5.6-luna`) to test chat functionality.
+- **Azure OpenAI resource**: At least one model deployment (e.g. `gpt-6.1-sol`, `gpt-6-luna`) to test chat functionality.
 - **Identity Provider**: For local development, you can use Basic Auth (username/password). If you prefer an Identity Provider, follow the [instructions](./5-add-identity.md) to add one.
 
 ## Steps

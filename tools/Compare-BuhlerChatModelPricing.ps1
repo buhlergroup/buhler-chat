@@ -421,6 +421,7 @@ function Get-MeterModelStem {
 # (input/output) and 'K2.6' (cached); the Fireworks 'FW Kimi K2.6' meters are
 # DataZone only.
 $modelSearchTerms = @{
+    'gpt-6.1-sol'     = @('6.1 sol')
     'gpt-6-sol'       = @('6 sol')
     'gpt-6-luna'      = @('6 luna')
     'gpt-5.6-sol'     = @('5.6 sol')

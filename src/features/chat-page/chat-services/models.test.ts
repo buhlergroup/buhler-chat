@@ -14,6 +14,7 @@ import {
   clampReasoningEffort,
   CODE_DEFAULT_MODEL,
   CODE_FALLBACK_DEFAULT_MODEL,
+  CODE_PREVIOUS_DEFAULT_MODEL,
   DEFAULT_MODEL,
   DEFAULT_REASONING_EFFORT_LEVELS,
   getPickableReasoningEfforts,
@@ -29,7 +30,7 @@ import {
 describe("resolveDefaultModel", () => {
   it("returns the code default when DEFAULT_MODEL_ID is unset", () => {
     expect(resolveDefaultModel(undefined)).toBe(CODE_DEFAULT_MODEL);
-    expect(CODE_DEFAULT_MODEL).toBe("gpt-6-sol");
+    expect(CODE_DEFAULT_MODEL).toBe("gpt-6.1-sol");
     expect(CODE_FALLBACK_DEFAULT_MODEL).toBe("gpt-5.6-terra");
   });
 
@@ -74,8 +75,10 @@ describe("MODEL_CONFIGS — default reasoning effort", () => {
     expect(MODEL_CONFIGS["gpt-5.5"].defaultReasoningEffort).toBe("low");
   });
 
-  it("makes GPT-6 Sol the code default and puts the new models on low", () => {
-    expect(CODE_DEFAULT_MODEL).toBe("gpt-6-sol");
+  it("makes GPT-6.1 Sol the code default and puts the new models on low", () => {
+    expect(CODE_DEFAULT_MODEL).toBe("gpt-6.1-sol");
+    expect(CODE_PREVIOUS_DEFAULT_MODEL).toBe("gpt-6-sol");
+    expect(MODEL_CONFIGS["gpt-6.1-sol"].defaultReasoningEffort).toBe("low");
     expect(MODEL_CONFIGS["gpt-6-sol"].defaultReasoningEffort).toBe("low");
     expect(MODEL_CONFIGS["gpt-6-luna"].defaultReasoningEffort).toBe("low");
     expect(MODEL_CONFIGS["claude-opus-5-5"].defaultReasoningEffort).toBe("low");
@@ -100,7 +103,7 @@ describe("chat-page.unit.models.pricing — the shipped price table holds its ow
   const entries = Object.entries(MODEL_CONFIGS);
 
   /** Families whose provider bills a prompt-cache write at a premium. */
-  const WRITE_BILLING_FAMILIES = ["gpt-6", "gpt-5.6", "claude"];
+  const WRITE_BILLING_FAMILIES = ["gpt-6.1", "gpt-6", "gpt-5.6", "claude"];
 
   it("prices every model", () => {
     for (const [id, config] of entries) {
@@ -191,6 +194,16 @@ describe("chat-page.unit.models.pricing — the shipped price table holds its ow
     });
   });
 
+  it("pins the list price of GPT-6.1 Sol", () => {
+    expect(MODEL_CONFIGS["gpt-6.1-sol"].pricing).toEqual({
+      inputPerMillion: 2.0,
+      outputPerMillion: 10.0,
+      cachedInputPerMillion: 0.1,
+      cacheWritePerMillion: 2.5,
+      priceLastCheckedUtc: "2026-10-13T00:00:00Z",
+    });
+  });
+
   it("gives every model a maxOutputTokens that leaves room for reasoning", () => {
     for (const [id, config] of entries) {
       expect(config.maxOutputTokens, `${id} has no maxOutputTokens`).toBeDefined();
@@ -257,14 +270,19 @@ describe("resolveDefaultModel — a deployment-aware override", () => {
 
 // ---------------------------------------------------------------------------
 
-describe("chat-page.unit.models.default-fallback — an undeployed code default falls back to terra", () => {
+describe("chat-page.unit.models.default-fallback — an undeployed code default falls back to GPT-6 Sol, then terra", () => {
   /**
-   * GPT-6 Sol is the code default, but an environment may not deploy it yet
-   * (no AZURE_OPENAI_API_GPT6_SOL_DEPLOYMENT_NAME). Then every unpinned chat
-   * must go to a model that CAN serve a turn — gpt-5.6-terra — and not to the
-   * undeployed default, which would 500 on every turn.
+   * GPT-6.1 Sol is the code default, but an environment may not deploy it yet
+   * (no AZURE_OPENAI_API_GPT61_SOL_DEPLOYMENT_NAME). Then every unpinned chat
+   * must go to a model that CAN serve a turn — GPT-6 Sol, else gpt-5.6-terra —
+   * and not to the undeployed default, which would 500 on every turn.
    */
-  const ids = [CODE_DEFAULT_MODEL, CODE_FALLBACK_DEFAULT_MODEL, "gpt-5.6-luna"] as const;
+  const ids = [
+    CODE_DEFAULT_MODEL,
+    CODE_PREVIOUS_DEFAULT_MODEL,
+    CODE_FALLBACK_DEFAULT_MODEL,
+    "gpt-5.6-luna",
+  ] as const;
   const saved: Record<string, string | undefined> = {};
 
   beforeEach(() => {
@@ -280,20 +298,31 @@ describe("chat-page.unit.models.default-fallback — an undeployed code default 
     (MODEL_CONFIGS[id] as { deploymentName?: string }).deploymentName = `${id}-dep`;
   };
 
-  it("uses GPT-6 Sol when it is deployed", () => {
+  it("uses GPT-6.1 Sol when it is deployed", () => {
+    deploy("gpt-6.1-sol");
     deploy("gpt-6-sol");
     deploy("gpt-5.6-terra");
-    expect(resolveDefaultModel(undefined)).toBe("gpt-6-sol");
+    expect(resolveDefaultModel(undefined)).toBe("gpt-6.1-sol");
     expect(mockLogError).not.toHaveBeenCalled();
   });
 
-  it("falls back to terra when GPT-6 Sol has no deployment, and logs it", () => {
+  it("falls back to GPT-6 Sol when GPT-6.1 Sol has no deployment, and logs it", () => {
+    deploy("gpt-6-sol");
+    deploy("gpt-5.6-terra");
+    expect(resolveDefaultModel(undefined)).toBe("gpt-6-sol");
+    expect(mockLogError).toHaveBeenCalledWith(
+      expect.stringMatching(/no deployment/i),
+      expect.objectContaining({ codeDefault: "gpt-6.1-sol", fallback: "gpt-6-sol" }),
+    );
+  });
+
+  it("falls back to terra when neither Sol model has a deployment, and logs it", () => {
     deploy("gpt-5.6-terra");
     expect(resolveDefaultModel(undefined)).toBe("gpt-5.6-terra");
     expect(resolveDefaultModel("   ")).toBe("gpt-5.6-terra");
     expect(mockLogError).toHaveBeenCalledWith(
       expect.stringMatching(/no deployment/i),
-      expect.objectContaining({ codeDefault: "gpt-6-sol", fallback: "gpt-5.6-terra" }),
+      expect.objectContaining({ codeDefault: "gpt-6.1-sol", fallback: "gpt-5.6-terra" }),
     );
   });
 
@@ -309,9 +338,9 @@ describe("chat-page.unit.models.default-fallback — an undeployed code default 
     expect(resolveDefaultModel("gpt-5.6-luna")).toBe("gpt-5.6-luna");
   });
 
-  it("returns GPT-6 Sol unchanged when nothing is deployed (negative)", () => {
+  it("returns GPT-6.1 Sol unchanged when nothing is deployed (negative)", () => {
     // A bare environment, or the client bundle: no better answer exists.
-    expect(resolveDefaultModel(undefined)).toBe("gpt-6-sol");
+    expect(resolveDefaultModel(undefined)).toBe("gpt-6.1-sol");
     expect(mockLogError).not.toHaveBeenCalled();
   });
 });
@@ -367,6 +396,11 @@ describe("chat-page.unit.models.reasoning — every model can be asked to think"
       if (config.family === "gpt-6" || config.family === "gpt-5.6") {
         expect(config.supportedReasoningEfforts, id).toEqual([
           "none", "low", "medium", "high", "xhigh", "max",
+        ]);
+      }
+      if (config.family === "gpt-6.1") {
+        expect(config.supportedReasoningEfforts, id).toEqual([
+          "low", "medium", "high", "xhigh", "max",
         ]);
       }
       if (config.family === "gpt-5.5") {
@@ -433,6 +467,9 @@ describe("chat-page.unit.models.effort-clamp — the picker follows the provider
     expect(clampReasoningEffort("claude-opus-5-5", "minimal")).toBe("low");
     expect(clampReasoningEffort("gpt-6-sol", "minimal")).toBe("low");
     expect(clampReasoningEffort("gpt-6-sol", "max")).toBe("max");
+    expect(clampReasoningEffort("gpt-6.1-sol", "minimal")).toBe("low");
+    expect(clampReasoningEffort("gpt-6.1-sol", "none")).toBe("low");
+    expect(clampReasoningEffort("gpt-6.1-sol", "max")).toBe("max");
   });
 
   it("offers Opus 5.5 low / medium / high in the picker, not minimal", () => {
@@ -442,6 +479,7 @@ describe("chat-page.unit.models.effort-clamp — the picker follows the provider
       "high",
     ]);
     expect(getPickableReasoningEfforts("gpt-6-sol")).toEqual(["low", "medium", "high"]);
+    expect(getPickableReasoningEfforts("gpt-6.1-sol")).toEqual(["low", "medium", "high"]);
   });
 
   it("is idempotent and safe for an unknown model", () => {
@@ -458,6 +496,7 @@ describe("chat-page.unit.models.history-guard - the effective history budget per
   // numbers, not fixtures, so a new model cannot quietly get an unguarded one.
   it("gives every GPT-6 and 5.6 model an effective budget of 256,000 (272k tier - 16k reserve)", () => {
     for (const id of [
+      "gpt-6.1-sol",
       "gpt-6-sol",
       "gpt-6-luna",
       "gpt-5.6-sol",

@@ -11,6 +11,7 @@ export const MESSAGE_ATTRIBUTE = "CHAT_MESSAGE";
 export const CHAT_CITATION_ATTRIBUTE = "CHAT_CITATION";
 
 export type ChatModel =
+  | "gpt-6.1-sol"
   | "gpt-6-sol"
   | "gpt-6-luna"
   | "gpt-5.6-sol"
@@ -69,6 +70,7 @@ export interface ModelPricing {
  *   - WRITE_BILLING_FAMILIES and the pinned effort sets in models.test.ts
  */
 export type ModelFamily =
+  | "gpt-6.1"
   | "gpt-6"
   | "gpt-5.6"
   | "gpt-5.5"
@@ -83,9 +85,11 @@ export type ModelFamily =
  * measured on the dev deployments 2026-09-23, two requests with one key, the
  * same 5,200-token instructions and DIFFERENT user input: the second read
  * 5,203 tokens from cache and wrote only the 23-token new tail, on both
- * gpt-6-sol and gpt-6-luna.
+ * gpt-6-sol and gpt-6-luna. GPT-6.1 uses the same implicit prompt cache
+ * (implicit mode, 1.25x writes, 0.1x-or-less reads) and is included with it.
  */
 export const PERSONA_CACHE_KEY_FAMILIES: ReadonlySet<ModelFamily> = new Set<ModelFamily>([
+  "gpt-6.1",
   "gpt-6",
   "gpt-5.6",
 ]);
@@ -159,6 +163,8 @@ export interface ModelConfig {
    *   gpt-5.6-*    same, with 'max' additionally supported.
    *   gpt-6-*      same as gpt-5.6 ('gpt-6-sol-2026-09-22' and
    *                'gpt-6-luna-2026-09-22'; measured 2026-09-23).
+   *   gpt-6.1-sol  low, medium, high, xhigh and max; no 'none' and no
+   *                'minimal' (published model spec, 2026-10-13).
    *
    * On an Anthropic model the list also decides whether "xhigh"/"max" reach
    * the wire: the anthropic seam passes them through only when the model
@@ -180,7 +186,7 @@ export interface ModelConfig {
    * letting that pass as a complete answer.
    *
    * The numbers, and why they differ:
-   *   32000  GPT-6, the 5.6 family and 5.5 — reasoning-heavy, and the models people
+   *   32000  GPT-6.1, GPT-6, the 5.6 family and 5.5 — reasoning-heavy, and the models people
    *          bring long-form work to. 16000 was measurably tight at high
    *          effort.
    *   16000  Claude (thinking is adaptive, so the cap is the bill guardrail
@@ -293,6 +299,37 @@ export const FALLBACK_MODEL_CHAIN: ReadonlyArray<ChatModel> = [
 ];
 
 export const MODEL_CONFIGS: Record<ChatModel, ModelConfig> = {
+  // ── GPT-6.1 family ──────────────────────────────────────────────────────
+  // Global Standard list price per 1M tokens, read 2026-10-13
+  // (input / output / cached input / cache write): 2.00 / 10.00 / 0.10 / 2.50.
+  // Cache writes are 1.25x input like GPT-6; cache reads are 0.05x input.
+  // Above 272k input tokens the request moves to the long-context tier: 2x
+  // input and cache rates, 1.5x output. reasoning.effort takes low, medium,
+  // high, xhigh and max ('none' and 'minimal' are not offered).
+  "gpt-6.1-sol": {
+    id: "gpt-6.1-sol",
+    name: "GPT-6.1 Sol",
+    description: "GPT‑6.1 Sol is OpenAI's latest frontier model for enterprise agents, coding, complex knowledge work, and multi-step reasoning",
+    badge: "Deep reasoning",
+    taskArea: "Interactive and agentic coding",
+    excelsAt: "All-round development tasks that benefit from careful, multistep validation",
+    detailsUrl: "https://ai.azure.com/catalog/models/gpt-6.1-sol",
+    getInstance: () => OpenAIV1ReasoningInstance(),
+    family: "gpt-6.1",
+    promptCacheOptionsSupported: true,
+    supportsReasoning: true,
+    supportsResponsesAPI: true,
+    supportsImageGeneration: true,
+    deploymentName: process.env.AZURE_OPENAI_API_GPT61_SOL_DEPLOYMENT_NAME,
+    defaultReasoningEffort: "low",
+    supportedReasoningEfforts: ["low", "medium", "high", "xhigh", "max"],
+    pricing: { inputPerMillion: 2.00, outputPerMillion: 10.00, cachedInputPerMillion: 0.10, cacheWritePerMillion: 2.50, priceLastCheckedUtc: "2026-10-13T00:00:00Z" },
+    contextWindow: 1050000,
+    longContextThresholdTokens: 272000,
+    maxOutputTokens: 32000,
+    fallbackModel: "gpt-6-luna",
+    capabilities: ["vision", "imageGen", "webSearch", "code"],
+  },
   // ── GPT-6 family (2026-09-22) ───────────────────────────────────────────
   // OpenAI list price, 2026-09-23. Azure meters not published yet
   // (2026-09-23). Verify against the Azure retail API.
@@ -741,36 +778,45 @@ export function resolveDeployedFallbackModel(
  * Model used when the request, the thread and the picker all say nothing.
  * This is the code default; `DEFAULT_MODEL_ID` overrides it at deploy time.
  *
- * GPT-6 Sol since 2026-09-23, chosen on the OpenAI list price (2.00 / 10.00,
- * cache write 2.50) against gpt-5.6-terra's Azure meter (2.00 / 12.00, cache
- * write 2.50). The Azure GPT-6 meters were not published yet; verify when they
- * are.
+ * GPT-6.1 Sol since 2026-10-13. Same list price as GPT-6 Sol (2.00 / 10.00,
+ * cache write 2.50) with a cheaper cache read (0.10 against 0.20).
+ * GPT-6 Sol was the default from 2026-09-23.
  */
-export const CODE_DEFAULT_MODEL: ChatModel = "gpt-6-sol";
+export const CODE_DEFAULT_MODEL: ChatModel = "gpt-6.1-sol";
+
+/**
+ * The previous code default, tried first when this environment has no
+ * deployment for CODE_DEFAULT_MODEL (e.g. no
+ * AZURE_OPENAI_API_GPT61_SOL_DEPLOYMENT_NAME yet), so an environment that has
+ * not rolled out GPT-6.1 keeps the GPT-6 Sol default it already had.
+ */
+export const CODE_PREVIOUS_DEFAULT_MODEL: ChatModel = "gpt-6-sol";
 
 /**
  * Model the default falls back to when this environment has no deployment
- * for CODE_DEFAULT_MODEL (e.g. no AZURE_OPENAI_API_GPT6_SOL_DEPLOYMENT_NAME).
- * Without it every unpinned chat would go to a model with no deployment and
- * fail with "Missing deployment configuration" on every turn.
+ * for CODE_DEFAULT_MODEL nor CODE_PREVIOUS_DEFAULT_MODEL. Without it every
+ * unpinned chat would go to a model with no deployment and fail with
+ * "Missing deployment configuration" on every turn.
  */
 export const CODE_FALLBACK_DEFAULT_MODEL: ChatModel = "gpt-5.6-terra";
 
 /**
  * The code default this environment can serve: CODE_DEFAULT_MODEL when it is
- * deployed, else CODE_FALLBACK_DEFAULT_MODEL when that one is. When neither
- * is deployed (a bare environment, the unit-test environment, or the client
- * bundle, which cannot read server env vars) there is no better answer, so
- * CODE_DEFAULT_MODEL is returned unchanged.
+ * deployed, else CODE_PREVIOUS_DEFAULT_MODEL, else CODE_FALLBACK_DEFAULT_MODEL,
+ * whichever is deployed first. When none is deployed (a bare environment, the
+ * unit-test environment, or the client bundle, which cannot read server env
+ * vars) there is no better answer, so CODE_DEFAULT_MODEL is returned unchanged.
  */
 export function resolveCodeDefaultModel(): ChatModel {
   if (isDeployedModel(CODE_DEFAULT_MODEL)) return CODE_DEFAULT_MODEL;
-  if (isDeployedModel(CODE_FALLBACK_DEFAULT_MODEL)) {
-    logError("Code default model has no deployment in this environment — using the fallback", {
-      codeDefault: CODE_DEFAULT_MODEL,
-      fallback: CODE_FALLBACK_DEFAULT_MODEL,
-    });
-    return CODE_FALLBACK_DEFAULT_MODEL;
+  for (const fallback of [CODE_PREVIOUS_DEFAULT_MODEL, CODE_FALLBACK_DEFAULT_MODEL]) {
+    if (isDeployedModel(fallback)) {
+      logError("Code default model has no deployment in this environment — using the fallback", {
+        codeDefault: CODE_DEFAULT_MODEL,
+        fallback,
+      });
+      return fallback;
+    }
   }
   return CODE_DEFAULT_MODEL;
 }

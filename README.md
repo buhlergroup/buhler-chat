@@ -38,7 +38,7 @@ Bühler Chat allows the organisation to run a private chat environment with a fa
 
 ### Multi-Provider Support
 
-- **Azure OpenAI** (GPT-6, GPT-5.6, GPT-5.5, GPT-5.4) via Responses API
+- **Azure OpenAI** (GPT-6.1, GPT-6, GPT-5.6, GPT-5.5, GPT-5.4) via Responses API
 - **Anthropic Claude** (Opus 5.5, Opus 4.8, Sonnet 5) via Azure /anthropic Messages API
 - **Foundry-hosted models** (DeepSeek V4 Pro, Kimi K2.6, Grok 4.3) via OpenAI-compatible Chat Completions
 
@@ -46,7 +46,7 @@ Bühler Chat allows the organisation to run a private chat environment with a fa
 
 - **Per-user daily/weekly budget caps** with automatic hard-cap downgrade
 - **Intent-based model downgrade** (coding, translation, summarisation, etc.)
-- **Prompt cache billing** support for GPT-6, GPT-5.6, and Claude families
+- **Prompt cache billing** support for GPT-6.1, GPT-6, GPT-5.6, and Claude families
 
 ### SharePoint Integration
 
@@ -124,6 +124,9 @@ The project includes preconfigured VS Code debugging setups in `.vscode/launch.j
 Models appear in the picker only when their deployment environment variable is set. Configure the ones you need in `.env.local`:
 
 ```bash
+# GPT-6.1 family (Responses API)
+AZURE_OPENAI_API_GPT61_SOL_DEPLOYMENT_NAME=gpt-6.1-sol
+
 # GPT-6 family (Responses API)
 AZURE_OPENAI_API_GPT6_SOL_DEPLOYMENT_NAME=gpt-6-sol
 AZURE_OPENAI_API_GPT6_LUNA_DEPLOYMENT_NAME=gpt-6-luna
@@ -172,8 +175,10 @@ DOWNGRADE_INTENT_DEFAULT_MODEL=
 Set the default model for new threads via `DEFAULT_MODEL_ID`:
 
 ```bash
-DEFAULT_MODEL_ID=gpt-6-sol
+DEFAULT_MODEL_ID=gpt-6.1-sol
 ```
+
+When unset, the code default is `gpt-6.1-sol`, falling back to `gpt-6-sol` and then `gpt-5.6-terra` when the default has no deployment.
 
 ## Troubleshooting
 
