@@ -1,4 +1,4 @@
-import { describe, it, expect, vi } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 
 // ── Silence logger noise ──────────────────────────────────────────────────────
 vi.mock("@/features/common/services/logger", () => ({
@@ -181,6 +181,50 @@ describe("resolveModelAndLimits — the fallback model must be deployed", () => 
       makeThread({ selectedModel: "gpt-6-luna" }),
     );
     expect(result.selectedModel).toBe("gpt-5.6-luna");
+  });
+});
+
+describe("resolveModelAndLimits — the selected model must be deployed", () => {
+  const TOUCHED = [DEFAULT_MODEL, "gpt-6-sol", "gpt-6-luna", "gpt-5.6-luna"] as const;
+  const saved: Record<string, string | undefined> = {};
+  beforeEach(() => {
+    for (const id of TOUCHED) {
+      saved[id] = MODEL_CONFIGS[id].deploymentName;
+      (MODEL_CONFIGS[id] as any).deploymentName = undefined;
+    }
+  });
+  afterEach(() => {
+    for (const id of TOUCHED) (MODEL_CONFIGS[id] as any).deploymentName = saved[id];
+  });
+
+  it("uses the server default when the sent model has no deployment", async () => {
+    (MODEL_CONFIGS[DEFAULT_MODEL] as any).deploymentName = "default-dep";
+    const undeployed = DEFAULT_MODEL === "gpt-6-sol" ? "gpt-6-luna" : "gpt-6-sol";
+    const result = await resolveModelAndLimits(
+      { selectedModel: undeployed },
+      makeThread({ selectedModel: undefined }),
+    );
+    expect(result.selectedModel).toBe(DEFAULT_MODEL);
+    expect(result.modelDeployment).toBe("default-dep");
+  });
+
+  it("uses the deployed fallback chain when the server default has no deployment either", async () => {
+    (MODEL_CONFIGS["gpt-5.6-luna"] as any).deploymentName = "luna56-dep";
+    const result = await resolveModelAndLimits(
+      { selectedModel: DEFAULT_MODEL },
+      makeThread({ selectedModel: undefined }),
+    );
+    expect(result.selectedModel).toBe("gpt-5.6-luna");
+    expect(result.modelDeployment).toBe("luna56-dep");
+  });
+
+  it("throws when no deployed model is available (negative)", async () => {
+    await expect(
+      resolveModelAndLimits(
+        { selectedModel: DEFAULT_MODEL },
+        makeThread({ selectedModel: undefined }),
+      ),
+    ).rejects.toThrow(`Missing deployment configuration for model ${DEFAULT_MODEL}`);
   });
 });
 

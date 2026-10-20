@@ -17,6 +17,7 @@ import {
   ChatModel,
   ChatThreadModel,
   DEFAULT_MODEL,
+  isDeployedModel,
   MODEL_CONFIGS,
   ModelConfig,
   ProviderReasoningEffort,
@@ -120,6 +121,23 @@ export async function resolveModelAndLimits(
   let selectedModel: ChatModel =
     payload.selectedModel ?? thread.selectedModel ?? DEFAULT_MODEL;
   let modelConfig = MODEL_CONFIGS[selectedModel];
+
+  // The client bundle cannot read server env vars, so it can send its code
+  // default even when this environment has no deployment for it.
+  if (!isDeployedModel(selectedModel)) {
+    const replacement =
+      DEFAULT_MODEL !== selectedModel && isDeployedModel(DEFAULT_MODEL)
+        ? DEFAULT_MODEL
+        : resolveDeployedFallbackModel(modelConfig?.fallbackModel, selectedModel);
+    if (replacement) {
+      logError("Selected model has no deployment in this environment — using a deployed model", {
+        selectedModel,
+        replacement,
+      });
+      selectedModel = replacement;
+      modelConfig = MODEL_CONFIGS[replacement];
+    }
+  }
 
   // An explicit pick is the user choosing a model this turn, or having
   // previously pinned a non-default model on the thread. Cap overrides it;

@@ -750,7 +750,7 @@ export const MODEL_CONFIGS: Record<ChatModel, ModelConfig> = {
 };
 
 /** A model this environment can actually route a turn to. */
-function isDeployedModel(id: ChatModel): boolean {
+export function isDeployedModel(id: ChatModel): boolean {
   return !!MODEL_CONFIGS[id]?.deploymentName?.trim();
 }
 
