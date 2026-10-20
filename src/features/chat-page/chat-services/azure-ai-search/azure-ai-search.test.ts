@@ -5,7 +5,7 @@ const hashedEmail = createHash("sha256").update("test@example.com").digest("hex"
 
 // Mock Azure AI Search
 const mockSearch = vi.fn();
-const mockUpload = vi.fn(async () => ({ results: [] }));
+const mockUpload = vi.fn(async (_docs: any[]): Promise<any> => ({ results: [] }));
 const mockDelete = vi.fn(async () => ({ results: [] }));
 const mockGetIndex = vi.fn();
 const mockCreateIndex = vi.fn();
@@ -27,7 +27,7 @@ vi.mock("@/features/common/services/ai-search", () => ({
   })),
 }));
 
-const mockEmbeddingsCreate = vi.fn(async () => ({
+const mockEmbeddingsCreate = vi.fn(async (_args: any): Promise<any> => ({
   data: [{ embedding: new Array(1536).fill(0.1) }],
 }));
 
@@ -141,7 +141,70 @@ describe("chat-page.unit.search.005 — IndexDocuments returns per-doc ERROR whe
   });
 });
 
-describe("chat-page.unit.search.006 — DeleteDocumentsOfChatThread issues search filter scoped by chatThreadId", () => {
+describe("chat-page.unit.search.005b — IndexDocuments sends chunks in batches of 100", () => {
+  it("splits 250 chunks into 3 embedding and 3 upload calls", async () => {
+    mockEmbeddingsCreate.mockImplementation(async ({ input }: any) => ({
+      data: input.map(() => ({ embedding: [0.1] })),
+    }));
+    mockUpload.mockImplementation(async (docs: any[]) => ({
+      results: docs.map(() => ({ succeeded: true })),
+    }));
+    const chunks = Array.from({ length: 250 }, (_, i) => `chunk ${i}`);
+
+    const results = await IndexDocuments(chunks, "big.pdf", undefined, "p1");
+
+    expect(mockEmbeddingsCreate.mock.calls.map((c: any) => c[0].input.length)).toEqual([100, 100, 50]);
+    expect(mockUpload.mock.calls.map((c: any) => c[0].length)).toEqual([100, 100, 50]);
+    expect(results).toHaveLength(250);
+    expect(results.every((r) => r.status === "OK")).toBe(true);
+  });
+
+  it("stops after the first failing embedding batch and returns its error", async () => {
+    mockEmbeddingsCreate
+      .mockImplementationOnce(async ({ input }: any) => ({
+        data: input.map(() => ({ embedding: [0.1] })),
+      }))
+      .mockRejectedValueOnce(new Error("400 Invalid 'input'"));
+    mockUpload.mockImplementation(async (docs: any[]) => ({
+      results: docs.map(() => ({ succeeded: true })),
+    }));
+    const chunks = Array.from({ length: 250 }, (_, i) => `chunk ${i}`);
+
+    const results = await IndexDocuments(chunks);
+
+    expect(mockEmbeddingsCreate).toHaveBeenCalledTimes(2);
+    expect(mockUpload).toHaveBeenCalledTimes(1);
+    const last = results[results.length - 1];
+    expect(last.status).toBe("ERROR");
+    expect((last as any).errors[0].message).toContain("400 Invalid 'input'");
+  });
+});
+
+describe("chat-page.unit.search.005c — IndexDocuments drops empty and whitespace-only chunks", () => {
+  it("embeds only chunks with text", async () => {
+    mockEmbeddingsCreate.mockImplementation(async ({ input }: any) => ({
+      data: input.map(() => ({ embedding: [0.1] })),
+    }));
+    mockUpload.mockImplementation(async (docs: any[]) => ({
+      results: docs.map(() => ({ succeeded: true })),
+    }));
+
+    await IndexDocuments(["", "  \n\t", "real text"]);
+
+    expect(mockEmbeddingsCreate).toHaveBeenCalledTimes(1);
+    expect((mockEmbeddingsCreate.mock.calls[0] as any)[0].input).toEqual(["real text"]);
+  });
+
+  it("returns no results and calls no service when all chunks are empty", async () => {
+    const results = await IndexDocuments(["", "   "]);
+
+    expect(results).toEqual([]);
+    expect(mockEmbeddingsCreate).not.toHaveBeenCalled();
+    expect(mockUpload).not.toHaveBeenCalled();
+  });
+});
+
+describe("chat-page.unit.search.006 —DeleteDocumentsOfChatThread issues search filter scoped by chatThreadId", () => {
   it("calls SimpleSearch with chatThreadId filter", async () => {
     let capturedFilter: string | undefined;
     // SimpleSearch calls instance.search(text, { filter })

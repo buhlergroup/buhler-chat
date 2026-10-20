@@ -491,15 +491,17 @@ const IndexNewPersonaDocuments = async (
 
   const documentIndexResponses = await Promise.all(
     splitDocuments.map(async (doc) => {
+      const emptyDocumentError: ServerActionResponse<boolean> = {
+        status: "ERROR",
+        errors: [
+          {
+            message: `${doc.name}: Document contains no text that can be indexed.`,
+          },
+        ],
+      };
+
       if (!doc.chunks) {
-        return {
-          status: "ERROR",
-          errors: [
-            {
-              message: `Document is empty.`,
-            },
-          ],
-        };
+        return [emptyDocumentError];
       }
 
       const results = await IndexDocuments(
@@ -509,22 +511,34 @@ const IndexNewPersonaDocuments = async (
         doc.id
       );
 
-      for (const result of results) {
-        // if one of the documents was OK add it to the successfully indexed documents so we can delete it later
-        if (result.status === "OK" && doc.id) {
-          successfullyIndexedPersonaDocuments.push(doc.id);
-          return results;
-        }
+      if (results.length === 0) {
+        return [emptyDocumentError];
       }
 
-      return results;
+      if (results.some((r) => r.status === "OK") && doc.id) {
+        successfullyIndexedPersonaDocuments.push(doc.id);
+      }
+
+      return results.map((r) =>
+        r.status === "OK"
+          ? r
+          : {
+              ...r,
+              errors: r.errors.map((e) => ({
+                ...e,
+                message: `${doc.name}: ${e.message}`,
+              })),
+            }
+      );
     })
   );
 
   const flatResponses = documentIndexResponses.flat();
-  const allDocumentsIndexed = flatResponses.every((r) => r.status === "OK");
+  const failedResponses = flatResponses.flatMap((r) =>
+    r.status === "OK" ? [] : [r]
+  );
 
-  if (!allDocumentsIndexed) {
+  if (failedResponses.length > 0) {
     // If any document failed to index, delete all successfully indexed documents
     await Promise.all(
       successfullyIndexedPersonaDocuments.map(async (id) => {
@@ -532,14 +546,13 @@ const IndexNewPersonaDocuments = async (
       })
     );
 
+    const messages = failedResponses.flatMap((r) =>
+      r.errors.map((e) => e.message)
+    );
+
     return {
       status: "ERROR",
-      errors: [
-        {
-          message:
-            "Problem with indexing persona documents due to high traffic. Try again later.",
-        },
-      ],
+      errors: [...new Set(messages)].map((message) => ({ message })),
     };
   }
 

@@ -22,6 +22,10 @@ export interface AzureSearchDocumentIndex {
   personaDocumentId: string | null;
 }
 
+// Embeddings accept max 2048 inputs per call and Azure AI Search max 16 MB per
+// upload. One chunk with a 3072-dim vector is ~63 KB, so 100 stays well below both.
+const INDEX_BATCH_SIZE = 100;
+
 export type DocumentSearchResponse = {
   score: number;
   document: AzureSearchDocumentIndex;
@@ -310,7 +314,7 @@ export const IndexDocuments = async (
     
     const documentsToIndex: AzureSearchDocumentIndex[] = [];
 
-    for (const doc of docs) {
+    for (const doc of docs.filter((d) => d.trim().length > 0)) {
       const docToAdd: AzureSearchDocumentIndex = {
         id: uniqueId(),
         chatThreadId: chatThreadId || null,
@@ -325,28 +329,38 @@ export const IndexDocuments = async (
     }
 
     const instance = AzureAISearchInstance();
-    
-    logDebug("Creating embeddings for documents", {
-      documentCount: documentsToIndex.length,
-    });
-    
-    const embeddingsResponse = await EmbedDocuments(documentsToIndex);
+    const response: ServerActionResponse<boolean>[] = [];
 
-    if (embeddingsResponse.status === "OK") {
+    for (let start = 0; start < documentsToIndex.length; start += INDEX_BATCH_SIZE) {
+      const batch = documentsToIndex.slice(start, start + INDEX_BATCH_SIZE);
+
+      logDebug("Creating embeddings for documents", {
+        batchStart: start,
+        documentCount: batch.length,
+        totalCount: documentsToIndex.length,
+      });
+
+      const embeddingsResponse = await EmbedDocuments(batch);
+
+      if (embeddingsResponse.status !== "OK") {
+        response.push(embeddingsResponse);
+        return response;
+      }
+
       logDebug("Uploading documents to Azure AI Search", {
+        batchStart: start,
         documentCount: embeddingsResponse.response.length,
       });
-      
+
       const uploadResponse = await instance.uploadDocuments(
         embeddingsResponse.response
       );
-      
+
       logDebug("Upload response received", {
         resultCount: uploadResponse.results.length,
         successCount: uploadResponse.results.filter(r => r.succeeded).length,
       });
 
-      const response: ServerActionResponse<boolean>[] = [];
       uploadResponse.results.forEach((r) => {
         if (r.succeeded) {
           response.push({
@@ -365,10 +379,12 @@ export const IndexDocuments = async (
         }
       });
 
-      return response;
+      if (uploadResponse.results.some((r) => !r.succeeded)) {
+        return response;
+      }
     }
 
-    return [embeddingsResponse];
+    return response;
   } catch (e) {
     logError("IndexDocuments failed", {
       error: e instanceof Error ? e.message : String(e),
