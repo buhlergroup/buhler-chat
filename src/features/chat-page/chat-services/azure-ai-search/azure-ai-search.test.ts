@@ -159,6 +159,25 @@ describe("chat-page.unit.search.005b — IndexDocuments sends chunks in batches 
     expect(results.every((r) => r.status === "OK")).toBe(true);
   });
 
+  it("keeps earlier OK results when a later upload throws", async () => {
+    mockEmbeddingsCreate.mockImplementation(async ({ input }: any) => ({
+      data: input.map(() => ({ embedding: [0.1] })),
+    }));
+    mockUpload
+      .mockImplementationOnce(async (docs: any[]) => ({
+        results: docs.map(() => ({ succeeded: true })),
+      }))
+      .mockRejectedValueOnce(new Error("413 Request Entity Too Large"));
+    const chunks = Array.from({ length: 150 }, (_, i) => `chunk ${i}`);
+
+    const results = await IndexDocuments(chunks);
+
+    expect(results.filter((r) => r.status === "OK")).toHaveLength(100);
+    const last = results[results.length - 1];
+    expect(last.status).toBe("ERROR");
+    expect((last as any).errors[0].message).toContain("413");
+  });
+
   it("stops after the first failing embedding batch and returns its error", async () => {
     mockEmbeddingsCreate
       .mockImplementationOnce(async ({ input }: any) => ({

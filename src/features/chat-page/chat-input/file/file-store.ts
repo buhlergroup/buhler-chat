@@ -193,6 +193,11 @@ class FileStore {
           index++;
         }
 
+        if (documentIndexResponses.length === 0) {
+          showError(`${file.name}: Document contains no text that can be indexed.`);
+          return;
+        }
+
         const allDocumentsIndexed = documentIndexResponses.every(
           (r) => r.status === "OK"
         );

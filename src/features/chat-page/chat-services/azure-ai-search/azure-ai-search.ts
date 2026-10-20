@@ -304,6 +304,8 @@ export const IndexDocuments = async (
   chatThreadId?: string,
   personaDocumentId?: string
 ): Promise<Array<ServerActionResponse<boolean>>> => {
+  const response: ServerActionResponse<boolean>[] = [];
+
   try {
     logDebug("IndexDocuments starting", {
       docCount: docs.length,
@@ -329,7 +331,6 @@ export const IndexDocuments = async (
     }
 
     const instance = AzureAISearchInstance();
-    const response: ServerActionResponse<boolean>[] = [];
 
     for (let start = 0; start < documentsToIndex.length; start += INDEX_BATCH_SIZE) {
       const batch = documentsToIndex.slice(start, start + INDEX_BATCH_SIZE);
@@ -392,6 +393,7 @@ export const IndexDocuments = async (
       errorType: (e as any)?.constructor?.name,
     });
     return [
+      ...response,
       {
         status: "ERROR",
         errors: [
