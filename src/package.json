@@ -65,7 +65,7 @@
     "js-tiktoken": "^1.0.21",
     "lucide-react": "^0.453.0",
     "microsoft-cognitiveservices-speech-sdk": "^1.47.0",
-    "nanoid": "^5.1.6",
+    "nanoid": "^6.0.2",
     "next": "^16.3.4",
     "next-auth": "^4.24.13",
     "next-themes": "^0.4.6",
@@ -111,6 +111,7 @@
   },
   "overrides": {
     "uuid": "^11.1.1",
+    "@azure/msal-node": "^7.0.3",
     "ws": "^8.20.1",
     "@nevware21/ts-utils": "^0.14.0",
     "fast-xml-builder": "^1.2.0",
