@@ -59,9 +59,13 @@ export async function register() {
   // Disable Statsbeat (internal SDK telemetry pinged back to Microsoft).
   process.env.APPLICATIONINSIGHTS_STATSBEAT_DISABLED ??= "true";
 
-  const { useAzureMonitor: azureMonitor } = require("@azure/monitor-opentelemetry");
-  const { metrics } = require('@opentelemetry/api');
-  const { SpanEnrichingProcessor } = require('./span-enriching-processor');
+  // Use dynamic import, not require(). @opentelemetry/api ships ESM (.mjs),
+  // so Turbopack compiles span-enriching-processor as an async module.
+  // require() returns it before its exports exist and the constructor is
+  // undefined ("i is not a constructor"). await import() waits for it.
+  const { useAzureMonitor: azureMonitor } = await import("@azure/monitor-opentelemetry");
+  const { metrics } = await import("@opentelemetry/api");
+  const { SpanEnrichingProcessor } = await import("./span-enriching-processor");
 
   const cosmosdb = new URL(process.env.AZURE_COSMOSDB_URI || "https://placeholder.documents.azure.com:443/");
   const cosmosdbHost = cosmosdb.hostname;
