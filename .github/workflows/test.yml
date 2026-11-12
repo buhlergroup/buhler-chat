@@ -76,6 +76,14 @@ jobs:
       - name: Install
         run: npm ci
 
+      # Build once here; e2e/start-prod-server.sh reuses build/.
+      - name: Production build
+        run: npm run build
+
+      # Every Server Action id in the build must resolve to a function.
+      - name: Check server actions resolve
+        run: npm run check:server-actions
+
       - name: Install Playwright browsers
         run: npx playwright install --with-deps chromium
 

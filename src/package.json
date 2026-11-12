@@ -7,6 +7,7 @@
     "dev:debug": "next dev --webpack",
     "dev:turbo-debug": "next dev --inspect",
     "build": "next build",
+    "check:server-actions": "node scripts/check-server-actions.mjs",
     "start": "next start",
     "lint": "eslint .",
     "test": "vitest run",
