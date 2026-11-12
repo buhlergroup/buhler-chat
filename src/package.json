@@ -117,6 +117,7 @@
     "@nevware21/ts-utils": "^0.14.0",
     "fast-xml-builder": "^1.2.0",
     "postcss": "$postcss",
-    "esbuild": "^0.28.1"
+    "esbuild": "^0.28.1",
+    "postcss-selector-parser": "6.1.5"
   }
 }
