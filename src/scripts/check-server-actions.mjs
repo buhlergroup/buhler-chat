@@ -11,7 +11,7 @@
 //
 // The check does what the Next runtime does when it dispatches an action:
 // for each action id in build/server/server-reference-manifest.json and each
-// page/route that uses it, it loads the worker module through the page's
+// page that uses it, it loads the worker module through the page's
 // `__next_app__.require(moduleId)` and checks that `module[actionId]` is a
 // function. Exit code 1 if one or more ids do not resolve.
 //
@@ -52,10 +52,7 @@ const loadApp = (workerKey) => {
     let error = null;
     try {
       const mod = require(path.join(serverDir, `${workerKey}.js`));
-      app =
-        mod.__next_app__ ??
-        mod.routeModule?.userland?.__next_app__ ??
-        (typeof mod.require === "function" ? mod : null);
+      app = mod.__next_app__ ?? null;
       if (!app || typeof app.require !== "function") {
         error = "no __next_app__.require export";
         app = null;
@@ -70,11 +67,18 @@ const loadApp = (workerKey) => {
 
 const failures = [];
 let checked = 0;
+let skipped = 0;
 
 for (const [actionId, entry] of actions) {
   const name = entry.exportedName ?? "?";
   const file = entry.filename ?? "?";
   for (const [workerKey, worker] of Object.entries(entry.workers ?? {})) {
+    // Next dispatches Server Actions only through pages. Route handlers
+    // (route.js) list the actions they import but never dispatch them.
+    if (!workerKey.endsWith("/page")) {
+      skipped++;
+      continue;
+    }
     checked++;
     const { app, error } = loadApp(workerKey);
     if (!app) {
@@ -94,7 +98,8 @@ for (const [actionId, entry] of actions) {
 }
 
 console.log(
-  `check-server-actions: ${actions.length} action ids, ${checked} (action, worker) pairs, ${failures.length} not resolved`
+  `check-server-actions: ${actions.length} action ids, ${checked} (action, page) pairs checked, ` +
+    `${skipped} route-handler pairs skipped, ${failures.length} not resolved`
 );
 
 if (failures.length > 0) {
