@@ -39,6 +39,10 @@ jobs:
           npm run build --if-present
           cd ..
 
+      - name: 🔎 Check server actions resolve
+        working-directory: ./src
+        run: npm run check:server-actions
+
       - name: 📂 Copy standalone into the root
         run: |
           # Next picks the workspace root for the standalone output by walking

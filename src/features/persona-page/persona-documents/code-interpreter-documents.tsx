@@ -10,10 +10,8 @@ import {
   DocumentMetadata,
   SharePointFile,
 } from "../persona-services/models";
-import {
-  DocumentDetails,
-  PersonaCIDocumentById,
-} from "@/features/persona-page/persona-services/persona-ci-documents-service";
+import { PersonaCIDocumentById } from "@/features/persona-page/persona-services/persona-ci-documents-service";
+import { DocumentDetails } from "@/features/persona-page/persona-services/persona-documents-service";
 import { ErrorDocumentItem } from "@/features/ui/persona-documents/error-document-item";
 import { DocumentItem } from "@/features/ui/persona-documents/document-item";
 import { getCodeInterpreterFileLimit } from "@/features/chat-page/chat-services/code-interpreter-constants";
@@ -130,7 +128,8 @@ export const CodeInterpreterDocuments: FC<Props> = ({ initialCIDocumentIds }) =>
             "An unexpected error occurred"
         );
       }
-    } catch {
+    } catch (error) {
+      console.error("Failed to add Code Interpreter documents", error);
       displayToastError("An unexpected error occurred. Please try again.");
     }
   };

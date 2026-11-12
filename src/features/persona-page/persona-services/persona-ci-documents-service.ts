@@ -20,11 +20,7 @@ import { HistoryContainer } from "@/features/common/services/cosmos";
 import { SqlQuerySpec } from "@azure/cosmos";
 import { logInfo, logError, logDebug } from "@/features/common/services/logger";
 import { ResponseType } from "@microsoft/microsoft-graph-client";
-import { DocumentDetails } from "./persona-documents-service";
 import { getCodeInterpreterFileLimit } from "@/features/chat-page/chat-services/code-interpreter-constants";
-
-// Re-export DocumentDetails for use in the UI component
-export { DocumentDetails };
 
 /**
  * Get a Code Interpreter persona document by ID
