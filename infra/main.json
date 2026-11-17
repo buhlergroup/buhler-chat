@@ -155,6 +155,10 @@
       "type": "string",
       "defaultValue": "images"
     },
+    "storageServiceSkillContainerName": {
+      "type": "string",
+      "defaultValue": "agent-skills"
+    },
     "resourceGroupName": {
       "type": "string",
       "defaultValue": ""
@@ -271,6 +275,9 @@
           },
           "storageServiceImageContainerName": {
             "value": "[parameters('storageServiceImageContainerName')]"
+          },
+          "storageServiceSkillContainerName": {
+            "value": "[parameters('storageServiceSkillContainerName')]"
           },
           "location": {
             "value": "[parameters('location')]"
@@ -390,6 +397,9 @@
               "type": "object"
             },
             "storageServiceImageContainerName": {
+              "type": "string"
+            },
+            "storageServiceSkillContainerName": {
               "type": "string"
             },
             "location": {
@@ -644,6 +654,17 @@
               ]
             },
             {
+              "type": "Microsoft.Storage/storageAccounts/blobServices/containers",
+              "apiVersion": "2022-05-01",
+              "name": "[format('{0}/{1}/{2}', variables('storage_name'), 'default', toLower(parameters('storageServiceSkillContainerName')))]",
+              "properties": {
+                "publicAccess": "None"
+              },
+              "dependsOn": [
+                "[resourceId('Microsoft.Storage/storageAccounts/blobServices', variables('storage_name'), 'default')]"
+              ]
+            },
+            {
               "type": "Microsoft.Storage/storageAccounts/blobServices",
               "apiVersion": "2022-05-01",
               "name": "[format('{0}/{1}', variables('storage_name'), 'default')]",
@@ -796,6 +817,10 @@
                     {
                       "name": "AZURE_STORAGE_ACCOUNT_KEY",
                       "value": "[format('@Microsoft.KeyVault(VaultName={0};SecretName={1})', variables('keyVaultName'), 'AZURE-STORAGE-ACCOUNT-KEY')]"
+                    },
+                    {
+                      "name": "AZURE_STORAGE_SKILL_CONTAINER_NAME",
+                      "value": "[parameters('storageServiceSkillContainerName')]"
                     }
                   ]
                 }

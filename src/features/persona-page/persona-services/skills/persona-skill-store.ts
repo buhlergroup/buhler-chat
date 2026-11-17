@@ -12,11 +12,16 @@ import "server-only";
  *   - Cosmos (history container, partition = agent owner's hashed id): one
  *     PERSONA_SKILL row per skill with name, description, SKILL.md text and
  *     the file manifest.
- *   - Blob: the original zip at `agent-skills/<personaId>/<skillId>-<ts>.zip`.
+ *   - Blob: the original zip at `agent-skills/<personaId>/<skillId>-<ts>.zip`
+ *     in the private skill container (AZURE_STORAGE_SKILL_CONTAINER_NAME,
+ *     default "agent-skills"; infra/resources.bicep creates it).
+ *   - Azure OpenAI files: one copy of each skill version's zip for the code
+ *     interpreter, uploaded on first use; its id is cached on the row.
  */
 
 import { SqlQuerySpec } from "@azure/cosmos";
-import { userHashedId } from "@/features/auth-page/helpers";
+import { getCurrentUser, userHashedId } from "@/features/auth-page/helpers";
+import { OpenAIV1Instance } from "@/features/common/services/openai";
 import { HistoryContainer } from "@/features/common/services/cosmos";
 import {
   DeleteBlob,
@@ -37,12 +42,12 @@ import {
 import { readSkillZipFile } from "./skill-zip";
 
 /**
- * Blob container for skill packages. Defaults to the existing images
- * container so no infrastructure change is needed; the `agent-skills/`
- * prefix is blocked in the public image route (chat-image-service.ts).
+ * Private blob container for skill packages (no public access). The name
+ * comes from AZURE_STORAGE_SKILL_CONTAINER_NAME, set by the Bicep; the
+ * default matches the Bicep default.
  */
 export const skillBlobContainer = (): string =>
-  process.env.AZURE_STORAGE_SKILL_CONTAINER_NAME || "images";
+  process.env.AZURE_STORAGE_SKILL_CONTAINER_NAME || "agent-skills";
 
 export const SKILL_BLOB_PREFIX = "agent-skills";
 
@@ -80,6 +85,7 @@ export async function resolveSkillAccess(personaId: string): Promise<SkillAccess
   const persona = await readPersonaRow(personaId);
   if (!persona) return undefined;
   const currentUserId = await userHashedId();
+  const { isAdmin } = await getCurrentUser();
   let isMember = false;
   if (
     persona.userId !== currentUserId &&
@@ -93,7 +99,7 @@ export async function resolveSkillAccess(personaId: string): Promise<SkillAccess
     persona,
     currentUserId,
     canUse: canUsePersonaSkills(persona, currentUserId, isMember),
-    canEdit: canEditPersonaSkills(persona, currentUserId),
+    canEdit: canEditPersonaSkills(persona, currentUserId, Boolean(isAdmin)),
   };
 }
 
@@ -151,6 +157,7 @@ export async function deleteSkillsForPersona(personaId: string): Promise<void> {
     for (const skill of skills) {
       await HistoryContainer().item(skill.id, skill.userId).delete();
       await DeleteBlob(skillBlobContainer(), skill.blobName);
+      await deleteSkillOpenAiFile(skill.openAiFileId);
     }
   } catch (error) {
     logError("agent skills: cleanup after agent delete failed", {
@@ -214,12 +221,130 @@ export async function readSkillFile(
   return readSkillZipFile(buf, skill.rootPrefix, relPath);
 }
 
+// ---------------------------------------------------------------------------
+// Azure OpenAI file per skill version
+// ---------------------------------------------------------------------------
+
+const isNotFound = (error: unknown): boolean => {
+  const status =
+    (error as { status?: number })?.status ??
+    (error as { statusCode?: number })?.statusCode;
+  const message =
+    error instanceof Error ? error.message.toLowerCase() : String(error).toLowerCase();
+  return status === 404 || message.includes("not found") || message.includes("no such file");
+};
+
 /**
- * Uploads each skill zip as a code interpreter file, for a new chat with the
- * agent. Same mechanism as the agent's code interpreter documents
- * (persona-service CreatePersonaChat): the files become the thread's
- * attachedFiles and go into the code interpreter container with every turn.
- * A failed skill is logged and skipped; the chat still starts.
+ * Is this OpenAI file still there? `false` only on a clear "not found"; any
+ * other error counts as "probably fine", so a transient failure does not
+ * trigger a re-upload of a large zip.
+ */
+async function openAiFileExists(fileId: string): Promise<boolean> {
+  try {
+    const file = await OpenAIV1Instance().files.retrieve(fileId);
+    return Boolean(file) && (file as { status?: string }).status !== "deleted";
+  } catch (error) {
+    if (isNotFound(error)) return false;
+    logWarn("agent skills: could not check OpenAI file, reusing it", {
+      fileId,
+      error: error instanceof Error ? error.message : String(error),
+    });
+    return true;
+  }
+}
+
+/** Deletes an OpenAI file. Best effort: a failure is logged, never thrown. */
+export async function deleteSkillOpenAiFile(fileId: string | undefined): Promise<void> {
+  if (!fileId) return;
+  try {
+    await OpenAIV1Instance().files.delete(fileId);
+    logInfo("agent skills: old OpenAI file deleted", { fileId });
+  } catch (error) {
+    if (isNotFound(error)) return;
+    logWarn("agent skills: could not delete old OpenAI file", {
+      fileId,
+      error: error instanceof Error ? error.message : String(error),
+    });
+  }
+}
+
+/** Reads the current row, so a concurrent writer's file id is seen. */
+async function readSkillRow(skill: PersonaSkillModel): Promise<PersonaSkillModel | undefined> {
+  try {
+    const { resource } = await HistoryContainer()
+      .item(skill.id, skill.userId)
+      .read<PersonaSkillModel>();
+    return resource ?? undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Returns the OpenAI file id of this skill version, uploading the zip only
+ * when there is none yet or (with `verify`) when the cached file is gone.
+ * The id is stored on the PERSONA_SKILL row, so the next chat reuses it.
+ * Returns undefined when the upload fails; the caller skips that skill.
+ */
+export async function ensureSkillOpenAiFile(
+  skill: PersonaSkillModel,
+  options: { verify?: boolean } = {},
+): Promise<string | undefined> {
+  if (skill.openAiFileId) {
+    if (!options.verify || (await openAiFileExists(skill.openAiFileId))) {
+      return skill.openAiFileId;
+    }
+    logInfo("agent skills: cached OpenAI file is gone, uploading again", {
+      skill: skill.name,
+      fileId: skill.openAiFileId,
+    });
+  }
+
+  const buf = await readSkillArchive(skill);
+  const file = new File([new Uint8Array(buf)], skillArchiveFileName(skill.name), {
+    type: "application/zip",
+  });
+  const uploaded = await UploadFileForCodeInterpreter(file);
+  if (uploaded.status !== "OK") {
+    logError("agent skills: code interpreter upload failed", {
+      skill: skill.name,
+      errors: uploaded.errors,
+    });
+    return undefined;
+  }
+  const newId = uploaded.response.id;
+
+  // Store it on the row, unless the row moved on meanwhile: the skill was
+  // replaced or deleted, or another chat cached a different id first.
+  const current = await readSkillRow(skill);
+  if (!current || current.blobName !== skill.blobName) {
+    await deleteSkillOpenAiFile(newId);
+    return current ? ensureSkillOpenAiFile(current) : undefined;
+  }
+  if (current.openAiFileId && current.openAiFileId !== skill.openAiFileId) {
+    await deleteSkillOpenAiFile(newId);
+    skill.openAiFileId = current.openAiFileId;
+    return current.openAiFileId;
+  }
+  await HistoryContainer().items.upsert<PersonaSkillModel>({
+    ...current,
+    openAiFileId: newId,
+  });
+  skill.openAiFileId = newId;
+  logInfo("agent skills: archive uploaded for code interpreter", {
+    skill: skill.name,
+    fileId: newId,
+    bytes: buf.length,
+  });
+  return newId;
+}
+
+/**
+ * The code interpreter files for a new chat with the agent: one per skill,
+ * reusing the cached OpenAI file of the skill version (checked once here,
+ * re-uploaded when gone). Same mechanism as the agent's code interpreter
+ * documents (persona-service CreatePersonaChat): the files become the
+ * thread's attachedFiles. A failed skill is logged and skipped.
  */
 export async function uploadSkillArchivesForCodeInterpreter(
   skills: PersonaSkillModel[],
@@ -227,26 +352,11 @@ export async function uploadSkillArchivesForCodeInterpreter(
   const results = await Promise.all(
     skills.map(async (skill): Promise<AttachedFileModel | undefined> => {
       try {
-        const buf = await readSkillArchive(skill);
-        const file = new File([new Uint8Array(buf)], skillArchiveFileName(skill.name), {
-          type: "application/zip",
-        });
-        const uploaded = await UploadFileForCodeInterpreter(file);
-        if (uploaded.status !== "OK") {
-          logError("agent skills: code interpreter upload failed", {
-            skill: skill.name,
-            errors: uploaded.errors,
-          });
-          return undefined;
-        }
-        logInfo("agent skills: archive uploaded for code interpreter", {
-          skill: skill.name,
-          fileId: uploaded.response.id,
-          bytes: buf.length,
-        });
+        const fileId = await ensureSkillOpenAiFile(skill, { verify: true });
+        if (!fileId) return undefined;
         return {
-          id: uploaded.response.id,
-          name: uploaded.response.name,
+          id: fileId,
+          name: skillArchiveFileName(skill.name),
           type: "code-interpreter",
           uploadedAt: new Date(),
         };
@@ -260,4 +370,26 @@ export async function uploadSkillArchivesForCodeInterpreter(
     }),
   );
   return results.filter((r): r is AttachedFileModel => r !== undefined);
+}
+
+/**
+ * After a failed container creation: checks every cached skill file and
+ * re-uploads the missing ones. Returns true when at least one id changed,
+ * so the caller can retry once with the new ids.
+ */
+export async function refreshSkillOpenAiFiles(skills: PersonaSkillModel[]): Promise<boolean> {
+  let changed = false;
+  for (const skill of skills) {
+    const before = skill.openAiFileId;
+    try {
+      const after = await ensureSkillOpenAiFile(skill, { verify: true });
+      if (after && after !== before) changed = true;
+    } catch (error) {
+      logError("agent skills: refresh of OpenAI file failed", {
+        skill: skill.name,
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+  }
+  return changed;
 }

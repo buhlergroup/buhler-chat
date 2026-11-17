@@ -3,6 +3,7 @@ import {
   buildSkillCatalogPrompt,
   canEditPersonaSkills,
   canUsePersonaSkills,
+  resolveSkillCodeInterpreterFiles,
   skillArchiveFileName,
 } from "../skill-models";
 
@@ -39,10 +40,64 @@ describe("canUsePersonaSkills — same rule as opening the agent", () => {
   });
 });
 
-describe("canEditPersonaSkills — owner only", () => {
-  it("only the owner may change skills", () => {
-    expect(canEditPersonaSkills({ userId: OWNER }, OWNER)).toBe(true);
-    expect(canEditPersonaSkills({ userId: OWNER }, OTHER)).toBe(false);
+describe("canEditPersonaSkills — owner or admin", () => {
+  it("the owner may change skills", () => {
+    expect(canEditPersonaSkills({ userId: OWNER }, OWNER, false)).toBe(true);
+  });
+
+  it("an admin may change skills of any agent", () => {
+    expect(canEditPersonaSkills({ userId: OWNER }, OTHER, true)).toBe(true);
+  });
+
+  it("other users may not", () => {
+    expect(canEditPersonaSkills({ userId: OWNER }, OTHER, false)).toBe(false);
+  });
+});
+
+describe("resolveSkillCodeInterpreterFiles", () => {
+  const attached = [
+    { id: "file-old", name: "skill-demo.zip" },
+    { id: "file-gone", name: "skill-removed.zip" },
+    { id: "file-user", name: "data.csv" },
+  ];
+
+  it("maps a skill archive onto the current file of the skill version", () => {
+    const out = resolveSkillCodeInterpreterFiles({
+      skills: [{ name: "demo", openAiFileId: "file-new" }],
+      attachedFiles: attached,
+      requestedFileIds: ["file-user", "file-old"],
+    });
+    expect(out.fileIds).toEqual(["file-user", "file-new"]);
+    expect(out.skillsInCodeInterpreter).toEqual(["demo"]);
+  });
+
+  it("drops the archive of a deleted or no longer usable skill", () => {
+    const out = resolveSkillCodeInterpreterFiles({
+      skills: [{ name: "demo", openAiFileId: "file-old" }],
+      attachedFiles: attached,
+      requestedFileIds: ["file-old", "file-gone", "file-user"],
+    });
+    expect(out.fileIds).toEqual(["file-old", "file-user"]);
+    expect(out.skillsInCodeInterpreter).toEqual(["demo"]);
+  });
+
+  it("keeps the requested id when the skill has no cached file yet", () => {
+    const out = resolveSkillCodeInterpreterFiles({
+      skills: [{ name: "demo" }],
+      attachedFiles: attached,
+      requestedFileIds: ["file-old"],
+    });
+    expect(out.fileIds).toEqual(["file-old"]);
+  });
+
+  it("passes unknown ids and non-skill files through", () => {
+    const out = resolveSkillCodeInterpreterFiles({
+      skills: [],
+      attachedFiles: attached,
+      requestedFileIds: ["file-user", "file-new-upload"],
+    });
+    expect(out.fileIds).toEqual(["file-user", "file-new-upload"]);
+    expect(out.skillsInCodeInterpreter).toEqual([]);
   });
 });
 

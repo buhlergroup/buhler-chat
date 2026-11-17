@@ -62,10 +62,13 @@ import {
   FindSecureHeaderValue,
 } from "@/features/extensions-page/extension-services/extension-service";
 import { logError, logInfo, logWarn } from "@/features/common/services/logger";
-import { loadUsableSkills } from "@/features/persona-page/persona-services/skills/persona-skill-store";
+import {
+  loadUsableSkills,
+  refreshSkillOpenAiFiles,
+} from "@/features/persona-page/persona-services/skills/persona-skill-store";
 import {
   buildSkillCatalogPrompt,
-  skillArchiveFileName,
+  resolveSkillCodeInterpreterFiles,
 } from "@/features/persona-page/persona-services/skills/skill-models";
 import { type UserPrompt } from "@/features/chat-page/chat-services/models";
 
@@ -271,18 +274,21 @@ export async function POST(req: Request) {
   // Agent skills (personas only), filtered by the access rule. The catalog
   // (names + descriptions) joins the persona message: both are fixed for the
   // life of the thread unless the owner changes the skills, so the prefix
-  // stays cacheable. A skill's zip counts as "in the code interpreter" when
-  // its archive is among this turn's attached code-interpreter files.
+  // stays cacheable. The skill archives among this turn's code interpreter
+  // files are mapped onto the CURRENT OpenAI file of each skill version (a
+  // replaced skill's old file is deleted; a deleted skill's file is dropped).
   const agentSkills = await loadUsableSkills(ctx.thread.personaId);
-  const turnCiFileIds = new Set(payload.codeInterpreterFileIds ?? []);
+  const resolveSkillFiles = () =>
+    ctx.thread.personaId
+      ? resolveSkillCodeInterpreterFiles({
+          skills: agentSkills,
+          attachedFiles: ctx.attachedFiles,
+          requestedFileIds: payload.codeInterpreterFileIds ?? [],
+        })
+      : { fileIds: payload.codeInterpreterFileIds ?? [], skillsInCodeInterpreter: [] };
+  const skillFiles = resolveSkillFiles();
   const skillsInCodeInterpreter = effectiveToolsSafe.codeInterpreter
-    ? agentSkills
-        .filter((s) =>
-          ctx.attachedFiles.some(
-            (f) => f.name === skillArchiveFileName(s.name) && turnCiFileIds.has(f.id),
-          ),
-        )
-        .map((s) => s.name)
+    ? skillFiles.skillsInCodeInterpreter
     : [];
   if (agentSkills.length > 0) {
     logInfo("/api/chat agent skills", {
@@ -367,8 +373,8 @@ export async function POST(req: Request) {
   // mint a fresh container with `container: { fileIds }`. Without this
   // the route used to (and now again does) ignore attached files,
   // surfacing as "I don't have this file" from the model.
-  const requestedCiFileIds = payload.codeInterpreterFileIds ?? [];
-  const requestedCiSignature = getFileIdsSignature(requestedCiFileIds);
+  let requestedCiFileIds = skillFiles.fileIds;
+  let requestedCiSignature = getFileIdsSignature(requestedCiFileIds);
   const persistedCiSignature = ctx.thread.codeInterpreterFileIdsSignature ?? "";
   const ciFilesChanged = requestedCiSignature !== persistedCiSignature;
   if (effectiveToolsSafe.codeInterpreter && ciFilesChanged) {
@@ -410,11 +416,26 @@ export async function POST(req: Request) {
   // so the steady state is still one container per thread and one stable tool
   // definition.
   if (effectiveToolsSafe.codeInterpreter) {
-    const containerId = await ensureCodeInterpreterContainer({
+    let containerId = await ensureCodeInterpreterContainer({
       threadId: ctx.thread.id,
       existingContainerId: ctx.thread.codeInterpreterContainerId,
       fileIds: requestedCiFileIds,
     });
+    // Attach error with skill archives: a cached skill file may be gone.
+    // Re-upload the missing ones and try once more with the new ids.
+    if (
+      !containerId &&
+      skillsInCodeInterpreter.length > 0 &&
+      (await refreshSkillOpenAiFiles(agentSkills))
+    ) {
+      requestedCiFileIds = resolveSkillFiles().fileIds;
+      requestedCiSignature = getFileIdsSignature(requestedCiFileIds);
+      containerId = await ensureCodeInterpreterContainer({
+        threadId: ctx.thread.id,
+        existingContainerId: ctx.thread.codeInterpreterContainerId,
+        fileIds: requestedCiFileIds,
+      });
+    }
     // Nothing to do when the id is unchanged: it is already on the thread and
     // already persisted. Only a new or replaced container needs a write.
     if (containerId && containerId !== ctx.thread.codeInterpreterContainerId) {

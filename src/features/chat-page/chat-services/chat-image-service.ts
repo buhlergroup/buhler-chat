@@ -85,10 +85,9 @@ export const GetThreadAndImageFromUrl = async (
     };
   }
 
-  // The images container also holds agent skill packages under
-  // "agent-skills/" (persona-skill-store.ts). Those are served only through
-  // the access-checked skill paths, never through this public image route,
-  // and no "." / ".." segment may steer the blob path elsewhere.
+  // Extra measure: agent skill packages live in their own private container
+  // (persona-skill-store.ts), but this route never serves an
+  // "agent-skills/" path, and no "." / ".." segment may steer the blob path.
   const blobPath = `${threadId}/${imgName}`.replace(/\\/g, "/");
   const segments = blobPath.split("/");
   if (

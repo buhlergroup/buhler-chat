@@ -24,6 +24,7 @@ import {
 } from "./skill-models";
 import { SkillZipError, validateSkillZip } from "./skill-zip";
 import {
+  deleteSkillOpenAiFile,
   querySkillsByPersonaId,
   resolveSkillAccess,
   skillBlobContainer,
@@ -32,7 +33,7 @@ import {
 
 const notAllowed = <T,>(): ServerActionResponse<T> => ({
   status: "UNAUTHORIZED",
-  errors: [{ message: "Only the owner of the agent can change its skills." }],
+  errors: [{ message: "Only the owner of the agent or an admin can change its skills." }],
 });
 
 const notFound = <T,>(): ServerActionResponse<T> => ({
@@ -170,6 +171,10 @@ export async function UploadPersonaSkill(
     if (replaced && replaced.blobName !== blobName) {
       await DeleteBlob(skillBlobContainer(), replaced.blobName);
     }
+    // The new version gets its own OpenAI file on first use; the old one
+    // goes (best effort). Running chats are mapped onto the new file by
+    // resolveSkillCodeInterpreterFiles.
+    if (replaced) await deleteSkillOpenAiFile(replaced.openAiFileId);
 
     logInfo("agent skills: skill saved", {
       personaId,
@@ -204,6 +209,7 @@ export async function DeletePersonaSkill(
 
     await HistoryContainer().item(skill.id, skill.userId).delete();
     await DeleteBlob(skillBlobContainer(), skill.blobName);
+    await deleteSkillOpenAiFile(skill.openAiFileId);
     logInfo("agent skills: skill deleted", { personaId, skillId, name: skill.name });
     return { status: "OK", response: true };
   } catch (error) {

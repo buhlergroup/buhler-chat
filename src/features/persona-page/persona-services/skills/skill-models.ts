@@ -77,6 +77,12 @@ export const PersonaSkillModelSchema = z.object({
   zipBytes: z.number().int().nonnegative(),
   uncompressedBytes: z.number().int().nonnegative(),
   blobName: z.string(),
+  /**
+   * Azure OpenAI file id of this skill version's zip (purpose "assistants"),
+   * uploaded once on first use and reused by every chat. A new version (new
+   * blobName) clears it; a missing file is re-uploaded.
+   */
+  openAiFileId: z.string().optional(),
   createdAt: z.coerce.date(),
   updatedAt: z.coerce.date(),
 });
@@ -114,15 +120,17 @@ export interface PersonaAccessFacts {
 }
 
 /**
- * Who may USE an agent's skills: everyone who can open the agent. This is
- * the rule of the agent list (FindAllPersonaForCurrentUser) and of the
- * extensions an agent carries:
+ * "Can this user open the agent?" — the rule of the agent list
+ * (FindAllPersonaForCurrentUser) and of the extensions an agent carries:
  *   - the owner, always;
  *   - an agent shared with a group: members of that group (the group wins
  *     over "published", as in the agent list filter);
  *   - otherwise: everyone when the agent is published.
+ *
+ * Local stand-in for the central `canOpenPersona` of the access fix; when
+ * that lands, canUsePersonaSkills below calls it instead (one-line swap).
  */
-export function canUsePersonaSkills(
+function canOpenPersonaRule(
   persona: PersonaAccessFacts,
   currentUserId: string,
   isAccessGroupMember: boolean,
@@ -132,12 +140,26 @@ export function canUsePersonaSkills(
   return persona.isPublished;
 }
 
-/** Who may ADD, REPLACE or DELETE skills: only the agent owner. */
+/** Who may USE an agent's skills: everyone who can open the agent. */
+export function canUsePersonaSkills(
+  persona: PersonaAccessFacts,
+  currentUserId: string,
+  isAccessGroupMember: boolean,
+): boolean {
+  return canOpenPersonaRule(persona, currentUserId, isAccessGroupMember);
+}
+
+/**
+ * Who may ADD, REPLACE or DELETE skills: the agent owner and admins — the
+ * same rule as editing the agent itself (EnsurePersonaOperation) and as
+ * extensions (EnsureExtensionOperation).
+ */
 export function canEditPersonaSkills(
   persona: Pick<PersonaAccessFacts, "userId">,
   currentUserId: string,
+  isAdmin: boolean,
 ): boolean {
-  return persona.userId === currentUserId;
+  return isAdmin || persona.userId === currentUserId;
 }
 
 // ---------------------------------------------------------------------------
@@ -167,4 +189,42 @@ export function buildSkillCatalogPrompt(
     "then follow its instructions. Load files of the skill with `load_skill` and `path`, or use them in the code interpreter as `load_skill` explains.\n" +
     lines.join("\n")
   );
+}
+
+/**
+ * Maps the code interpreter files a chat turn asks for onto the CURRENT
+ * skill archives of the agent.
+ *
+ * A thread keeps the attached-file list it got at chat start. When the
+ * owner replaces a skill, the old OpenAI file is deleted, so the stored id
+ * would make the container creation fail. Here every attached file whose
+ * name is a skill archive (`skill-<name>.zip`) is swapped for the current
+ * file id of that skill, and dropped when the skill no longer exists or the
+ * user may no longer use it. Other files pass through unchanged. The result
+ * keeps the request order, so the signature stays stable across turns.
+ */
+export function resolveSkillCodeInterpreterFiles(input: {
+  skills: ReadonlyArray<Pick<PersonaSkillModel, "name" | "openAiFileId">>;
+  attachedFiles: ReadonlyArray<{ id: string; name: string }>;
+  requestedFileIds: ReadonlyArray<string>;
+}): { fileIds: string[]; skillsInCodeInterpreter: string[] } {
+  const nameById = new Map(input.attachedFiles.map((f) => [f.id, f.name]));
+  const skillByArchive = new Map(
+    input.skills.map((s) => [skillArchiveFileName(s.name), s]),
+  );
+  const fileIds: string[] = [];
+  const inCi = new Set<string>();
+  for (const id of input.requestedFileIds) {
+    const name = nameById.get(id);
+    if (!name || !/^skill-[a-z0-9-]+\.zip$/.test(name)) {
+      fileIds.push(id);
+      continue;
+    }
+    const skill = skillByArchive.get(name);
+    if (!skill) continue; // skill deleted or no longer usable: drop the stale file
+    const current = skill.openAiFileId ?? id;
+    if (!fileIds.includes(current)) fileIds.push(current);
+    inCi.add(skill.name);
+  }
+  return { fileIds, skillsInCodeInterpreter: [...inCi].sort() };
 }

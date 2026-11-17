@@ -25,6 +25,7 @@ vi.mock("@/features/common/services/azure-storage", () => ({
   DeleteBlob: (...a: unknown[]) => DeleteBlob(...(a as [])),
 }));
 
+const deleteSkillOpenAiFile = vi.fn(async () => {});
 let access: { canUse: boolean; canEdit: boolean } | undefined;
 let existing: Array<Record<string, unknown>> = [];
 vi.mock("../persona-skill-store", () => ({
@@ -34,7 +35,8 @@ vi.mock("../persona-skill-store", () => ({
       : undefined,
   ),
   querySkillsByPersonaId: vi.fn(async () => existing),
-  skillBlobContainer: () => "images",
+  skillBlobContainer: () => "agent-skills",
+  deleteSkillOpenAiFile: (...a: unknown[]) => deleteSkillOpenAiFile(...(a as [])),
   skillBlobName: (p: string, s: string) => `agent-skills/${p}/${s}-1.zip`,
 }));
 
@@ -67,9 +69,10 @@ beforeEach(() => {
   itemDelete.mockClear();
   UploadBlob.mockClear();
   DeleteBlob.mockClear();
+  deleteSkillOpenAiFile.mockClear();
 });
 
-describe("UploadPersonaSkill — server-side owner check", () => {
+describe("UploadPersonaSkill — server-side owner/admin check", () => {
   it("stores the zip in blob and the metadata in Cosmos for the owner", async () => {
     const res = await UploadPersonaSkill(form(goodZip()));
     expect(res.status).toBe("OK");
@@ -112,11 +115,14 @@ describe("UploadPersonaSkill — server-side owner check", () => {
   });
 
   it("replaces a skill: same id, old blob deleted", async () => {
-    existing = [{ id: "s1", name: "demo-skill", blobName: "agent-skills/p1/s1-0.zip", createdAt: new Date() }];
+    existing = [{ id: "s1", name: "demo-skill", blobName: "agent-skills/p1/s1-0.zip", openAiFileId: "file-old", createdAt: new Date() }];
     const res = await UploadPersonaSkill(form(goodZip(), { replaceSkillId: "s1" }));
     expect(res.status).toBe("OK");
     expect((upsert.mock.calls[0][0] as { id: string }).id).toBe("s1");
-    expect(DeleteBlob).toHaveBeenCalledWith("images", "agent-skills/p1/s1-0.zip");
+    expect(DeleteBlob).toHaveBeenCalledWith("agent-skills", "agent-skills/p1/s1-0.zip");
+    expect(deleteSkillOpenAiFile).toHaveBeenCalledWith("file-old");
+    // The new version starts without a cached OpenAI file.
+    expect((upsert.mock.calls[0][0] as { openAiFileId?: string }).openAiFileId).toBeUndefined();
   });
 });
 
@@ -129,10 +135,11 @@ describe("DeletePersonaSkill / FindPersonaSkills", () => {
   });
 
   it("deletes row and blob for the owner", async () => {
-    existing = [{ id: "s1", name: "demo-skill", blobName: "b", userId: "owner-hash" }];
+    existing = [{ id: "s1", name: "demo-skill", blobName: "b", userId: "owner-hash", openAiFileId: "file-1" }];
     expect((await DeletePersonaSkill("p1", "s1")).status).toBe("OK");
     expect(itemDelete).toHaveBeenCalled();
-    expect(DeleteBlob).toHaveBeenCalledWith("images", "b");
+    expect(DeleteBlob).toHaveBeenCalledWith("agent-skills", "b");
+    expect(deleteSkillOpenAiFile).toHaveBeenCalledWith("file-1");
   });
 
   it("lists skills only for users who can open the agent", async () => {
