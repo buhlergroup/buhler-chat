@@ -66,6 +66,12 @@ vi.mock("../registry", () => ({
   buildToolset: vi.fn(async () => ({})),
 }));
 
+// The sub-agent loads ITS OWN extensions through the shared access rule.
+const mockResolveExtensions = vi.fn(async (..._a: unknown[]) => [] as unknown[]);
+vi.mock("@/features/extensions-page/extension-services/extension-runtime", () => ({
+  resolveExtensionsForChat: (...a: unknown[]) => mockResolveExtensions(...a),
+}));
+
 // ─── subject under test ───────────────────────────────────────────────────────
 import { callSubAgentTool } from "../call-sub-agent";
 import {
@@ -299,4 +305,27 @@ describe("callSubAgentTool – execute", () => {
     );
     expect(buildToolset).not.toHaveBeenCalled();
   });
+
+describe("callSubAgentTool — the sub-agent's own extensions", () => {
+  it("resolves the sub-agent persona's extensions with the access rule and hands them to its toolset", async () => {
+    const { buildToolset } = await import("../registry");
+    const resolved = [{ extension: { id: "mcp-1" }, headerSecrets: {} }];
+    mockResolveExtensions.mockResolvedValueOnce(resolved);
+    mockFindPersonaByID.mockResolvedValueOnce({
+      status: "OK",
+      response: { ...FAKE_PERSONA, extensionIds: ["mcp-1"] },
+    });
+    mockGenerateText.mockResolvedValueOnce({ text: "ok", usage: {} });
+
+    const t = callSubAgentTool(makeCtx({ extensions: [{ extension: { id: "thread-ext" } as never, headerSecrets: {} }] }));
+    await (t as unknown as { execute: (a: unknown, o: object) => Promise<unknown> }).execute(
+      { agent_id: "agent-1", task: "do it" },
+      {}
+    );
+
+    expect(mockResolveExtensions).toHaveBeenCalledWith({ extensionIds: ["mcp-1"], personaId: "agent-1" });
+    const subCtx = vi.mocked(buildToolset).mock.calls.at(-1)![0];
+    expect(subCtx.extensions).toBe(resolved);
+  });
+});
 });

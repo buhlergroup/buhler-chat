@@ -71,9 +71,8 @@ vi.mock("@/features/chat-page/chat-services/chat-thread-service", () => ({
   UpdateChatThreadCodeInterpreterContainer: (...a: unknown[]) =>
     mockUpdateContainer(...(a as [])),
 }));
-vi.mock("@/features/extensions-page/extension-services/extension-service", () => ({
-  FindAllExtensionForCurrentUserAndIds: (...a: unknown[]) => mockFindAllExtensions(...a),
-  FindSecureHeaderValue: vi.fn(async () => ({ status: "ERROR", errors: [] })),
+vi.mock("@/features/extensions-page/extension-services/extension-runtime", () => ({
+  resolveExtensionsForChat: (...a: unknown[]) => mockFindAllExtensions(...a),
 }));
 
 vi.mock("@/features/auth-page/helpers", () => ({
@@ -209,7 +208,7 @@ describe("/api/chat route (AI SDK v6)", () => {
       builtInTools: {},
       providerOptions: { openai: { promptCacheKey: "test", store: false } },
     });
-    mockFindAllExtensions.mockResolvedValue({ status: "OK", response: [] });
+    mockFindAllExtensions.mockResolvedValue([]);
   });
 
   it("returns 200 text/event-stream and fires persistAssistantFromFinishEvent when streamText.onEnd fires", async () => {
@@ -933,97 +932,50 @@ describe("/api/chat route (AI SDK v6)", () => {
     expect(streamText).not.toHaveBeenCalled();
   });
 
-  // ───────────────────────────────────────────────────────────────────────────
-  // Regression: AI SDK v6 migration (51118c8) dropped the filter that narrowed
-  // FindAllExtensionForCurrentUserAndIds' response down to the thread's
-  // configured extensions. That query is deliberately over-broad
-  // (isPublished=true OR userId=@userId OR id IN @ids) so it can resolve
-  // publisher-owned extensions too — without the filter, every published or
-  // user-owned extension the caller has access to (not just the ones wired to
-  // this thread/persona) got forwarded into buildToolset. Nested in this
-  // describe (not a sibling) so it inherits the beforeEach above, which
-  // resets all the route's mocked collaborators between tests.
-  // ───────────────────────────────────────────────────────────────────────────
-  describe("extension resolution filter", () => {
-    function makeExtension(id: string) {
-      return {
-        id,
-        name: `Extension ${id}`,
-        description: "d",
-        executionSteps: "s",
-        headers: [],
-        userId: "some-other-user",
-        isPublished: true,
-        createdAt: new Date(),
-        type: "EXTENSION",
-        functions: [],
-      };
-    }
-
-    it("only forwards extensions whose id is in the thread's configured extension list to buildToolset", async () => {
-      const configuredExtension = makeExtension("configured-ext");
-      // Simulates the over-broad query surfacing extensions the user owns or
-      // that are published, but that are NOT configured on this thread.
-      const leakedExtension = makeExtension("leaked-ext-not-on-thread");
-
-      mockLoadThreadContext.mockResolvedValue({
-        ...CTX,
-        extensions: ["configured-ext"],
-      });
-      mockFindAllExtensions.mockResolvedValue({
-        status: "OK",
-        response: [configuredExtension, leakedExtension],
-      });
-
-      const req = makeRequest({ message: "hello", id: "t1" });
-      await POST(req);
-
-      expect(mockFindAllExtensions).toHaveBeenCalledWith(["configured-ext"]);
-      expect(mockBuildToolset).toHaveBeenCalledOnce();
-      const passedExtensions = mockBuildToolset.mock.calls[0][0].extensions as Array<{
-        extension: { id: string };
-      }>;
-      expect(passedExtensions).toHaveLength(1);
-      expect(passedExtensions[0].extension.id).toBe("configured-ext");
-      expect(
-        passedExtensions.some((e) => e.extension.id === "leaked-ext-not-on-thread")
-      ).toBe(false);
+  // The route hands extension resolution to resolveExtensionsForChat, which
+  // applies the access rule (extension-access.ts, unit-tested there). Here we
+  // only pin the wiring: the thread's configured ids and the thread's agent
+  // go in, and exactly what comes back reaches buildToolset.
+  describe("extension resolution", () => {
+    const resolved = (id: string) => ({
+      extension: { id, name: id, functions: [], headers: [] },
+      headerSecrets: {},
     });
 
-    it("forwards no extensions when the thread has none configured, even if FindAllExtensionForCurrentUserAndIds is never called", async () => {
+    it("passes the thread's extension ids and agent to the access-checked resolver", async () => {
+      mockLoadThreadContext.mockResolvedValue({
+        ...CTX,
+        thread: { ...CTX.thread, id: "t1", personaId: "agent-7" },
+        extensions: ["configured-ext"],
+      });
+      mockFindAllExtensions.mockResolvedValue([resolved("configured-ext")]);
+
+      await POST(makeRequest({ message: "hello", id: "t1" }));
+
+      expect(mockFindAllExtensions).toHaveBeenCalledWith({
+        extensionIds: ["configured-ext"],
+        personaId: "agent-7",
+      });
+      const passed = mockBuildToolset.mock.calls[0][0].extensions as Array<{ extension: { id: string } }>;
+      expect(passed.map((e) => e.extension.id)).toEqual(["configured-ext"]);
+    });
+
+    it("forwards no extensions and skips the resolver when the thread has none", async () => {
       mockLoadThreadContext.mockResolvedValue({ ...CTX, extensions: [] });
 
-      const req = makeRequest({ message: "hello", id: "t1" });
-      await POST(req);
+      await POST(makeRequest({ message: "hello", id: "t1" }));
 
       expect(mockFindAllExtensions).not.toHaveBeenCalled();
-      expect(mockBuildToolset).toHaveBeenCalledOnce();
       expect(mockBuildToolset.mock.calls[0][0].extensions).toEqual([]);
     });
 
-    it("resolves multiple configured extensions and drops multiple leaked ones", async () => {
-      const configuredA = makeExtension("cfg-a");
-      const configuredB = makeExtension("cfg-b");
-      const leakedA = makeExtension("leak-a");
-      const leakedB = makeExtension("leak-b");
+    it("forwards nothing the resolver denied", async () => {
+      mockLoadThreadContext.mockResolvedValue({ ...CTX, extensions: ["denied-ext"] });
+      mockFindAllExtensions.mockResolvedValue([]);
 
-      mockLoadThreadContext.mockResolvedValue({
-        ...CTX,
-        extensions: ["cfg-a", "cfg-b"],
-      });
-      mockFindAllExtensions.mockResolvedValue({
-        status: "OK",
-        response: [leakedA, configuredA, leakedB, configuredB],
-      });
+      await POST(makeRequest({ message: "hello", id: "t1" }));
 
-      const req = makeRequest({ message: "hello", id: "t1" });
-      await POST(req);
-
-      const passedExtensions = mockBuildToolset.mock.calls[0][0].extensions as Array<{
-        extension: { id: string };
-      }>;
-      const passedIds = passedExtensions.map((e) => e.extension.id).sort();
-      expect(passedIds).toEqual(["cfg-a", "cfg-b"]);
+      expect(mockBuildToolset.mock.calls[0][0].extensions).toEqual([]);
     });
   });
 });

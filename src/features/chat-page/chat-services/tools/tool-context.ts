@@ -2,6 +2,7 @@ import "server-only";
 
 import type { DefaultTools } from "@/features/chat-page/chat-services/models";
 import type { ExtensionModel } from "@/features/extensions-page/extension-services/models";
+import type { McpConnectionOptions } from "@/features/extensions-page/extension-services/mcp/mcp-client";
 
 /**
  * Context threaded through buildToolset and every tool execute closure.
@@ -25,8 +26,17 @@ export interface ToolContext {
    * model answers in the user's local time; falls back to server UTC.
    */
   clientDateTime?: string;
-  /** Extension records resolved at the callsite (headers already in secrets). */
-  extensions: Array<{ extension: ExtensionModel; headerSecrets: Record<string, string> }>;
+  /**
+   * Extension records resolved at the callsite (headers already in secrets).
+   * Only extensions that passed the access rule in extension-access.ts.
+   * `mcp` holds the connection (URL, secret headers, OAuth) of a Remote MCP
+   * extension; it carries secret values and must never be logged.
+   */
+  extensions: Array<{
+    extension: ExtensionModel;
+    headerSecrets: Record<string, string>;
+    mcp?: McpConnectionOptions;
+  }>;
   /**
    * IDs of sub-agents (child personas) this thread can invoke. When empty
    * or undefined the sub-agent tools (`call_sub_agent`, `search_sub_agent`)

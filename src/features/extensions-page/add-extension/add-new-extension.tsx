@@ -25,6 +25,7 @@ import {
 import { AddFunction } from "./add-function";
 import { EndpointHeader } from "./endpoint-header";
 import { ErrorMessages } from "./error-messages";
+import { McpServerSection } from "./mcp-server";
 
 interface Props {}
 
@@ -61,7 +62,9 @@ export const AddExtension: FC<Props> = (props) => {
     >
       <SheetContent className="min-w-[680px] flex flex-col">
         <SheetHeader>
-          <SheetTitle>Extension</SheetTitle>
+          <SheetTitle>
+            {extension.kind === "mcp" ? "Remote MCP server" : "Extension"}
+          </SheetTitle>
         </SheetHeader>
         <form action={formAction} className="flex-1 flex flex-col ">
           <ScrollArea
@@ -71,6 +74,7 @@ export const AddExtension: FC<Props> = (props) => {
             <div className="pb-6 px-6 flex gap-8 flex-col">
               <ErrorMessages />
               <input type="hidden" name="id" defaultValue={extension.id} />
+              <input type="hidden" name="kind" value={extension.kind ?? "http"} />
               <div className="grid gap-2">
                 <Label>Name</Label>
                 <Input
@@ -100,8 +104,14 @@ export const AddExtension: FC<Props> = (props) => {
                   placeholder="Describe specialties and the steps to execute the extension"
                 />
               </div>
-              <EndpointHeader />
-              <AddFunction />
+              {extension.kind === "mcp" ? (
+                <McpServerSection />
+              ) : (
+                <>
+                  <EndpointHeader />
+                  <AddFunction />
+                </>
+              )}
             </div>
           </ScrollArea>
           <SheetFooter className="py-2 flex sm:justify-between flex-row">
