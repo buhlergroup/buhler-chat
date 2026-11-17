@@ -117,7 +117,7 @@ async function connectWith(
   return wrapClient(client);
 }
 
-const isAuthError = (error: unknown) =>
+export const isMcpAuthError = (error: unknown): boolean =>
   error instanceof UnauthorizedError || error instanceof McpOAuthRequiredError;
 
 /**
@@ -140,7 +140,7 @@ export const openMcpSession: McpSessionFactory = async (options) => {
   try {
     return await connectWith("streamable-http", options, fetchImpl);
   } catch (error) {
-    if (isAuthError(error)) throw error;
+    if (isMcpAuthError(error)) throw error;
     return connectWith("sse", options, fetchImpl);
   }
 };
@@ -171,8 +171,8 @@ export async function listMcpTools(
  * and the user: no URL (it may carry a query secret), no header, no body.
  */
 export function describeMcpError(error: unknown): string {
-  if (isAuthError(error)) {
-    return "The MCP server needs a sign-in. Ask the extension owner to connect it again.";
+  if (isMcpAuthError(error)) {
+    return "The MCP server needs a sign-in. Connect the extension and try again.";
   }
   const name = (error as { name?: string })?.name;
   const code = (error as { code?: number })?.code;

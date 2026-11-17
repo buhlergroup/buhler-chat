@@ -36,6 +36,8 @@ export interface ToolContext {
     extension: ExtensionModel;
     headerSecrets: Record<string, string>;
     mcp?: McpConnectionOptions;
+    /** Agent that granted access; carried into the per-user "Connect" action. */
+    personaId?: string;
   }>;
   /**
    * IDs of sub-agents (child personas) this thread can invoke. When empty

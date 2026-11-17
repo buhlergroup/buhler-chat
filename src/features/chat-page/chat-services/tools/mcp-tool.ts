@@ -6,6 +6,7 @@ import { logError, logInfo, logWarn } from "@/features/common/services/logger";
 import type { ExtensionModel, McpToolInfo } from "@/features/extensions-page/extension-services/models";
 import {
   describeMcpError,
+  isMcpAuthError,
   listMcpTools,
   openMcpSession,
   type McpCallResult,
@@ -90,12 +91,34 @@ export function mapMcpCallResult(result: McpCallResult): { text: string; structu
   return { text, structuredContent: result.structuredContent };
 }
 
+/**
+ * Tool output when an OAuth MCP server has no (valid) sign-in for the
+ * chatting user. Not an error: the model tells the user to connect, and the
+ * chat renders a "Connect <extension>" button from `mcpConnect`
+ * (tool-part-view.tsx) that starts the per-user sign-in.
+ */
+export interface McpConnectRequired {
+  text: string;
+  mcpConnect: { extensionId: string; extensionName: string; personaId?: string };
+}
+
+export const mcpConnectRequired = (
+  extension: Pick<ExtensionModel, "id" | "name">,
+  personaId?: string
+): McpConnectRequired => ({
+  text:
+    `The user is not connected to "${extension.name}". Ask the user to select ` +
+    `"Connect ${extension.name}" below this message, sign in, and then ask again.`,
+  mcpConnect: { extensionId: extension.id, extensionName: extension.name, personaId },
+});
+
 /** One MCP server tool as an AI SDK tool. Every call opens its own short session. */
 export function mcpTool(
   extension: ExtensionModel,
   info: McpToolInfo,
   connection: McpConnectionOptions,
-  openSession: McpSessionFactory = openMcpSession
+  openSession: McpSessionFactory = openMcpSession,
+  personaId?: string
 ): Tool {
   return tool({
     description: truncate(info.description ?? `Tool ${info.name} of ${extension.name}`, MAX_DESCRIPTION_CHARS),
@@ -114,6 +137,13 @@ export function mcpTool(
           await session.close();
         }
       } catch (error) {
+        if (extension.mcp?.auth === "oauth" && isMcpAuthError(error)) {
+          logInfo("mcpTool: user not connected to OAuth MCP server", {
+            extensionId: extension.id,
+            tool: info.name,
+          });
+          return mcpConnectRequired(extension, personaId);
+        }
         // Log the host only: the URL can carry a query-string secret.
         logError("mcpTool: call failed", {
           extensionId: extension.id,
@@ -149,7 +179,8 @@ export function mcpTool(
 export async function mcpExtensionTools(
   extension: ExtensionModel,
   connection: McpConnectionOptions,
-  openSession: McpSessionFactory = openMcpSession
+  openSession: McpSessionFactory = openMcpSession,
+  personaId?: string
 ): Promise<Array<[string, Tool]>> {
   const config = extension.mcp;
   if (!config) return [];
@@ -174,6 +205,6 @@ export async function mcpExtensionTools(
 
   return filterMcpTools(tools, config.toolAllowList).map((info) => [
     buildExtensionToolKey(extension.id, info.name),
-    mcpTool(extension, info, connection, openSession),
+    mcpTool(extension, info, connection, openSession, personaId),
   ]);
 }

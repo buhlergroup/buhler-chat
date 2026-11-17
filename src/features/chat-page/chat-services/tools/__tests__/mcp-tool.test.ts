@@ -119,6 +119,22 @@ describe("mcpExtensionTools", () => {
     expect((error as Error).message).not.toContain("fake");
   });
 
+  it("does not fail for an OAuth server the user has not connected: returns the Connect action", async () => {
+    session.callTool = vi.fn(async () => {
+      throw new UnauthorizedError("no token");
+    });
+    const [[, t]] = await mcpExtensionTools(
+      extension({ toolAllowList: ["get_price"], auth: "oauth" }),
+      connection,
+      openSession,
+      "agent-9"
+    );
+    expect(await execute(t, {})).toEqual({
+      text: expect.stringContaining('Connect Market'),
+      mcpConnect: { extensionId: "AbCdEfGh000000000000000000000000000", extensionName: "Market", personaId: "agent-9" },
+    });
+  });
+
   it("maps a timeout", async () => {
     session.callTool = vi.fn(async () => {
       throw Object.assign(new Error("Request timed out"), { code: -32001 });

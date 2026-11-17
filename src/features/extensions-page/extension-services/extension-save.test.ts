@@ -68,30 +68,24 @@ describe("planMcpConfig", () => {
     expect(plan.errors).toEqual(["Enter a value for secret TOKEN"]);
   });
 
-  it("deletes removed secrets and never trusts browser-sent tools or connection state", () => {
+  it("deletes removed secrets and never trusts a browser-sent tool list", () => {
     const stored = baseMcp({
       secrets: [{ id: "s1", name: "A", value: MASK, placement: "bearer" }],
       tools: [{ name: "stored_tool" }],
       auth: "oauth",
-      oauth: { connected: true },
     });
     const { config, plan } = planMcpConfig(
       "ext1",
-      baseMcp({
-        tools: [{ name: "injected" }],
-        auth: "oauth",
-        oauth: { connected: true },
-      }),
+      baseMcp({ tools: [{ name: "injected" }], auth: "oauth" }),
       stored,
       newId
     );
     expect(plan.deletes).toEqual(["s1"]);
     expect(config.tools).toEqual([{ name: "stored_tool" }]);
-    expect(config.oauth?.connected).toBe(true);
   });
 
-  it("resets tools and the OAuth connection when the server URL changes", () => {
-    const stored = baseMcp({ tools: [{ name: "t" }], auth: "oauth", oauth: { connected: true } });
+  it("resets the tool list when the server URL changes (per-user tokens are bound to the old URL)", () => {
+    const stored = baseMcp({ tools: [{ name: "t" }], auth: "oauth" });
     const { config, plan, connectionChanged } = planMcpConfig(
       "ext1",
       baseMcp({ url: "https://other.example.com/mcp", auth: "oauth" }),
@@ -100,8 +94,7 @@ describe("planMcpConfig", () => {
     );
     expect(connectionChanged).toBe(true);
     expect(config.tools).toBeUndefined();
-    expect(config.oauth?.connected).toBe(false);
-    expect(plan.writes).toContainEqual({ name: "ext1-mcp-oauth-tokens", value: "null" });
+    expect(plan.writes).toEqual([]);
   });
 
   it("stores an OAuth client secret in Key Vault", () => {
@@ -127,6 +120,6 @@ describe("extensionSecretNames", () => {
           auth: "oauth",
         }),
       })
-    ).toEqual(["h", "s", "e-mcp-oauth-tokens", "e-mcp-oauth-client", "e-mcp-oauth-pending", "e-mcp-oauth-cs"]);
+    ).toEqual(["h", "s", "e-mcp-oauth-client", "e-mcp-oauth-cs"]);
   });
 });

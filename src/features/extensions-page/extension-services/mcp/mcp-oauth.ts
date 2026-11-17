@@ -7,7 +7,12 @@ import type {
   OAuthClientMetadata,
   OAuthTokens,
 } from "@modelcontextprotocol/sdk/shared/auth.js";
-import { mcpOAuthSecretNames, type SecretStore } from "../extension-secrets";
+import {
+  MCP_EXTENSION_TAG,
+  mcpOAuthSecretNames,
+  mcpOAuthUserSecretNames,
+  type SecretStore,
+} from "../extension-secrets";
 
 /** How long a started sign-in stays valid. */
 export const MCP_OAUTH_PENDING_TTL_MS = 10 * 60 * 1000;
@@ -16,21 +21,29 @@ export const MCP_OAUTH_CALLBACK_PATH = "/api/extensions/mcp/oauth/callback";
 
 export class McpOAuthRequiredError extends Error {
   constructor() {
-    super("The MCP server needs a sign-in. The extension owner must connect it again.");
+    super("The MCP server needs a sign-in. Connect the extension and try again.");
     this.name = "McpOAuthRequiredError";
   }
 }
 
-/** Sign-in started by the owner, kept until the callback arrives. */
+/** Sign-in started by one user, kept until the callback arrives. */
 export interface PendingMcpOAuth {
   state: string;
   codeVerifier?: string;
   userId: string;
+  /** Agent through which the user may use the extension (re-checked at the callback). */
+  personaId?: string;
+  /** Same-origin path to return to after the sign-in. */
+  returnTo?: string;
   createdAt: number;
 }
 
 export interface McpOAuthProviderOptions {
   extensionId: string;
+  /** The MCP server URL; tokens and client registrations of another URL are ignored. */
+  serverUrl: string;
+  /** Whose tokens: the chatting user, or the owner for the save-time tool list. */
+  userId: string;
   /** Pre-registered client (owner-provided); otherwise dynamic client registration. */
   clientId?: string;
   clientSecret?: string;
@@ -38,11 +51,11 @@ export interface McpOAuthProviderOptions {
   redirectUrl: string;
   store: SecretStore;
   /**
-   * interactive: the owner is starting a sign-in; the authorization URL is
+   * interactive: the user is starting a sign-in; the authorization URL is
    * captured instead of opened. Non-interactive (chat time): a missing or
    * expired token that cannot be refreshed fails with McpOAuthRequiredError.
    */
-  interactive?: { userId: string; state: string };
+  interactive?: { state: string; personaId?: string; returnTo?: string };
 }
 
 const parseJson = <T>(raw: string | undefined): T | undefined => {
@@ -70,24 +83,36 @@ export const safeEqual = (a: string, b: string): boolean => {
   return left.length === right.length && timingSafeEqual(left, right);
 };
 
+/** A same-origin path, or undefined. Blocks open redirects ("//host", "/\\host", schemes). */
+export const safeReturnPath = (value: unknown): string | undefined => {
+  if (typeof value !== "string" || value.length > 512) return undefined;
+  if (!/^\/(?![/\\])[A-Za-z0-9\-._~!$&'()*+,;=:@/?%]*$/.test(value)) return undefined;
+  return value;
+};
+
 /**
- * OAuth client provider for one Remote MCP extension, backed by Key Vault.
+ * OAuth client provider for one user of one Remote MCP extension, backed by
+ * Key Vault.
  *
- * The connection belongs to the extension, i.e. to its owner: every user who
- * may use the extension (directly, or through an agent they can open) calls
- * the MCP server with the owner's tokens. Tokens, the registered client and
- * the pending PKCE verifier are stored as Key Vault secrets and never reach
- * the browser.
+ * Each user signs in with their own account: tokens and the pending PKCE
+ * verifier are stored per (extension, user) under hashed names (no user id
+ * in a Key Vault name) and tagged with the extension id, so deleting the
+ * extension can delete them. The client registration is shared per
+ * extension: it identifies this app to the authorization server, not a user.
  *
  * Key Vault keeps deleted names reserved (soft delete), so these records are
  * overwritten with "null" instead of deleted while the extension exists.
  */
 export class KeyVaultMcpOAuthProvider implements OAuthClientProvider {
   private readonly names: ReturnType<typeof mcpOAuthSecretNames>;
+  private readonly userNames: ReturnType<typeof mcpOAuthUserSecretNames>;
+  private readonly tags: Record<string, string>;
   private authorizationUrl: URL | undefined;
 
   constructor(private readonly options: McpOAuthProviderOptions) {
     this.names = mcpOAuthSecretNames(options.extensionId);
+    this.userNames = mcpOAuthUserSecretNames(options.extensionId, options.userId);
+    this.tags = { [MCP_EXTENSION_TAG]: options.extensionId };
   }
 
   get redirectUrl(): string {
@@ -122,20 +147,34 @@ export class KeyVaultMcpOAuthProvider implements OAuthClientProvider {
         ...(this.options.clientSecret ? { client_secret: this.options.clientSecret } : {}),
       };
     }
-    return parseJson<OAuthClientInformationMixed>(await this.options.store.get(this.names.client));
+    const record = parseJson<{ serverUrl: string; info: OAuthClientInformationMixed }>(
+      await this.options.store.get(this.names.client)
+    );
+    return record?.serverUrl === this.options.serverUrl ? record.info : undefined;
   }
 
   async saveClientInformation(info: OAuthClientInformationMixed): Promise<void> {
     if (this.options.clientId) return;
-    await this.options.store.set(this.names.client, JSON.stringify(info));
+    await this.options.store.set(
+      this.names.client,
+      JSON.stringify({ serverUrl: this.options.serverUrl, info }),
+      this.tags
+    );
   }
 
   async tokens(): Promise<OAuthTokens | undefined> {
-    return parseJson<OAuthTokens>(await this.options.store.get(this.names.tokens));
+    const record = parseJson<{ serverUrl: string; tokens: OAuthTokens }>(
+      await this.options.store.get(this.userNames.tokens)
+    );
+    return record?.serverUrl === this.options.serverUrl ? record.tokens : undefined;
   }
 
   async saveTokens(tokens: OAuthTokens): Promise<void> {
-    await this.options.store.set(this.names.tokens, JSON.stringify(tokens));
+    await this.options.store.set(
+      this.userNames.tokens,
+      JSON.stringify({ serverUrl: this.options.serverUrl, tokens }),
+      this.tags
+    );
   }
 
   redirectToAuthorization(url: URL): void {
@@ -151,14 +190,16 @@ export class KeyVaultMcpOAuthProvider implements OAuthClientProvider {
     const pending: PendingMcpOAuth = {
       state: this.options.interactive.state,
       codeVerifier,
-      userId: this.options.interactive.userId,
+      userId: this.options.userId,
+      personaId: this.options.interactive.personaId,
+      returnTo: this.options.interactive.returnTo,
       createdAt: Date.now(),
     };
-    await this.options.store.set(this.names.pending, JSON.stringify(pending));
+    await this.options.store.set(this.userNames.pending, JSON.stringify(pending), this.tags);
   }
 
   async codeVerifier(): Promise<string> {
-    const pending = await readPendingMcpOAuth(this.options.store, this.options.extensionId);
+    const pending = await readPendingMcpOAuth(this.options.store, this.options.extensionId, this.options.userId);
     if (!pending?.codeVerifier) throw new McpOAuthRequiredError();
     return pending.codeVerifier;
   }
@@ -167,22 +208,38 @@ export class KeyVaultMcpOAuthProvider implements OAuthClientProvider {
     scope: "all" | "client" | "tokens" | "verifier" | "discovery"
   ): Promise<void> {
     if (scope === "all" || scope === "tokens") {
-      await this.options.store.set(this.names.tokens, "null");
+      await this.options.store.set(this.userNames.tokens, "null", this.tags);
     }
     if ((scope === "all" || scope === "client") && !this.options.clientId) {
-      await this.options.store.set(this.names.client, "null");
+      await this.options.store.set(this.names.client, "null", this.tags);
     }
     if (scope === "all" || scope === "verifier") {
-      await this.options.store.set(this.names.pending, "null");
+      await this.options.store.set(this.userNames.pending, "null", this.tags);
     }
   }
 }
 
 export async function readPendingMcpOAuth(
   store: SecretStore,
-  extensionId: string
+  extensionId: string,
+  userId: string
 ): Promise<PendingMcpOAuth | undefined> {
-  return parseJson<PendingMcpOAuth>(await store.get(mcpOAuthSecretNames(extensionId).pending));
+  return parseJson<PendingMcpOAuth>(
+    await store.get(mcpOAuthUserSecretNames(extensionId, userId).pending)
+  );
+}
+
+/** True when this user holds a token for this extension's current server URL. */
+export async function hasMcpUserTokens(
+  store: SecretStore,
+  extensionId: string,
+  serverUrl: string,
+  userId: string
+): Promise<boolean> {
+  const record = parseJson<{ serverUrl: string; tokens?: OAuthTokens }>(
+    await store.get(mcpOAuthUserSecretNames(extensionId, userId).tokens)
+  );
+  return record?.serverUrl === serverUrl && !!record.tokens?.access_token;
 }
 
 /**

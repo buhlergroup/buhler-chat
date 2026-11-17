@@ -45,11 +45,11 @@ export function planHeaders(
 }
 
 /**
- * Remote MCP settings. Secrets follow the header rules above. Server-managed
- * fields (discovered tools, OAuth connection state) are taken from the
- * stored extension, never from the browser. A change of URL, transport or
- * auth mode clears both: the tool list and the tokens belong to the old
- * server.
+ * Remote MCP settings. Secrets follow the header rules above. The
+ * discovered tool list is server-managed: taken from the stored extension,
+ * never from the browser, and cleared when URL, transport or auth mode
+ * change. OAuth tokens need no reset here: they are stored per user with
+ * the server URL they were issued for and are ignored for another URL.
  */
 export function planMcpConfig(
   extensionId: string,
@@ -95,14 +95,7 @@ export function planMcpConfig(
       clientId: input.oauth?.clientId || undefined,
       clientSecret,
       scopes: input.oauth?.scopes || undefined,
-      connected: connectionChanged ? false : stored?.oauth?.connected ?? false,
-      connectedAt: connectionChanged ? undefined : stored?.oauth?.connectedAt,
     };
-  }
-  if (connectionChanged && stored?.auth === "oauth") {
-    // Soft-deleted Key Vault names stay reserved, so overwrite instead of delete.
-    plan.writes.push({ name: names.tokens, value: "null" });
-    plan.writes.push({ name: names.client, value: "null" });
   }
 
   const config: McpConfigModel = {
@@ -118,7 +111,10 @@ export function planMcpConfig(
   return { config, plan, connectionChanged };
 }
 
-/** Every Key Vault entry an extension owns, for delete. */
+/**
+ * Key Vault entries of an extension known by name, for delete. Per-user
+ * OAuth records are found by their extension tag (SecretStore.removeTagged).
+ */
 export function extensionSecretNames(extension: {
   id: string;
   headers?: readonly HeaderModel[];
@@ -129,7 +125,7 @@ export function extensionSecretNames(extension: {
     names.push(...extension.mcp.secrets.map((s) => s.id));
     if (extension.mcp.auth === "oauth") {
       const oauth = mcpOAuthSecretNames(extension.id);
-      names.push(oauth.tokens, oauth.client, oauth.pending, oauth.clientSecret);
+      names.push(oauth.client, oauth.clientSecret);
     }
   }
   return names;

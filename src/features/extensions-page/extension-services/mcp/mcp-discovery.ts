@@ -40,7 +40,9 @@ export async function discoverMcpTools(
   openSession: McpSessionFactory = openMcpSession
 ): Promise<McpDiscoveryResult> {
   try {
-    const connection = await buildMcpConnection(extension, store);
+    // The stored tool list is the OWNER's view of the server (owner secrets
+    // and, for OAuth servers, the owner's own sign-in).
+    const connection = await buildMcpConnection(extension, store, extension.userId);
     if (!connection) return { ok: false, error: "This extension is not a Remote MCP server." };
     const tools = await listMcpTools(connection, openSession);
     return { ok: true, tools: sanitizeDiscoveredTools(tools) };

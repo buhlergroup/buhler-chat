@@ -24,7 +24,7 @@ import { logWarn } from "@/features/common/services/logger";
 import { uniqueId } from "@/features/common/util";
 import { AI_NAME, CHAT_DEFAULT_PERSONA } from "@/features/theme/theme-config";
 import { SqlQuerySpec } from "@azure/cosmos";
-import { keyVaultSecretStore, type SecretStore } from "./extension-secrets";
+import { keyVaultSecretStore, MCP_EXTENSION_TAG, type SecretStore } from "./extension-secrets";
 import {
   extensionSecretNames,
   planHeaders,
@@ -32,6 +32,7 @@ import {
   type SecretPlan,
 } from "./extension-save";
 import { discoverMcpTools } from "./mcp/mcp-discovery";
+import { hasMcpUserTokens } from "./mcp/mcp-oauth";
 import {
   EXTENSION_ATTRIBUTE,
   ExtensionModel,
@@ -134,7 +135,13 @@ const discoverAfterSave = async (
   store: SecretStore
 ): Promise<ExtensionModel> => {
   if (extensionKind(extension) !== "mcp" || !extension.mcp) return extension;
-  if (extension.mcp.auth === "oauth" && !extension.mcp.oauth?.connected) return extension;
+  // OAuth servers: the stored list is the owner's, so it needs the owner's sign-in.
+  if (
+    extension.mcp.auth === "oauth" &&
+    !(await hasMcpUserTokens(store, extension.id, extension.mcp.url, extension.userId))
+  ) {
+    return extension;
+  }
   const result = await discoverMcpTools(extension, store);
   if (!result.ok) return extension;
   const updated: ExtensionModel = {
@@ -275,6 +282,18 @@ export const DeleteExtension = async (
           store.remove(name).catch(() => undefined)
         )
       );
+      // Per-user OAuth tokens and pending sign-ins of every user, found by
+      // their extension tag. Best effort: a failure (e.g. no "list"
+      // permission on the vault) must not block the delete; the records are
+      // useless without the extension and are logged for cleanup.
+      if (extensionResponse.response.kind === "mcp") {
+        await store.removeTagged(MCP_EXTENSION_TAG, id).catch((error) =>
+          logWarn("DeleteExtension: per-user MCP sign-ins not removed", {
+            extensionId: id,
+            error: String(error),
+          })
+        );
+      }
 
       const { resource } = await HistoryContainer()
         .item(id, extensionResponse.response.userId)

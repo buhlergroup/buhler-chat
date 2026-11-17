@@ -11,7 +11,9 @@ import {
 } from "@/features/ui/sheet";
 import { Switch } from "@/features/ui/switch";
 import { Globe, PocketKnife } from "lucide-react";
-import { FC } from "react";
+import { FC, useEffect, useState } from "react";
+import { GetMcpConnections } from "@/features/extensions-page/extension-services/mcp/mcp-service";
+import { McpConnectButton } from "@/features/extensions-page/mcp-connect-button";
 import {
   AddExtensionToChatThread,
   RemoveExtensionFromChatThread,
@@ -26,6 +28,8 @@ interface Props {
   installedExtensionIds: Array<string>;
   disabled: boolean;
   parent: string;
+  /** Agent of the chat: OAuth MCP sign-ins may be granted through it. */
+  personaId?: string;
 }
 
 export const ExtensionDetail: FC<Props> = (props) => {
@@ -44,11 +48,34 @@ export const ExtensionDetail: FC<Props> = (props) => {
     }
   };
 
+  // Per-user sign-ins of OAuth MCP extensions on this chat (chat only).
+  const [open, setOpen] = useState(false);
+  const [connections, setConnections] = useState<Record<string, boolean>>({});
+  const mcpIdsKey = props.extensions
+    .filter((e) => e.kind === "mcp" && props.installedExtensionIds?.includes(e.id))
+    .map((e) => e.id)
+    .join(",");
+  useEffect(() => {
+    if (!open || props.parent !== "chat" || !mcpIdsKey) return;
+    let cancelled = false;
+    GetMcpConnections(mcpIdsKey.split(","), props.personaId)
+      .then((r) => {
+        if (cancelled || r.status !== "OK") return;
+        setConnections(
+          Object.fromEntries(r.response.filter((c) => c.oauth).map((c) => [c.id, c.connected]))
+        );
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, [open, mcpIdsKey, props.parent, props.personaId]);
+
   const installedCount = props.installedExtensionIds?.length ?? 0;
   const totalCount = props.extensions.length;
 
   return (
-    <Sheet>
+    <Sheet open={open} onOpenChange={setOpen}>
       <SheetTrigger asChild>
         <Button
           variant={"outline"}
@@ -85,6 +112,20 @@ export const ExtensionDetail: FC<Props> = (props) => {
                     <div className="text-muted-foreground">
                       {extension.description}
                     </div>
+                    {extension.id in connections && (
+                      <div>
+                        <McpConnectButton
+                          key={String(connections[extension.id])}
+                          extensionId={extension.id}
+                          extensionName={extension.name}
+                          personaId={props.personaId}
+                          connected={connections[extension.id]}
+                          onChange={(value) =>
+                            setConnections((prev) => ({ ...prev, [extension.id]: value }))
+                          }
+                        />
+                      </div>
+                    )}
                   </div>
                   <div>
                     {extension.name !== "Bing Search" ||

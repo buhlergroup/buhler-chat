@@ -13,6 +13,9 @@ import { z } from "zod";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 
+vi.mock("@/features/common/services/cosmos", () => ({ HistoryContainer: vi.fn() }));
+vi.mock("@/features/auth-page/helpers", () => ({ userHashedId: vi.fn() }));
+vi.mock("@/features/persona-page/persona-services/access-group-service", () => ({ AccessGroupById: vi.fn() }));
 vi.mock("@/features/common/services/logger", () => ({
   logInfo: vi.fn(),
   logWarn: vi.fn(),
@@ -26,7 +29,8 @@ import { applyMcpSecrets } from "./mcp-secrets";
 import { mcpExtensionTools } from "@/features/chat-page/chat-services/tools/mcp-tool";
 import type { ExtensionModel } from "../models";
 import { auth } from "@modelcontextprotocol/sdk/client/auth.js";
-import { KeyVaultMcpOAuthProvider } from "./mcp-oauth";
+import { createMcpOAuthState, KeyVaultMcpOAuthProvider, readPendingMcpOAuth } from "./mcp-oauth";
+import { completeMcpOAuthCallback } from "./mcp-oauth-callback";
 import type { SecretStore } from "../extension-secrets";
 
 const FAKE_TOKEN = "fake-local-token";
@@ -124,10 +128,12 @@ describe("Remote MCP against a local fake server (real SDK on both sides)", () =
   });
 });
 
-describe("OAuth sign-in against a local fake MCP server + authorization server", () => {
+describe("Per-user OAuth against a local fake MCP server + authorization server", () => {
   let oauthServer: Server;
   let origin: string;
-  const issued = { code: "fake-code", token: "fake-access-token" };
+  /** access token → user it was issued to; only these may call /mcp. */
+  const validTokens = new Map<string, string>();
+  let tokenCounter = 0;
   let lastTokenRequest = "";
 
   beforeAll(async () => {
@@ -164,10 +170,24 @@ describe("OAuth sign-in against a local fake MCP server + authorization server",
       }
       if (url.pathname === "/token" && req.method === "POST") {
         lastTokenRequest = await readBody();
-        return json(200, { access_token: issued.token, token_type: "Bearer", refresh_token: "fake-refresh", expires_in: 3600 });
+        const form = new URLSearchParams(lastTokenRequest);
+        // The fake "code" names the user who signed in at the authorization server.
+        const user =
+          form.get("grant_type") === "refresh_token"
+            ? (form.get("refresh_token") ?? "").replace(/^refresh-/, "")
+            : (form.get("code") ?? "").replace(/^code-/, "");
+        const accessToken = `access-${user}-${++tokenCounter}`;
+        validTokens.set(accessToken, user);
+        return json(200, {
+          access_token: accessToken,
+          token_type: "Bearer",
+          refresh_token: `refresh-${user}`,
+          expires_in: 3600,
+        });
       }
       if (url.pathname === "/mcp") {
-        if (req.headers.authorization !== `Bearer ${issued.token}`) {
+        const token = (req.headers.authorization ?? "").replace(/^Bearer /, "");
+        if (!validTokens.has(token)) {
           res
             .writeHead(401, {
               "www-authenticate": `Bearer resource_metadata="${origin}/.well-known/oauth-protected-resource/mcp"`,
@@ -197,62 +217,156 @@ describe("OAuth sign-in against a local fake MCP server + authorization server",
 
   const memoryStore = (): SecretStore => {
     const data = new Map<string, string>();
-    return { get: async (n) => data.get(n), set: async (n, v) => void data.set(n, v), remove: async (n) => void data.delete(n) };
+    return {
+      get: async (n) => data.get(n),
+      set: async (n, v) => void data.set(n, v),
+      remove: async (n) => void data.delete(n),
+      removeTagged: async () => 0,
+    };
   };
   const looseFetch = () =>
     createGuardedFetch({ timeoutMs: 5_000, maxResponseBytes: 1_000_000, assertUrl: async () => {} });
-
-  it("registers, signs in with PKCE, stores tokens, then lists tools with them", async () => {
-    const store = memoryStore();
-    const redirectUrl = "https://chat.example.com/api/extensions/mcp/oauth/callback";
-
-    // 1. Owner starts the sign-in: dynamic registration + authorization URL.
-    const starting = new KeyVaultMcpOAuthProvider({
-      extensionId: "ext1",
+  const redirectUrl = "https://chat.example.com/api/extensions/mcp/oauth/callback";
+  const EXT_ID = "OAuthExt000000000000000000000000000";
+  const extension = (): ExtensionModel =>
+    ({
+      id: EXT_ID,
+      name: "Fake OAuth server",
+      userId: "owner",
+      kind: "mcp",
+      mcp: {
+        url: `${origin}/mcp`,
+        transport: "streamable-http",
+        secrets: [],
+        toolAllowList: [],
+        auth: "oauth",
+        tools: [{ name: "get_price", inputSchema: { type: "object", properties: { symbol: { type: "string" } } } }],
+      },
+    }) as unknown as ExtensionModel;
+  const provider = (store: SecretStore, userId: string, interactive?: { state: string; personaId?: string }) =>
+    new KeyVaultMcpOAuthProvider({
+      extensionId: EXT_ID,
+      serverUrl: `${origin}/mcp`,
+      userId,
       redirectUrl,
       store,
-      interactive: { userId: "owner", state: "ext1.state" },
+      interactive,
     });
-    // The fake authorization server runs on http; the provider demands https
-    // for real servers, so loosen only that check for this test.
+  /** Starts a sign-in like StartMcpOAuth; returns the state. http fake server: capture the URL ourselves. */
+  const startSignIn = async (store: SecretStore, userId: string, personaId?: string) => {
+    const state = createMcpOAuthState(EXT_ID);
+    const p = provider(store, userId, { state, personaId });
     const captured: URL[] = [];
-    starting.redirectToAuthorization = (u: URL) => void captured.push(u);
-    expect(await auth(starting, { serverUrl: `${origin}/mcp`, fetchFn: looseFetch() })).toBe("REDIRECT");
-    const authorizeUrl = captured[0];
-    expect(authorizeUrl.pathname).toBe("/authorize");
-    expect(authorizeUrl.searchParams.get("client_id")).toBe("dyn-client-1");
-    expect(authorizeUrl.searchParams.get("code_challenge_method")).toBe("S256");
-    expect(authorizeUrl.searchParams.get("state")).toBe("ext1.state");
-    expect(authorizeUrl.searchParams.get("redirect_uri")).toBe(redirectUrl);
+    p.redirectToAuthorization = (u: URL) => void captured.push(u);
+    expect(await auth(p, { serverUrl: `${origin}/mcp`, fetchFn: looseFetch() })).toBe("REDIRECT");
+    return { state, authorizeUrl: captured[0] };
+  };
+  const callbackDeps = (store: SecretStore, usable: boolean) => ({
+    store,
+    findUsableExtension: vi.fn(async () => (usable ? extension() : undefined)),
+    redirectUrl: () => redirectUrl,
+    fetchFn: looseFetch(),
+    refreshOwnerTools: vi.fn(async () => {}),
+  });
+  const callTool = async (store: SecretStore, userId: string) => {
+    const tools = Object.fromEntries(
+      await mcpExtensionTools(
+        extension(),
+        {
+          url: `${origin}/mcp`,
+          transport: "streamable-http",
+          headers: {},
+          authProvider: provider(store, userId),
+          fetch: looseFetch(),
+        },
+        openMcpSession,
+        "agent-1"
+      )
+    );
+    return (tools["OAuthExt_get_price"] as unknown as {
+      execute: (a: unknown, o: object) => Promise<unknown>;
+    }).execute({ symbol: "ABB" }, {});
+  };
 
-    // 2. Callback: exchange the code (PKCE verifier from the pending record).
-    const finishing = new KeyVaultMcpOAuthProvider({ extensionId: "ext1", redirectUrl, store });
-    expect(
-      await auth(finishing, { serverUrl: `${origin}/mcp`, authorizationCode: issued.code, fetchFn: looseFetch() })
-    ).toBe("AUTHORIZED");
+  it("user A connected, user B not: B gets the Connect action, B connects, then B's call works", async () => {
+    const store = memoryStore();
+
+    // User A signs in through the callback.
+    const a = await startSignIn(store, "userA", "agent-1");
+    expect(a.authorizeUrl.searchParams.get("code_challenge_method")).toBe("S256");
+    expect(a.authorizeUrl.searchParams.get("state")).toBe(a.state);
+    const aResult = await completeMcpOAuthCallback(
+      { code: "code-userA", state: a.state, userId: "userA" },
+      callbackDeps(store, true)
+    );
+    expect(aResult).toEqual({ ok: true, returnTo: undefined });
     expect(lastTokenRequest).toContain("code_verifier=");
-    expect(await finishing.tokens()).toMatchObject({ access_token: issued.token });
+    expect(await callTool(store, "userA")).toEqual({ text: "ABB: 42.00" });
 
-    // 3. Chat time: non-interactive provider, tools listed with the stored token.
-    const chatTime = new KeyVaultMcpOAuthProvider({ extensionId: "ext1", redirectUrl, store });
-    const tools = await listMcpTools({
-      url: `${origin}/mcp`,
-      transport: "streamable-http",
-      headers: {},
-      authProvider: chatTime,
-      fetch: looseFetch(),
+    // User B has no token: no failure, a Connect action for B.
+    expect(await callTool(store, "userB")).toEqual({
+      text: expect.stringContaining("Connect Fake OAuth server"),
+      mcpConnect: { extensionId: EXT_ID, extensionName: "Fake OAuth server", personaId: "agent-1" },
     });
-    expect(tools.map((t) => t.name)).toEqual(["get_price", "fail"]);
+
+    // B connects with B's own account; A's token is untouched.
+    const b = await startSignIn(store, "userB", "agent-1");
+    const bResult = await completeMcpOAuthCallback(
+      { code: "code-userB", state: b.state, userId: "userB" },
+      callbackDeps(store, true)
+    );
+    expect(bResult.ok).toBe(true);
+    const bTokens = await provider(store, "userB").tokens();
+    const aTokens = await provider(store, "userA").tokens();
+    expect(validTokens.get(bTokens!.access_token)).toBe("userB");
+    expect(validTokens.get(aTokens!.access_token)).toBe("userA");
+    expect(await callTool(store, "userB")).toEqual({ text: "ABB: 42.00" });
   });
 
-  it("fails with a sign-in error at chat time when no token is stored", async () => {
-    const chatTime = new KeyVaultMcpOAuthProvider({
-      extensionId: "ext2",
-      redirectUrl: "https://chat.example.com/cb",
-      store: memoryStore(),
+  it("refuses the callback for a user without access to the extension", async () => {
+    const store = memoryStore();
+    const c = await startSignIn(store, "userC");
+    const deps = callbackDeps(store, false);
+    const result = await completeMcpOAuthCallback({ code: "code-userC", state: c.state, userId: "userC" }, deps);
+    expect(result).toMatchObject({ ok: false, reason: "no-access" });
+    expect(await provider(store, "userC").tokens()).toBeUndefined();
+    // The pending sign-in is used up.
+    expect(await readPendingMcpOAuth(store, EXT_ID, "userC")).toBeUndefined();
+  });
+
+  it("refuses a callback whose state belongs to another user's sign-in", async () => {
+    const store = memoryStore();
+    const a = await startSignIn(store, "userA");
+    const result = await completeMcpOAuthCallback(
+      { code: "code-userX", state: a.state, userId: "userX" },
+      callbackDeps(store, true)
+    );
+    expect(result).toMatchObject({ ok: false, reason: "invalid-state" });
+  });
+
+  it("refreshes an expired access token through the SDK and stores the new one", async () => {
+    const store = memoryStore();
+    await provider(store, "userD").saveTokens({
+      access_token: "expired-token",
+      token_type: "Bearer",
+      refresh_token: "refresh-userD",
     });
-    await expect(
-      listMcpTools({ url: `${origin}/mcp`, transport: "auto", headers: {}, authProvider: chatTime, fetch: looseFetch() })
-    ).rejects.toThrow(/sign-in|Unauthorized/i);
+    expect(await callTool(store, "userD")).toEqual({ text: "ABB: 42.00" });
+    const refreshed = await provider(store, "userD").tokens();
+    expect(refreshed?.access_token).not.toBe("expired-token");
+    expect(validTokens.get(refreshed!.access_token)).toBe("userD");
+    expect(lastTokenRequest).toContain("grant_type=refresh_token");
+  });
+
+  it("the owner's connection feeds the save-time tool list", async () => {
+    const store = memoryStore();
+    const o = await startSignIn(store, "owner");
+    const deps = callbackDeps(store, true);
+    await completeMcpOAuthCallback({ code: "code-owner", state: o.state, userId: "owner" }, deps);
+    expect(deps.refreshOwnerTools).toHaveBeenCalledTimes(1);
+    const b = await startSignIn(store, "userB");
+    const depsB = callbackDeps(store, true);
+    await completeMcpOAuthCallback({ code: "code-userB", state: b.state, userId: "userB" }, depsB);
+    expect(depsB.refreshOwnerTools).not.toHaveBeenCalled();
   });
 });

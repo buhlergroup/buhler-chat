@@ -22,6 +22,7 @@ const fakeStore = (values: Record<string, string>): SecretStore => ({
   get: vi.fn(async (name: string) => values[name]),
   set: vi.fn(async () => {}),
   remove: vi.fn(async () => {}),
+  removeTagged: vi.fn(async () => 0),
 });
 
 const mcpExtension = (overrides: Partial<ExtensionModel> = {}): ExtensionModel => ({
@@ -113,7 +114,7 @@ describe("resolveExtensionsForChat", () => {
   it("adds an OAuth provider for an OAuth MCP server", async () => {
     const ext = mcpExtension({
       userId: "chat-user",
-      mcp: { ...mcpExtension().mcp!, secrets: [], auth: "oauth", oauth: { connected: true } },
+      mcp: { ...mcpExtension().mcp!, secrets: [], auth: "oauth", oauth: {} },
     });
     const result = await resolveExtensionsForChat(
       { extensionIds: [ext.id] },

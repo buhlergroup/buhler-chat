@@ -6,12 +6,15 @@ import { createGuardedFetch } from "./mcp-fetch";
 import {
   createMcpOAuthState,
   extensionIdFromMcpOAuthState,
+  hasMcpUserTokens,
   isPendingMcpOAuthValid,
   KeyVaultMcpOAuthProvider,
   McpOAuthRequiredError,
   MCP_OAUTH_PENDING_TTL_MS,
+  readPendingMcpOAuth,
+  safeReturnPath,
 } from "./mcp-oauth";
-import type { SecretStore } from "../extension-secrets";
+import { MCP_EXTENSION_TAG, mcpOAuthUserSecretNames, type SecretStore } from "../extension-secrets";
 import { McpSecretSchema } from "../models";
 
 const FAKE = "fake-secret-value-for-tests";
@@ -126,16 +129,42 @@ describe("createGuardedFetch", () => {
   });
 });
 
-describe("MCP OAuth state and provider", () => {
-  const memoryStore = (): SecretStore & { data: Map<string, string> } => {
+describe("MCP OAuth state and provider (per user)", () => {
+  const memoryStore = (): SecretStore & {
+    data: Map<string, string>;
+    tags: Map<string, Record<string, string>>;
+  } => {
     const data = new Map<string, string>();
+    const tags = new Map<string, Record<string, string>>();
     return {
       data,
+      tags,
       get: async (n) => data.get(n),
-      set: async (n, v) => void data.set(n, v),
+      set: async (n, v, t) => {
+        data.set(n, v);
+        if (t) tags.set(n, t);
+      },
       remove: async (n) => void data.delete(n),
+      removeTagged: async (tag, value) => {
+        let count = 0;
+        for (const [n, t] of tags) {
+          if (t[tag] === value && data.delete(n)) count++;
+        }
+        return count;
+      },
     };
   };
+  const SERVER = "https://mcp.example.com/mcp";
+  type Options = ConstructorParameters<typeof KeyVaultMcpOAuthProvider>[0];
+  const provider = (store: SecretStore, userId: string, extra: Partial<Options> = {}) =>
+    new KeyVaultMcpOAuthProvider({
+      extensionId: "e1",
+      serverUrl: SERVER,
+      userId,
+      redirectUrl: "https://app/cb",
+      store,
+      ...extra,
+    });
 
   it("round-trips the extension id through the state", () => {
     const state = createMcpOAuthState("abcDEF123");
@@ -155,49 +184,90 @@ describe("MCP OAuth state and provider", () => {
     expect(isPendingMcpOAuthValid(undefined, { state: "s1", userId: "u1" })).toBe(false);
   });
 
-  it("keeps tokens and the registered client in the secret store", async () => {
+  it("keeps tokens per user: user A connected, user B not", async () => {
     const store = memoryStore();
-    const p = new KeyVaultMcpOAuthProvider({ extensionId: "e1", redirectUrl: "https://app/cb", store });
-    await p.saveTokens({ access_token: "a", token_type: "Bearer" });
-    await p.saveClientInformation({ client_id: "dyn" });
-    expect(await p.tokens()).toEqual({ access_token: "a", token_type: "Bearer" });
-    expect(await p.clientInformation()).toEqual({ client_id: "dyn" });
-    await p.invalidateCredentials("tokens");
-    expect(await p.tokens()).toBeUndefined();
+    await provider(store, "userA").saveTokens({ access_token: "a", token_type: "Bearer" });
+    expect(await provider(store, "userA").tokens()).toEqual({ access_token: "a", token_type: "Bearer" });
+    expect(await provider(store, "userB").tokens()).toBeUndefined();
+    expect(await hasMcpUserTokens(store, "e1", SERVER, "userA")).toBe(true);
+    expect(await hasMcpUserTokens(store, "e1", SERVER, "userB")).toBe(false);
+  });
+
+  it("names user records by a hash, never the raw user id, and tags them with the extension", async () => {
+    const store = memoryStore();
+    await provider(store, "user-hash-visible").saveTokens({ access_token: "a", token_type: "Bearer" });
+    const [name] = [...store.data.keys()];
+    expect(name).toBe(mcpOAuthUserSecretNames("e1", "user-hash-visible").tokens);
+    expect(name).not.toContain("user-hash-visible");
+    expect(name).toMatch(/^mcp-tok-[0-9a-f]{48}$/);
+    expect(store.tags.get(name)).toEqual({ [MCP_EXTENSION_TAG]: "e1" });
+  });
+
+  it("removes every user's records of an extension by tag", async () => {
+    const store = memoryStore();
+    await provider(store, "userA").saveTokens({ access_token: "a", token_type: "Bearer" });
+    await provider(store, "userB").saveTokens({ access_token: "b", token_type: "Bearer" });
+    expect(await store.removeTagged(MCP_EXTENSION_TAG, "e1")).toBe(2);
+    expect(await provider(store, "userA").tokens()).toBeUndefined();
+  });
+
+  it("ignores tokens and a client registration issued for another server URL", async () => {
+    const store = memoryStore();
+    await provider(store, "userA").saveTokens({ access_token: "a", token_type: "Bearer" });
+    await provider(store, "userA").saveClientInformation({ client_id: "dyn" });
+    const moved = provider(store, "userA", { serverUrl: "https://other.example.com/mcp" });
+    expect(await moved.tokens()).toBeUndefined();
+    expect(await moved.clientInformation()).toBeUndefined();
+  });
+
+  it("shares the client registration across users and invalidates only the user's tokens", async () => {
+    const store = memoryStore();
+    await provider(store, "userA").saveClientInformation({ client_id: "dyn" });
+    expect(await provider(store, "userB").clientInformation()).toEqual({ client_id: "dyn" });
+    await provider(store, "userA").saveTokens({ access_token: "a", token_type: "Bearer" });
+    await provider(store, "userB").saveTokens({ access_token: "b", token_type: "Bearer" });
+    await provider(store, "userA").invalidateCredentials("tokens");
+    expect(await provider(store, "userA").tokens()).toBeUndefined();
+    expect(await provider(store, "userB").tokens()).toMatchObject({ access_token: "b" });
   });
 
   it("uses a pre-registered client instead of dynamic registration", async () => {
-    const p = new KeyVaultMcpOAuthProvider({
-      extensionId: "e1",
-      clientId: "cid",
-      clientSecret: "cs",
-      redirectUrl: "https://app/cb",
-      store: memoryStore(),
-    });
+    const p = provider(memoryStore(), "u", { clientId: "cid", clientSecret: "cs" });
     expect(await p.clientInformation()).toEqual({ client_id: "cid", client_secret: "cs" });
   });
 
   it("never starts a sign-in at chat time", async () => {
-    const p = new KeyVaultMcpOAuthProvider({ extensionId: "e1", redirectUrl: "https://app/cb", store: memoryStore() });
+    const p = provider(memoryStore(), "u");
     expect(() => p.redirectToAuthorization(new URL("https://auth.example.com/authorize"))).toThrow(
       McpOAuthRequiredError
     );
     await expect(p.saveCodeVerifier("v")).rejects.toThrow(McpOAuthRequiredError);
   });
 
-  it("captures the authorization URL in an interactive sign-in and records the verifier", async () => {
+  it("captures the authorization URL and records the verifier for that user only", async () => {
     const store = memoryStore();
-    const p = new KeyVaultMcpOAuthProvider({
-      extensionId: "e1",
-      redirectUrl: "https://app/cb",
-      store,
-      interactive: { userId: "u1", state: "e1.state" },
+    const p = provider(store, "u1", {
+      interactive: { state: "e1.state", personaId: "agent-1", returnTo: "/chat/t1" },
     });
     p.redirectToAuthorization(new URL("https://auth.example.com/authorize?x=1"));
     await p.saveCodeVerifier("verifier");
     expect(p.capturedAuthorizationUrl?.host).toBe("auth.example.com");
     expect(await p.codeVerifier()).toBe("verifier");
-    expect(JSON.parse(store.data.get("e1-mcp-oauth-pending")!)).toMatchObject({ state: "e1.state", userId: "u1" });
+    expect(await readPendingMcpOAuth(store, "e1", "u1")).toMatchObject({
+      state: "e1.state",
+      userId: "u1",
+      personaId: "agent-1",
+      returnTo: "/chat/t1",
+    });
+    expect(await readPendingMcpOAuth(store, "e1", "u2")).toBeUndefined();
     expect(() => p.redirectToAuthorization(new URL("http://auth.example.com/authorize"))).toThrow(/https/);
+  });
+
+  it("accepts only same-origin return paths", () => {
+    expect(safeReturnPath("/chat/abc")).toBe("/chat/abc");
+    expect(safeReturnPath("//evil.example.com")).toBeUndefined();
+    expect(safeReturnPath("/\\evil.example.com")).toBeUndefined();
+    expect(safeReturnPath("https://evil.example.com")).toBeUndefined();
+    expect(safeReturnPath(42)).toBeUndefined();
   });
 });

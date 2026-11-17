@@ -38,6 +38,7 @@ vi.mock("@/features/auth-page/auth-api", () => ({ options: {}, authOptions: {} }
 const mockKvSetSecret = vi.fn();
 const mockKvGetSecret = vi.fn();
 const mockKvBeginDeleteSecret = vi.fn();
+const mockKvList = vi.fn((): Array<{ name: string; tags?: Record<string, string> }> => []);
 
 vi.mock("@azure/keyvault-secrets", () => ({
   SecretClient: vi.fn().mockImplementation(function () {
@@ -45,6 +46,10 @@ vi.mock("@azure/keyvault-secrets", () => ({
       setSecret: mockKvSetSecret,
       getSecret: mockKvGetSecret,
       beginDeleteSecret: mockKvBeginDeleteSecret,
+      listPropertiesOfSecrets: () =>
+        (async function* () {
+          yield* mockKvList();
+        })(),
     };
   }),
 }));
@@ -62,6 +67,7 @@ vi.mock("@/features/common/services/logger", () => ({
   logInfo: vi.fn(),
   logError: vi.fn(),
   logDebug: vi.fn(),
+  logWarn: vi.fn(),
 }));
 
 const mockDiscover = vi.fn();
@@ -475,7 +481,13 @@ describe("extension-service.ts", () => {
       expect(mockKvSetSecret).not.toHaveBeenCalled();
     });
 
-    it("033 delete removes MCP secrets and OAuth records", async () => {
+    it("033 delete removes MCP secrets, the client registration and every user's sign-in", async () => {
+      mockKvList.mockReturnValueOnce([
+        { name: "mcp-tok-userA", tags: { mcpExtension: "mcpdel" } },
+        { name: "mcp-tok-userB", tags: { mcpExtension: "mcpdel" } },
+        { name: "mcp-tok-other", tags: { mcpExtension: "another-ext" } },
+        { name: "plain-header" },
+      ]);
       seedExtension({
         id: "mcpdel",
         kind: "mcp",
@@ -485,7 +497,29 @@ describe("extension-service.ts", () => {
       });
       await DeleteExtension("mcpdel");
       const deleted = mockKvBeginDeleteSecret.mock.calls.map((c) => c[0]);
-      expect(deleted).toEqual(expect.arrayContaining(["s1", "mcpdel-mcp-oauth-tokens", "mcpdel-mcp-oauth-client"]));
+      expect(deleted).toEqual(
+        expect.arrayContaining(["s1", "mcpdel-mcp-oauth-client", "mcp-tok-userA", "mcp-tok-userB"])
+      );
+      expect(deleted).not.toContain("mcp-tok-other");
+      expect(deleted).not.toContain("plain-header");
+    });
+
+    it("035 delete still succeeds when the per-user sign-ins cannot be listed (best effort)", async () => {
+      mockKvList.mockImplementationOnce(() => {
+        throw new Error("Forbidden: list");
+      });
+      seedExtension({
+        id: "mcpdel2",
+        kind: "mcp",
+        headers: [],
+        functions: [],
+        mcp: { ...mcpInput().mcp, secrets: [], auth: "oauth" },
+      });
+      const deleteSpy = vi.fn().mockResolvedValue({ resource: { id: "mcpdel2" } });
+      historyContainer.item.mockImplementationOnce(() => ({ read: vi.fn(), delete: deleteSpy }));
+      const result = await DeleteExtension("mcpdel2");
+      expect(result.status).toBe("OK");
+      expect(deleteSpy).toHaveBeenCalled();
     });
 
     it("034 FindMissingExtensionIds lists ids that no longer exist", async () => {

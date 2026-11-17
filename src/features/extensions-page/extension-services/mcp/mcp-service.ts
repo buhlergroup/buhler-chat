@@ -2,8 +2,9 @@
 import "server-only";
 
 // Server actions for Remote MCP extensions. Every export is an async
-// function; nothing is re-exported. Only the extension owner (and, for
-// tool discovery, an admin) passes; access through a shared agent does not.
+// function; nothing is re-exported. Tool discovery: owner or admin. Sign-in,
+// disconnect and connection status: every user for THEIR OWN connection,
+// as far as the access rule lets them use the extension.
 
 import { auth } from "@modelcontextprotocol/sdk/client/auth.js";
 import { userHashedId } from "@/features/auth-page/helpers";
@@ -11,13 +12,23 @@ import type { ServerActionResponse } from "@/features/common/server-action-respo
 import { HistoryContainer } from "@/features/common/services/cosmos";
 import { logWarn } from "@/features/common/services/logger";
 import { EnsureExtensionOperation } from "../extension-service";
-import { mcpOAuthRedirectUrl } from "../extension-runtime";
-import { keyVaultSecretStore, mcpOAuthSecretNames } from "../extension-secrets";
+import { findUsableExtension, mcpOAuthRedirectUrl } from "../extension-runtime";
+import {
+  keyVaultSecretStore,
+  MCP_EXTENSION_TAG,
+  mcpOAuthSecretNames,
+  mcpOAuthUserSecretNames,
+} from "../extension-secrets";
 import type { ExtensionModel } from "../models";
 import { MCP_LIMITS } from "./mcp-client";
 import { discoverMcpTools } from "./mcp-discovery";
 import { createGuardedFetch } from "./mcp-fetch";
-import { createMcpOAuthState, KeyVaultMcpOAuthProvider } from "./mcp-oauth";
+import {
+  createMcpOAuthState,
+  hasMcpUserTokens,
+  KeyVaultMcpOAuthProvider,
+  safeReturnPath,
+} from "./mcp-oauth";
 
 const unauthorized = (): ServerActionResponse<never> => ({
   status: "UNAUTHORIZED",
@@ -64,21 +75,27 @@ export async function DiscoverMcpTools(
 }
 
 /**
- * Starts the OAuth sign-in for an MCP server (authorization code + PKCE,
- * dynamic client registration when no client id is set). Returns the URL
- * the browser opens; the callback route finishes the sign-in. Owner only:
- * the tokens are the owner's, and every user of the extension (also through
- * shared agents) calls the server with them.
+ * Starts the OAuth sign-in of the CURRENT user for an MCP server
+ * (authorization code + PKCE; dynamic client registration when no client id
+ * is set). Each user signs in with their own account. Allowed for every user
+ * who may use the extension under the access rule (owner, published, or
+ * through `personaId`); ownership is not required. Returns the URL the
+ * browser opens; the callback route finishes the sign-in and re-checks
+ * access.
  */
 export async function StartMcpOAuth(
-  extensionId: string
+  extensionId: string,
+  options: { personaId?: string; returnTo?: string } = {}
 ): Promise<ServerActionResponse<{ authorizationUrl?: string; connected: boolean }>> {
   try {
-    const loaded = await loadOwnMcpExtension(extensionId, { allowAdmin: false });
-    if (loaded.status !== "OK") return loaded;
-    const extension = loaded.response;
-    if (extension.mcp?.auth !== "oauth") {
-      return { status: "ERROR", errors: [{ message: "Turn on OAuth sign-in for this extension first." }] };
+    const userId = await userHashedId();
+    const personaId = typeof options.personaId === "string" ? options.personaId : undefined;
+    const extension = await findUsableExtension({ extensionId, personaId, userId });
+    if (!extension || extension.kind !== "mcp" || !extension.mcp) {
+      return { status: "NOT_FOUND", errors: [{ message: "Extension not found." }] };
+    }
+    if (extension.mcp.auth !== "oauth") {
+      return { status: "ERROR", errors: [{ message: "This extension does not use a sign-in." }] };
     }
 
     const store = keyVaultSecretStore();
@@ -87,12 +104,18 @@ export async function StartMcpOAuth(
       : undefined;
     const provider = new KeyVaultMcpOAuthProvider({
       extensionId: extension.id,
+      serverUrl: extension.mcp.url,
+      userId,
       clientId: extension.mcp.oauth?.clientId || undefined,
       clientSecret,
       scopes: extension.mcp.oauth?.scopes || undefined,
       redirectUrl: mcpOAuthRedirectUrl(),
       store,
-      interactive: { userId: await userHashedId(), state: createMcpOAuthState(extension.id) },
+      interactive: {
+        state: createMcpOAuthState(extension.id),
+        personaId,
+        returnTo: safeReturnPath(options.returnTo),
+      },
     });
 
     const result = await auth(provider, {
@@ -124,29 +147,54 @@ export async function StartMcpOAuth(
   }
 }
 
-/** Forgets the stored tokens; the extension stops working until the owner connects again. */
+/** Forgets the CURRENT user's sign-in for this extension. Other users keep theirs. */
 export async function DisconnectMcpOAuth(
   extensionId: string
-): Promise<ServerActionResponse<ExtensionModel>> {
+): Promise<ServerActionResponse<{ connected: false }>> {
   try {
-    const loaded = await loadOwnMcpExtension(extensionId, { allowAdmin: false });
-    if (loaded.status !== "OK") return loaded;
-    const extension = loaded.response;
+    if (typeof extensionId !== "string" || !/^[A-Za-z0-9]{1,64}$/.test(extensionId)) {
+      return { status: "ERROR", errors: [{ message: "Extension not found." }] };
+    }
+    const userId = await userHashedId();
     const store = keyVaultSecretStore();
-    const names = mcpOAuthSecretNames(extension.id);
-    await store.set(names.tokens, "null");
-
-    const updated: ExtensionModel = {
-      ...extension,
-      mcp: {
-        ...extension.mcp!,
-        oauth: { ...extension.mcp!.oauth, connected: false, connectedAt: undefined },
-      },
-    };
-    const { resource } = await HistoryContainer().items.upsert<ExtensionModel>(updated);
-    return { status: "OK", response: resource ?? updated };
+    const names = mcpOAuthUserSecretNames(extensionId, userId);
+    const tags = { [MCP_EXTENSION_TAG]: extensionId };
+    // Only overwrite a record that exists: no new entries for random ids.
+    if (await store.get(names.tokens)) await store.set(names.tokens, "null", tags);
+    return { status: "OK", response: { connected: false } };
   } catch (error) {
     logWarn("DisconnectMcpOAuth failed", { extensionId, error: String(error) });
     return { status: "ERROR", errors: [{ message: "Could not disconnect." }] };
+  }
+}
+
+/**
+ * For each extension id: does it use an OAuth sign-in, and is the CURRENT
+ * user connected? Only for extensions the user may use (owner, published,
+ * or through `personaId`); other ids are left out.
+ */
+export async function GetMcpConnections(
+  extensionIds: string[],
+  personaId?: string
+): Promise<ServerActionResponse<Array<{ id: string; oauth: boolean; connected: boolean }>>> {
+  try {
+    const ids = [...new Set((extensionIds ?? []).filter((id) => typeof id === "string"))].slice(0, 50);
+    const userId = await userHashedId();
+    const store = keyVaultSecretStore();
+    const result: Array<{ id: string; oauth: boolean; connected: boolean }> = [];
+    for (const id of ids) {
+      const extension = await findUsableExtension({ extensionId: id, personaId, userId });
+      if (!extension || extension.kind !== "mcp" || !extension.mcp) continue;
+      const oauth = extension.mcp.auth === "oauth";
+      result.push({
+        id,
+        oauth,
+        connected: oauth && (await hasMcpUserTokens(store, id, extension.mcp.url, userId)),
+      });
+    }
+    return { status: "OK", response: result };
+  } catch (error) {
+    logWarn("GetMcpConnections failed", { error: String(error) });
+    return { status: "ERROR", errors: [{ message: "Could not read the connections." }] };
   }
 }

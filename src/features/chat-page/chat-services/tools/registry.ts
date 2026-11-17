@@ -71,11 +71,11 @@ export async function buildToolset(
   // (see buildExtensionToolKey) so extensions sharing a functionName don't
   // overwrite each other's toolset entry.
   const usedExtensionKeys = new Set<string>();
-  for (const { extension, headerSecrets, mcp } of ctx.extensions ?? []) {
+  for (const { extension, headerSecrets, mcp, personaId } of ctx.extensions ?? []) {
     // Remote MCP server: its tools come from the server, not from functions.
     if (extension.kind === "mcp") {
       if (!mcp) continue;
-      for (const [key, t] of await mcpExtensionTools(extension, mcp)) {
+      for (const [key, t] of await mcpExtensionTools(extension, mcp, undefined, personaId)) {
         if (usedExtensionKeys.has(key)) {
           logWarn("buildToolset: duplicate extension tool key, keeping first registration", {
             key,

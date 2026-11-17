@@ -14,10 +14,11 @@ import {
 import { SheetTitle } from "@/features/ui/sheet";
 import { Textarea } from "@/features/ui/textarea";
 import { KeyRound, Plug, Plus, RefreshCw, Trash, Unplug } from "lucide-react";
-import { FC, useState } from "react";
+import { FC, useEffect, useState } from "react";
 import {
   DiscoverMcpTools,
   DisconnectMcpOAuth,
+  GetMcpConnections,
   StartMcpOAuth,
 } from "../extension-services/mcp/mcp-service";
 import type {
@@ -174,10 +175,24 @@ const McpOAuth: FC = () => {
   const { extension, hasSavedClientSecret: clientSecretSaved } = useExtensionState();
   const oauth = extension.mcp?.oauth;
   const [busy, setBusy] = useState(false);
+  // Sign-ins are per user: this is the editing user's own connection.
+  const [connected, setConnected] = useState(false);
+  useEffect(() => {
+    if (!extension.id) return;
+    let cancelled = false;
+    GetMcpConnections([extension.id])
+      .then((r) => {
+        if (!cancelled && r.status === "OK") setConnected(r.response[0]?.connected ?? false);
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, [extension.id]);
 
   const connect = async () => {
     setBusy(true);
-    const response = await StartMcpOAuth(extension.id);
+    const response = await StartMcpOAuth(extension.id, { returnTo: "/extensions" });
     setBusy(false);
     if (response.status !== "OK") {
       extensionStore.setErrors(response.errors.map((e) => e.message));
@@ -186,7 +201,7 @@ const McpOAuth: FC = () => {
     if (response.response.authorizationUrl) {
       window.location.href = response.response.authorizationUrl;
     } else {
-      extensionStore.updateMcpOAuth({ connected: true });
+      setConnected(true);
     }
   };
 
@@ -198,7 +213,7 @@ const McpOAuth: FC = () => {
       extensionStore.setErrors(response.errors.map((e) => e.message));
       return;
     }
-    extensionStore.updateMcpOAuth({ connected: false });
+    setConnected(false);
   };
 
   return (
@@ -238,12 +253,12 @@ const McpOAuth: FC = () => {
         />
       </div>
       <p className="text-xs text-muted-foreground">
-        Everyone who uses this extension, also through agents, works with your sign-in.
+        Each user signs in with their own account. The tool list uses your sign-in.
       </p>
       {extension.id ? (
         <div className="flex items-center gap-2">
-          <span className="text-sm flex-1">{oauth?.connected ? "Connected" : "Save, then connect."}</span>
-          {oauth?.connected ? (
+          <span className="text-sm flex-1">{connected ? "You are connected." : "Connect to load the tools."}</span>
+          {connected ? (
             <Button type="button" variant="outline" className="gap-2" disabled={busy} onClick={disconnect}>
               <Unplug size={16} /> Disconnect
             </Button>

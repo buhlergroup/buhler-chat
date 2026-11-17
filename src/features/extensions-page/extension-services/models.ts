@@ -139,6 +139,7 @@ export const McpToolInfoSchema = z.object({
 });
 
 export type McpOAuthConfig = z.infer<typeof McpOAuthConfigSchema>;
+/** OAuth settings of the server. Sign-ins are per user and live in Key Vault, not here. */
 export const McpOAuthConfigSchema = z.object({
   /** Pre-registered client id. Empty: the app registers itself (dynamic client registration). */
   clientId: z.string().max(512).optional(),
@@ -146,9 +147,6 @@ export const McpOAuthConfigSchema = z.object({
   clientSecret: z.string().max(4096).optional(),
   /** Space-separated scopes to request. Empty: the server's default. */
   scopes: z.string().max(1024).optional(),
-  /** True after the owner completed the sign-in. Server-managed. */
-  connected: z.boolean().optional(),
-  connectedAt: z.coerce.date().optional(),
 });
 
 export type McpConfigModel = z.infer<typeof McpConfigSchema>;

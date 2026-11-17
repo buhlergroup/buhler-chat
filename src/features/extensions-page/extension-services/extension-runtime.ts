@@ -21,6 +21,8 @@ export interface ResolvedExtension {
   extension: ExtensionModel;
   headerSecrets: Record<string, string>;
   mcp?: McpConnectionOptions;
+  /** The agent that granted access, for the per-user "Connect" action. */
+  personaId?: string;
 }
 
 export interface ResolveExtensionsDeps {
@@ -48,12 +50,15 @@ export function mcpOAuthRedirectUrl(): string {
 
 /**
  * Connection options for a Remote MCP extension: secrets read from Key Vault
- * and placed as configured, plus the OAuth provider when the server uses
- * OAuth. A secret that cannot be read is left out (logged by id only).
+ * and placed as configured (owner-level, shared), plus the OAuth provider
+ * for `oauthUserId` when the server uses OAuth (per user: the chatting user,
+ * or the owner for the save-time tool list). A secret that cannot be read is
+ * left out (logged by id only).
  */
 export async function buildMcpConnection(
   extension: ExtensionModel,
-  store: SecretStore
+  store: SecretStore,
+  oauthUserId: string
 ): Promise<McpConnectionOptions | undefined> {
   const config = extension.mcp;
   if (!config) return undefined;
@@ -76,6 +81,8 @@ export async function buildMcpConnection(
       : undefined;
     authProvider = new KeyVaultMcpOAuthProvider({
       extensionId: extension.id,
+      serverUrl: config.url,
+      userId: oauthUserId,
       clientId: config.oauth?.clientId || undefined,
       clientSecret,
       scopes: config.oauth?.scopes || undefined,
@@ -123,7 +130,12 @@ export async function resolveExtensionsForChat(
   const resolved: ResolvedExtension[] = [];
   for (const { extension } of decision.granted) {
     if (extensionKind(extension) === "mcp") {
-      resolved.push({ extension, headerSecrets: {}, mcp: await buildMcpConnection(extension, store) });
+      resolved.push({
+        extension,
+        headerSecrets: {},
+        mcp: await buildMcpConnection(extension, store, userId),
+        personaId: input.personaId,
+      });
       continue;
     }
     const headerSecrets: Record<string, string> = {};
@@ -135,4 +147,27 @@ export async function resolveExtensionsForChat(
     resolved.push({ extension, headerSecrets });
   }
   return resolved;
+}
+
+/**
+ * The extension if the current user may USE it under the access rule (owner,
+ * published, or through the given agent). Used before a per-user OAuth
+ * sign-in starts and again when its callback arrives.
+ */
+export async function findUsableExtension(
+  input: { extensionId: string; personaId?: string; userId: string },
+  deps: Pick<ResolveExtensionsDeps, "findExtensions" | "findAgent" | "isGroupMember"> = defaultDeps
+): Promise<ExtensionModel | undefined> {
+  const [extensions, agent] = await Promise.all([
+    deps.findExtensions([input.extensionId]),
+    input.personaId ? deps.findAgent(input.personaId) : Promise.resolve(null),
+  ]);
+  const decision = await decideExtensionAccess({
+    extensionIds: [input.extensionId],
+    extensions,
+    agent,
+    userId: input.userId,
+    isGroupMember: deps.isGroupMember,
+  });
+  return decision.granted[0]?.extension;
 }

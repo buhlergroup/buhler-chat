@@ -92,6 +92,7 @@ export const ChatHeader: FC<Props> = (props) => {
             installedExtensionIds={props.chatThread.extension}
             chatThreadId={props.chatThread.id}
             parent={"chat"}
+            personaId={props.chatThread.personaId}
           />
         </div>
       </MobileHeader>
@@ -137,6 +138,7 @@ export const ChatHeader: FC<Props> = (props) => {
                 installedExtensionIds={props.chatThread.extension}
                 chatThreadId={props.chatThread.id}
                 parent={"chat"}
+                personaId={props.chatThread.personaId}
               />
             </div>
           </div>
