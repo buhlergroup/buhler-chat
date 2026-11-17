@@ -62,6 +62,11 @@ import {
   FindSecureHeaderValue,
 } from "@/features/extensions-page/extension-services/extension-service";
 import { logError, logInfo, logWarn } from "@/features/common/services/logger";
+import { loadUsableSkills } from "@/features/persona-page/persona-services/skills/persona-skill-store";
+import {
+  buildSkillCatalogPrompt,
+  skillArchiveFileName,
+} from "@/features/persona-page/persona-services/skills/skill-models";
 import { type UserPrompt } from "@/features/chat-page/chat-services/models";
 
 // Allow streaming responses to run for up to 10 minutes (600 seconds)
@@ -263,6 +268,30 @@ export async function POST(req: Request) {
     });
   }
 
+  // Agent skills (personas only), filtered by the access rule. The catalog
+  // (names + descriptions) joins the persona message: both are fixed for the
+  // life of the thread unless the owner changes the skills, so the prefix
+  // stays cacheable. A skill's zip counts as "in the code interpreter" when
+  // its archive is among this turn's attached code-interpreter files.
+  const agentSkills = await loadUsableSkills(ctx.thread.personaId);
+  const turnCiFileIds = new Set(payload.codeInterpreterFileIds ?? []);
+  const skillsInCodeInterpreter = effectiveToolsSafe.codeInterpreter
+    ? agentSkills
+        .filter((s) =>
+          ctx.attachedFiles.some(
+            (f) => f.name === skillArchiveFileName(s.name) && turnCiFileIds.has(f.id),
+          ),
+        )
+        .map((s) => s.name)
+    : [];
+  if (agentSkills.length > 0) {
+    logInfo("/api/chat agent skills", {
+      threadId: ctx.thread.id,
+      skills: agentSkills.map((s) => s.name),
+      skillsInCodeInterpreter,
+    });
+  }
+
   // ── prompt prefix assembly (cache-stability critical) ──────────────────
   // The generative-UI block is process-constant, so it is handed to
   // buildSystemMessage as `trailingStaticBlock` instead of being concatenated
@@ -271,7 +300,8 @@ export async function POST(req: Request) {
   const system =
     buildSystemMessage({
       staticSystemPrompt: CHAT_DEFAULT_SYSTEM_PROMPT,
-      personaMessage: ctx.thread.personaMessage ?? "",
+      personaMessage:
+        (ctx.thread.personaMessage ?? "") + buildSkillCatalogPrompt(agentSkills),
       documentHint: ctx.documentHint,
       trailingStaticBlock:
         // Generative UI: GPT-5.5 reliably declines a UI *tool* under tool_choice
@@ -325,6 +355,8 @@ export async function POST(req: Request) {
     // Browser-local datetime for the get_current_time tool (server UTC fallback).
     clientDateTime: req.headers.get("x-client-datetime") ?? undefined,
     depth: 0,
+    skills: agentSkills,
+    skillsInCodeInterpreter,
   });
 
   // Code-interpreter file IDs the user attached this turn. The chat-store

@@ -40,7 +40,13 @@ import {
   DeleteAgentStats,
   RecordAgentChatStarted,
 } from "@/features/common/services/agent-stats-service";
-import { logInfo, logError } from "@/features/common/services/logger";
+import { logInfo, logError, logWarn } from "@/features/common/services/logger";
+import {
+  deleteSkillsForPersona,
+  loadUsableSkills,
+  uploadSkillArchivesForCodeInterpreter,
+} from "./skills/persona-skill-store";
+import { getCodeInterpreterFileLimit } from "@/features/chat-page/chat-services/code-interpreter-constants";
 
 interface PersonaInput {
   name: string;
@@ -231,6 +237,7 @@ export const DeletePersona = async (
 
     if (personaResponse.status === "OK") {
       await DeletePersonaDocumentsByPersonaId(personaId);
+      await deleteSkillsForPersona(personaId);
 
       const { resource: deletedPersona } = await HistoryContainer()
         .item(personaId, personaResponse.response.userId)
@@ -537,6 +544,28 @@ export const CreatePersonaChat = async (
           }
         }
       }
+    }
+
+    // Agent skills: each skill zip becomes one code interpreter file, so the
+    // model can unpack it and run the skill's scripts (see load_skill). Only
+    // up to the per-chat code interpreter file limit, after the agent's own
+    // documents; a skill without its archive still works through load_skill.
+    const skills = await loadUsableSkills(persona.id);
+    if (skills.length > 0) {
+      const room =
+        getCodeInterpreterFileLimit(process.env.MAX_PERSONA_CI_DOCUMENT_LIMIT) -
+        attachedFiles.length;
+      if (room < skills.length) {
+        logWarn("Agent skills exceed the code interpreter file limit", {
+          personaId,
+          skills: skills.length,
+          room,
+        });
+      }
+      const skillFiles = await uploadSkillArchivesForCodeInterpreter(
+        skills.slice(0, Math.max(0, room)),
+      );
+      attachedFiles = [...attachedFiles, ...skillFiles];
     }
 
     const response = await UpsertChatThread({

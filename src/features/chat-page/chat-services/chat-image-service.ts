@@ -85,6 +85,22 @@ export const GetThreadAndImageFromUrl = async (
     };
   }
 
+  // The images container also holds agent skill packages under
+  // "agent-skills/" (persona-skill-store.ts). Those are served only through
+  // the access-checked skill paths, never through this public image route,
+  // and no "." / ".." segment may steer the blob path elsewhere.
+  const blobPath = `${threadId}/${imgName}`.replace(/\\/g, "/");
+  const segments = blobPath.split("/");
+  if (
+    segments[0] === "agent-skills" ||
+    segments.some((segment) => segment === "." || segment === "..")
+  ) {
+    return {
+      status: "ERROR",
+      errors: [{ message: "Invalid URL, threadId and/or imgName not formatted correctly." }],
+    };
+  }
+
   return {
     status: "OK",
     response: {

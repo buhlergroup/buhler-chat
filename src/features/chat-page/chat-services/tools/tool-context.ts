@@ -2,6 +2,7 @@ import "server-only";
 
 import type { DefaultTools } from "@/features/chat-page/chat-services/models";
 import type { ExtensionModel } from "@/features/extensions-page/extension-services/models";
+import type { PersonaSkillModel } from "@/features/persona-page/persona-services/skills/skill-models";
 
 /**
  * Context threaded through buildToolset and every tool execute closure.
@@ -41,4 +42,14 @@ export interface ToolContext {
    * Max depth before tools are omitted: 2.
    */
   depth?: number;
+  /**
+   * Skills of the agent that runs this turn, already filtered by the access
+   * rule (loadUsableSkills). Registers `load_skill` when non-empty.
+   */
+  skills?: PersonaSkillModel[];
+  /**
+   * Names of the skills whose zip is attached to this turn's code
+   * interpreter container. load_skill tells the model how to unpack them.
+   */
+  skillsInCodeInterpreter?: string[];
 }
