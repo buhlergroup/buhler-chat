@@ -28,6 +28,7 @@ import { recordHistoryCompactionRealUsage } from "@/features/chat-page/chat-serv
 import {
   loadThreadContext,
   applyDocumentHintPlacement,
+  AGENT_NOT_AVAILABLE_MESSAGE,
 } from "@/features/chat-page/chat-services/chat-api/thread-context";
 import { persistAssistantFromFinishEvent } from "@/features/chat-page/chat-services/chat-api/persist-assistant";
 import { consumeRateLimitToken } from "@/features/chat-page/chat-services/chat-api/rate-limit";
@@ -192,7 +193,11 @@ export async function POST(req: Request) {
     });
     const status = (err as { status?: number })?.status ?? 500;
     return new Response(
-      status === 401 ? "Unauthorized" : "Failed to load thread context",
+      status === 401
+        ? "Unauthorized"
+        : status === 403
+          ? AGENT_NOT_AVAILABLE_MESSAGE
+          : "Failed to load thread context",
       { status },
     );
   }
