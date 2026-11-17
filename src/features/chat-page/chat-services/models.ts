@@ -11,7 +11,7 @@ export const MESSAGE_ATTRIBUTE = "CHAT_MESSAGE";
 export const CHAT_CITATION_ATTRIBUTE = "CHAT_CITATION";
 
 export type ChatModel =
-  | "gpt-6.1-sol"
+  | "gpt-6.2-sol"
   | "gpt-6-sol"
   | "gpt-6-luna"
   | "gpt-5.6-sol"
@@ -70,7 +70,7 @@ export interface ModelPricing {
  *   - WRITE_BILLING_FAMILIES and the pinned effort sets in models.test.ts
  */
 export type ModelFamily =
-  | "gpt-6.1"
+  | "gpt-6.2"
   | "gpt-6"
   | "gpt-5.6"
   | "gpt-5.5"
@@ -85,11 +85,11 @@ export type ModelFamily =
  * measured on the dev deployments 2026-09-23, two requests with one key, the
  * same 5,200-token instructions and DIFFERENT user input: the second read
  * 5,203 tokens from cache and wrote only the 23-token new tail, on both
- * gpt-6-sol and gpt-6-luna. GPT-6.1 uses the same implicit prompt cache
+ * gpt-6-sol and gpt-6-luna. GPT-6.2 uses the same implicit prompt cache
  * (implicit mode, 1.25x writes, 0.1x-or-less reads) and is included with it.
  */
 export const PERSONA_CACHE_KEY_FAMILIES: ReadonlySet<ModelFamily> = new Set<ModelFamily>([
-  "gpt-6.1",
+  "gpt-6.2",
   "gpt-6",
   "gpt-5.6",
 ]);
@@ -163,8 +163,10 @@ export interface ModelConfig {
    *   gpt-5.6-*    same, with 'max' additionally supported.
    *   gpt-6-*      same as gpt-5.6 ('gpt-6-sol-2026-09-22' and
    *                'gpt-6-luna-2026-09-22'; measured 2026-09-23).
-   *   gpt-6.1-sol  low, medium, high, xhigh and max; no 'none' and no
-   *                'minimal' (published model spec, 2026-10-13).
+   *   gpt-6.2-sol  400 Unsupported value: 'none' is not supported with the
+   *                'gpt-6.2-sol-2026-11-17' model. Supported values are: 'low',
+   *                'medium', 'high', 'xhigh', and 'max'. ('minimal' gives the
+   *                same 400; measured on the dev deployment 2026-11-17.)
    *
    * On an Anthropic model the list also decides whether "xhigh"/"max" reach
    * the wire: the anthropic seam passes them through only when the model
@@ -186,7 +188,7 @@ export interface ModelConfig {
    * letting that pass as a complete answer.
    *
    * The numbers, and why they differ:
-   *   32000  GPT-6.1, GPT-6, the 5.6 family and 5.5 — reasoning-heavy, and the models people
+   *   32000  GPT-6.2, GPT-6, the 5.6 family and 5.5 — reasoning-heavy, and the models people
    *          bring long-form work to. 16000 was measurably tight at high
    *          effort.
    *   16000  Claude (thinking is adaptive, so the cap is the bill guardrail
@@ -299,31 +301,41 @@ export const FALLBACK_MODEL_CHAIN: ReadonlyArray<ChatModel> = [
 ];
 
 export const MODEL_CONFIGS: Record<ChatModel, ModelConfig> = {
-  // ── GPT-6.1 family ──────────────────────────────────────────────────────
-  // Global Standard list price per 1M tokens, read 2026-10-13
-  // (input / output / cached input / cache write): 2.00 / 10.00 / 0.10 / 2.50.
-  // Cache writes are 1.25x input like GPT-6; cache reads are 0.05x input.
-  // Above 272k input tokens the request moves to the long-context tier: 2x
-  // input and cache rates, 1.5x output. reasoning.effort takes low, medium,
-  // high, xhigh and max ('none' and 'minimal' are not offered).
-  "gpt-6.1-sol": {
-    id: "gpt-6.1-sol",
-    name: "GPT-6.1 Sol",
-    description: "GPT‑6.1 Sol is OpenAI's latest frontier model for enterprise agents, coding, complex knowledge work, and multi-step reasoning",
+  // ── GPT-6.2 family (2026-11-17) ─────────────────────────────────────────
+  // Replaces GPT-6.1 Sol (see LEGACY_MODEL_ALIASES for stored references).
+  // OpenAI list price per 1M tokens, read 2026-11-17
+  // (input / output / cached input / cache write): 2.00 / 10.00 / 0.10 / 2.50,
+  // the same as GPT-6.1 Sol. Source:
+  // https://developers.openai.com/api/docs/models/gpt-6.2-sol
+  // Azure meters for 6.2 are not published yet (Retail Prices API and the
+  // Azure OpenAI pricing page, 2026-11-17) — NOT VERIFIED against Azure;
+  // re-check with tools/Compare-BuhlerChatModelPricing.ps1.
+  // Cache writes are 1.25x input; cache reads are 0.05x input (OpenAI prompt
+  // caching guide). Above 272k input tokens the request moves to the
+  // long-context tier: 2x input and cache rates, 1.5x output.
+  // Context 1,050,000 (922,000 input / 128,000 output), knowledge cutoff
+  // 2026-06-01. reasoning.effort takes low, medium, high, xhigh and max
+  // (measured on the dev deployment 2026-11-17; 'none'/'minimal' answer 400).
+  // From GPT-6.2 on, the API drops reasoning items when the conversation
+  // prefix changes mid-thread (OpenAI "Using GPT-6.2" guide).
+  "gpt-6.2-sol": {
+    id: "gpt-6.2-sol",
+    name: "GPT-6.2 Sol",
+    description: "GPT‑6.2 Sol is OpenAI's go-to model for everyday work, from coding to powering agents at scale, with careful multi-step reasoning",
     badge: "Deep reasoning",
     taskArea: "Interactive and agentic coding",
     excelsAt: "All-round development tasks that benefit from careful, multistep validation",
-    detailsUrl: "https://ai.azure.com/catalog/models/gpt-6.1-sol",
+    detailsUrl: "https://ai.azure.com/catalog/models/gpt-6.2-sol",
     getInstance: () => OpenAIV1ReasoningInstance(),
-    family: "gpt-6.1",
+    family: "gpt-6.2",
     promptCacheOptionsSupported: true,
     supportsReasoning: true,
     supportsResponsesAPI: true,
     supportsImageGeneration: true,
-    deploymentName: process.env.AZURE_OPENAI_API_GPT61_SOL_DEPLOYMENT_NAME,
+    deploymentName: process.env.AZURE_OPENAI_API_GPT62_SOL_DEPLOYMENT_NAME,
     defaultReasoningEffort: "low",
     supportedReasoningEfforts: ["low", "medium", "high", "xhigh", "max"],
-    pricing: { inputPerMillion: 2.00, outputPerMillion: 10.00, cachedInputPerMillion: 0.10, cacheWritePerMillion: 2.50, priceLastCheckedUtc: "2026-10-13T00:00:00Z" },
+    pricing: { inputPerMillion: 2.00, outputPerMillion: 10.00, cachedInputPerMillion: 0.10, cacheWritePerMillion: 2.50, priceLastCheckedUtc: "2026-11-17T00:00:00Z" },
     contextWindow: 1050000,
     longContextThresholdTokens: 272000,
     maxOutputTokens: 32000,
@@ -749,6 +761,49 @@ export const MODEL_CONFIGS: Record<ChatModel, ModelConfig> = {
   },
 };
 
+/**
+ * Model ids that were removed from MODEL_CONFIGS but may still be stored on
+ * chat threads (`selectedModel`), agents/personas (`selectedModel`) or sent
+ * by a browser tab that loaded before the deploy. They are mapped to their
+ * replacement at read time — there is no database migration — so an old
+ * thread or agent keeps its intent instead of dropping to the default model
+ * or failing validation.
+ *
+ * Only the model id is aliased. Usage rows store their cost at write time
+ * (usage-data.ts), so historical "gpt-6.1-sol" usage keeps the price it was
+ * billed at without a pricing entry here.
+ */
+export const LEGACY_MODEL_ALIASES: Readonly<Record<string, ChatModel>> = {
+  "gpt-6.1-sol": "gpt-6.2-sol",
+};
+
+/**
+ * Maps a stored or client-sent model id through LEGACY_MODEL_ALIASES.
+ * Every other value — a current id, an unknown id, undefined — is returned
+ * unchanged, so callers keep their own validation and defaulting.
+ */
+export function normalizeChatModelId<T extends string | null | undefined>(
+  id: T,
+): T | ChatModel {
+  if (typeof id !== "string") return id;
+  return Object.prototype.hasOwnProperty.call(LEGACY_MODEL_ALIASES, id)
+    ? LEGACY_MODEL_ALIASES[id]
+    : id;
+}
+
+/**
+ * A copy of a stored document (thread or persona) whose `selectedModel` has
+ * gone through normalizeChatModelId. The same object when nothing changes.
+ */
+export function withNormalizedSelectedModel<T extends { selectedModel?: string }>(
+  doc: T,
+): T {
+  const normalized = normalizeChatModelId(doc.selectedModel);
+  return normalized === doc.selectedModel
+    ? doc
+    : { ...doc, selectedModel: normalized };
+}
+
 /** A model this environment can actually route a turn to. */
 export function isDeployedModel(id: ChatModel): boolean {
   return !!MODEL_CONFIGS[id]?.deploymentName?.trim();
@@ -778,17 +833,18 @@ export function resolveDeployedFallbackModel(
  * Model used when the request, the thread and the picker all say nothing.
  * This is the code default; `DEFAULT_MODEL_ID` overrides it at deploy time.
  *
- * GPT-6.1 Sol since 2026-10-13. Same list price as GPT-6 Sol (2.00 / 10.00,
- * cache write 2.50) with a cheaper cache read (0.10 against 0.20).
- * GPT-6 Sol was the default from 2026-09-23.
+ * GPT-6.2 Sol since 2026-11-17 (it replaced GPT-6.1 Sol, the default from
+ * 2026-10-13, at the same list price). Same list price as GPT-6 Sol
+ * (2.00 / 10.00, cache write 2.50) with a cheaper cache read (0.10 against
+ * 0.20). GPT-6 Sol was the default from 2026-09-23.
  */
-export const CODE_DEFAULT_MODEL: ChatModel = "gpt-6.1-sol";
+export const CODE_DEFAULT_MODEL: ChatModel = "gpt-6.2-sol";
 
 /**
  * The previous code default, tried first when this environment has no
  * deployment for CODE_DEFAULT_MODEL (e.g. no
- * AZURE_OPENAI_API_GPT61_SOL_DEPLOYMENT_NAME yet), so an environment that has
- * not rolled out GPT-6.1 keeps the GPT-6 Sol default it already had.
+ * AZURE_OPENAI_API_GPT62_SOL_DEPLOYMENT_NAME yet), so an environment that has
+ * not rolled out GPT-6.2 keeps the GPT-6 Sol default it already had.
  */
 export const CODE_PREVIOUS_DEFAULT_MODEL: ChatModel = "gpt-6-sol";
 

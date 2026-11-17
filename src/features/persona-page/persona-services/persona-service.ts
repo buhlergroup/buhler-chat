@@ -8,6 +8,7 @@ import {
   ChatThreadModel,
   ChatModel,
   AttachedFileModel,
+  withNormalizedSelectedModel,
 } from "@/features/chat-page/chat-services/models";
 import {
   ServerActionResponse,
@@ -107,7 +108,7 @@ export const FindPersonaByID = async (
 
     return {
       status: "OK",
-      response: resources[0],
+      response: withNormalizedSelectedModel(resources[0]),
     };
   } catch (error) {
     return {
@@ -423,7 +424,7 @@ export const FindAllPersonaForCurrentUser = async (): Promise<
               return null;
             }
           }
-          return e;
+          return withNormalizedSelectedModel(e);
         })
       )
     ).filter((e) => e !== null);

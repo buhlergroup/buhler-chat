@@ -29,6 +29,8 @@ import {
   ChatMessageModel,
   ChatThreadModel,
   AttachedFileModel,
+  normalizeChatModelId,
+  withNormalizedSelectedModel,
 } from "./models";
 
 const VALID_REASONING_EFFORTS: ReadonlyArray<ReasoningEffort> = [
@@ -83,7 +85,7 @@ export const FindAllChatThreadForCurrentUser = async (): Promise<
       .fetchAll();
     return {
       status: "OK",
-      response: resources,
+      response: resources.map(withNormalizedSelectedModel),
     };
   } catch (error) {
     return {
@@ -119,7 +121,7 @@ export const FindChatThreadForCurrentUser = async (
 
     return {
       status: "OK",
-      response: resource,
+      response: withNormalizedSelectedModel(resource),
     };
   } catch (error) {
     return {
@@ -478,8 +480,9 @@ export const UpdateChatTitle = async (
 
 export const UpdateChatThreadSelectedModel = async (
   chatThreadId: string,
-  selectedModel: string
+  rawSelectedModel: string
 ): Promise<ServerActionResponse<ChatThreadModel>> => {
+  const selectedModel = normalizeChatModelId(rawSelectedModel);
   if (!isValidChatModel(selectedModel)) {
     return {
       status: "ERROR",
