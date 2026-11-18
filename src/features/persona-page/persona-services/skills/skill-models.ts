@@ -110,57 +110,11 @@ export const toSkillSummary = (s: PersonaSkillModel): PersonaSkillSummary => ({
 });
 
 // ---------------------------------------------------------------------------
-// Access rule
+// Access rule: canUsePersonaSkills / canEditPersonaSkills live in the
+// server-only persona-skill-store.ts and call the central agent rules
+// (canOpenPersona / canEditPersona in persona-access.ts). This module is also
+// imported by the client, so it holds no access rule.
 // ---------------------------------------------------------------------------
-
-export interface PersonaAccessFacts {
-  userId: string;
-  isPublished: boolean;
-  accessGroup?: { id: string } | undefined;
-}
-
-/**
- * "Can this user open the agent?" — the rule of the agent list
- * (FindAllPersonaForCurrentUser) and of the extensions an agent carries:
- *   - the owner, always;
- *   - an agent shared with a group: members of that group (the group wins
- *     over "published", as in the agent list filter);
- *   - otherwise: everyone when the agent is published.
- *
- * Local stand-in for the central `canOpenPersona` of the access fix; when
- * that lands, canUsePersonaSkills below calls it instead (one-line swap).
- */
-function canOpenPersonaRule(
-  persona: PersonaAccessFacts,
-  currentUserId: string,
-  isAccessGroupMember: boolean,
-): boolean {
-  if (persona.userId === currentUserId) return true;
-  if (persona.accessGroup && persona.accessGroup.id !== "") return isAccessGroupMember;
-  return persona.isPublished;
-}
-
-/** Who may USE an agent's skills: everyone who can open the agent. */
-export function canUsePersonaSkills(
-  persona: PersonaAccessFacts,
-  currentUserId: string,
-  isAccessGroupMember: boolean,
-): boolean {
-  return canOpenPersonaRule(persona, currentUserId, isAccessGroupMember);
-}
-
-/**
- * Who may ADD, REPLACE or DELETE skills: the agent owner and admins — the
- * same rule as editing the agent itself (EnsurePersonaOperation) and as
- * extensions (EnsureExtensionOperation).
- */
-export function canEditPersonaSkills(
-  persona: Pick<PersonaAccessFacts, "userId">,
-  currentUserId: string,
-  isAdmin: boolean,
-): boolean {
-  return isAdmin || persona.userId === currentUserId;
-}
 
 // ---------------------------------------------------------------------------
 // Code interpreter naming

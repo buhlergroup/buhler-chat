@@ -12,7 +12,11 @@ vi.mock("@/features/common/services/logger", () => ({
   logDebug: vi.fn(),
 }));
 
-import { resolveExtensionsForChat, type ResolveExtensionsDeps } from "./extension-runtime";
+import {
+  resolveExtensionsForChat,
+  usableExtensionIdsForAgent,
+  type ResolveExtensionsDeps,
+} from "./extension-runtime";
 import type { SecretStore } from "./extension-secrets";
 import type { ExtensionModel } from "./models";
 
@@ -137,5 +141,51 @@ describe("resolveExtensionsForChat", () => {
     );
     expect(result[0].headerSecrets).toEqual({ "x-api-key": "v" });
     expect(result[0].mcp).toBeUndefined();
+  });
+});
+
+describe("usableExtensionIdsForAgent (CreatePersonaChat)", () => {
+  const ext = (id: string, userId: string, isPublished = false): ExtensionModel => ({
+    ...mcpExtension({ userId, isPublished }),
+    id,
+  });
+  const agent = {
+    id: "agent-1",
+    userId: "agent-owner",
+    isPublished: true,
+    extensionIds: ["own-by-owner", "third-private", "third-published", "deleted"],
+  };
+  const findExtensions = async () => [
+    ext("own-by-owner", "agent-owner"),
+    ext("third-private", "someone-else"),
+    ext("third-published", "someone-else", true),
+  ];
+
+  it("keeps only the agent's extensions the chatting user may use, in the agent's order", async () => {
+    const ids = await usableExtensionIdsForAgent(agent, "chat-user", {
+      findExtensions,
+      isGroupMember: async () => false,
+    });
+    expect(ids).toEqual(["own-by-owner", "third-published"]);
+  });
+
+  it("drops the agent-granted ones when the user cannot open the agent", async () => {
+    const ids = await usableExtensionIdsForAgent(
+      { ...agent, accessGroup: { id: "g" } },
+      "chat-user",
+      { findExtensions, isGroupMember: async () => false }
+    );
+    expect(ids).toEqual(["third-published"]);
+  });
+
+  it("does not query Cosmos for an agent without extensions", async () => {
+    const find = vi.fn();
+    expect(
+      await usableExtensionIdsForAgent({ ...agent, extensionIds: [] }, "chat-user", {
+        findExtensions: find,
+        isGroupMember: async () => false,
+      })
+    ).toEqual([]);
+    expect(find).not.toHaveBeenCalled();
   });
 });

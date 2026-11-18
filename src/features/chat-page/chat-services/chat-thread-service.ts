@@ -51,7 +51,7 @@ import { redirect } from "next/navigation";
 import { RevalidateCache } from "@/features/common/navigation-helpers";
 import { ChatApiTitleAndIntent } from "./chat-api/chat-api-text";
 import { applyUserThreadChanges, saveChatThread } from "./chat-thread-write";
-import { findUsableExtension } from "@/features/extensions-page/extension-services/extension-access";
+import { findUsableExtension } from "@/features/extensions-page/extension-services/extension-runtime";
 
 export const FindAllChatThreadForCurrentUser = async (): Promise<
   ServerActionResponse<Array<ChatThreadModel>>
@@ -320,7 +320,13 @@ export const AddExtensionToChatThread = async (props: {
       if (existingExtension === undefined) {
         // Only an extension the user may use can enter the thread: /api/chat
         // resolves the thread's extension ids with their header secrets.
-        const extension = await findUsableExtension(props.extensionId);
+        // The same rule as every chat turn (decideExtensionAccess, through
+        // the thread's agent when it has one).
+        const extension = await findUsableExtension({
+          extensionId: props.extensionId,
+          personaId: chatThread.personaId,
+          userId: await userHashedId(),
+        });
         if (!extension) {
           return {
             status: "NOT_FOUND",

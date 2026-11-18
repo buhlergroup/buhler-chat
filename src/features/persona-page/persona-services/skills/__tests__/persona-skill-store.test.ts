@@ -63,6 +63,8 @@ vi.mock("../../access-group-service", () => ({
 }));
 
 import {
+  canEditPersonaSkills,
+  canUsePersonaSkills,
   deleteSkillOpenAiFile,
   ensureSkillOpenAiFile,
   refreshSkillOpenAiFiles,
@@ -219,5 +221,56 @@ describe("resolveSkillAccess — admins may edit", () => {
     personaRow = { id: "p1", type: "PERSONA", userId: "owner-hash", isPublished: true };
     const access = await resolveSkillAccess("p1");
     expect(access).toMatchObject({ canUse: true, canEdit: false });
+  });
+});
+
+describe("canUsePersonaSkills — the central canOpenPersona rule", () => {
+  const OWNER = "owner-hash";
+  const user = { userId: "other-hash", isAdmin: false };
+  const member = async () => true;
+  const notMember = async () => false;
+
+  it("owner can always use the skills", async () => {
+    const owner = { userId: OWNER, isAdmin: false };
+    expect(await canUsePersonaSkills(owner, { userId: OWNER, isPublished: false }, notMember)).toBe(true);
+    expect(
+      await canUsePersonaSkills(owner, { userId: OWNER, isPublished: false, accessGroup: { id: "g1", source: "SHAREPOINT" as const } }, notMember),
+    ).toBe(true);
+  });
+
+  it("an admin can use the skills of an agent the admin can open", async () => {
+    const admin = { userId: "admin-hash", isAdmin: true };
+    expect(await canUsePersonaSkills(admin, { userId: OWNER, isPublished: false }, notMember)).toBe(true);
+  });
+
+  it("published agent: everyone; private agent: nobody else", async () => {
+    expect(await canUsePersonaSkills(user, { userId: OWNER, isPublished: true }, notMember)).toBe(true);
+    expect(await canUsePersonaSkills(user, { userId: OWNER, isPublished: false }, member)).toBe(false);
+  });
+
+  it("group-shared agent: members yes, non-members no (even when published)", async () => {
+    const shared = { userId: OWNER, isPublished: true, accessGroup: { id: "g1", source: "SHAREPOINT" as const } };
+    expect(await canUsePersonaSkills(user, shared, member)).toBe(true);
+    expect(await canUsePersonaSkills(user, shared, notMember)).toBe(false);
+    expect(await canUsePersonaSkills(user, { ...shared, isPublished: false }, member)).toBe(true);
+  });
+
+  it("an empty access group id counts as no group", async () => {
+    expect(
+      await canUsePersonaSkills(user, { userId: OWNER, isPublished: true, accessGroup: { id: "", source: "SHAREPOINT" as const } }, notMember),
+    ).toBe(true);
+  });
+});
+
+describe("canEditPersonaSkills — the central canEditPersona rule (owner or admin)", () => {
+  const OWNER = "owner-hash";
+  it("the owner may change skills", () => {
+    expect(canEditPersonaSkills({ userId: OWNER, isAdmin: false }, { userId: OWNER })).toBe(true);
+  });
+  it("an admin may change skills of any agent", () => {
+    expect(canEditPersonaSkills({ userId: "admin-hash", isAdmin: true }, { userId: OWNER })).toBe(true);
+  });
+  it("other users may not", () => {
+    expect(canEditPersonaSkills({ userId: "other-hash", isAdmin: false }, { userId: OWNER })).toBe(false);
   });
 });

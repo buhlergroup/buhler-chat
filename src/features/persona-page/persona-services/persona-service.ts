@@ -54,6 +54,7 @@ import {
   uploadSkillArchivesForCodeInterpreter,
 } from "./skills/persona-skill-store";
 import { getCodeInterpreterFileLimit } from "@/features/chat-page/chat-services/code-interpreter-constants";
+import { usableExtensionIdsForAgent } from "@/features/extensions-page/extension-services/extension-runtime";
 
 interface PersonaInput {
   name: string;
@@ -545,12 +546,18 @@ export const CreatePersonaChat = async (
       attachedFiles = [...attachedFiles, ...skillFiles];
     }
 
+    // The agent's extensions, checked against the chatting user with the
+    // extension access rule (decideExtensionAccess): only ids this user may
+    // use enter the thread.
+    const chatUserId = await userHashedId();
+    const extensionIds = await usableExtensionIdsForAgent(persona, chatUserId);
+
     // Server-built thread: saveChatThread, not the client-facing
     // UpsertChatThread (which takes only the title and the bookmark).
     const response = await saveChatThread({
       name: persona.name,
       useName: user.name,
-      userId: await userHashedId(),
+      userId: chatUserId,
       id: uniqueId(),
       createdAt: new Date(),
       lastMessageAt: new Date(),
@@ -560,7 +567,7 @@ export const CreatePersonaChat = async (
       personaMessage: persona.personaMessage,
       personaMessageTitle: persona.name,
       personaId: persona.id,
-      extension: persona.extensionIds || [],
+      extension: extensionIds,
       personaDocumentIds: persona.personaDocumentIds || [],
       attachedFiles: attachedFiles.length > 0 ? attachedFiles : undefined,
       selectedModel: persona.selectedModel as ChatModel | undefined,
