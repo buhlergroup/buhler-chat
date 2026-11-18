@@ -6,7 +6,8 @@ import {
   userHashedId,
   userSession,
 } from "@/features/auth-page/helpers";
-import { UpsertChatThread } from "@/features/chat-page/chat-services/chat-thread-service";
+import { saveChatThread } from "@/features/chat-page/chat-services/chat-thread-write";
+import { canUseExtension } from "./extension-access";
 import {
   CHAT_THREAD_ATTRIBUTE,
   ChatThreadModel,
@@ -430,10 +431,23 @@ export const CreateChatWithExtension = async (
 ): Promise<ServerActionResponse<ChatThreadModel>> => {
   const extensionResponse = await FindExtensionByID(extensionId);
 
+  if (
+    extensionResponse.status === "OK" &&
+    !canUseExtension(await userHashedId(), extensionResponse.response)
+  ) {
+    // Same answer as for an unknown id (see below): a private extension of
+    // another user stays hidden, and its header secrets never reach this
+    // user's chat.
+    return {
+      status: "ERROR",
+      errors: [{ message: `Extension not found with id: ${extensionId}` }],
+    };
+  }
+
   if (extensionResponse.status === "OK") {
     const extension = extensionResponse.response;
 
-    const response = await UpsertChatThread({
+    const response = await saveChatThread({
       name: extension.name,
       useName: (await userSession())!.name,
       userId: await userHashedId(),

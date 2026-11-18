@@ -48,6 +48,8 @@ function isValidReasoningEffort(value: string): value is ReasoningEffort {
 import { redirect } from "next/navigation";
 import { RevalidateCache } from "@/features/common/navigation-helpers";
 import { ChatApiTitleAndIntent } from "./chat-api/chat-api-text";
+import { applyUserThreadChanges, saveChatThread } from "./chat-thread-write";
+import { findUsableExtension } from "@/features/extensions-page/extension-services/extension-access";
 
 export const FindAllChatThreadForCurrentUser = async (): Promise<
   ServerActionResponse<Array<ChatThreadModel>>
@@ -314,8 +316,17 @@ export const AddExtensionToChatThread = async (props: {
       );
 
       if (existingExtension === undefined) {
-        chatThread.extension.push(props.extensionId);
-        return await UpsertChatThread(chatThread);
+        // Only an extension the user may use can enter the thread: /api/chat
+        // resolves the thread's extension ids with their header secrets.
+        const extension = await findUsableExtension(props.extensionId);
+        if (!extension) {
+          return {
+            status: "NOT_FOUND",
+            errors: [{ message: "Extension not found" }],
+          };
+        }
+        chatThread.extension.push(extension.id);
+        return await saveChatThread(chatThread);
       }
 
       return {
@@ -344,41 +355,43 @@ export const RemoveExtensionFromChatThread = async (props: {
       (e) => e !== props.extensionId
     );
 
-    return await UpsertChatThread(chatThread);
+    return await saveChatThread(chatThread);
   }
 
   return response;
 };
 
+/**
+ * Client-facing update of an EXISTING chat thread that the user may change.
+ *
+ * Only the fields of `applyUserThreadChanges` (name, bookmarked) are taken
+ * from the input. Every other field, e.g. personaId, extension ids, persona
+ * documents, sub-agents, default tools and userId, comes from the stored
+ * thread, so a client cannot attach an agent or an extension to a thread, or
+ * write a thread for another user. A changed personaId is ignored.
+ *
+ * This action does not create threads. Server code that builds a new thread
+ * uses `saveChatThread` (chat-thread-write.ts), which is not an RPC endpoint.
+ */
 export const UpsertChatThread = async (
   chatThread: ChatThreadModel
 ): Promise<ServerActionResponse<ChatThreadModel>> => {
   try {
-    if (chatThread.id) {
-      const response = await EnsureChatThreadOperation(chatThread.id);
-      if (response.status !== "OK") {
-        if (response.status !== "NOT_FOUND") {
-          return response;
-        }
-      }
-    }
-
-    chatThread.lastMessageAt = new Date();
-    const { resource } = await HistoryContainer().items.upsert<ChatThreadModel>(
-      chatThread
-    );
-
-    if (resource) {
+    if (!chatThread?.id) {
       return {
-        status: "OK",
-        response: resource,
+        status: "NOT_FOUND",
+        errors: [{ message: `Chat thread not found` }],
       };
     }
 
-    return {
-      status: "ERROR",
-      errors: [{ message: `Chat thread not found` }],
-    };
+    const response = await EnsureChatThreadOperation(chatThread.id);
+    if (response.status !== "OK") {
+      return response;
+    }
+
+    return await saveChatThread(
+      applyUserThreadChanges(response.response, chatThread)
+    );
   } catch (error) {
     return {
       status: "ERROR",
@@ -465,7 +478,7 @@ export const UpdateChatTitle = async (
       }
       chatThread.intent = intent;
 
-      return await UpsertChatThread(chatThread);
+      return await saveChatThread(chatThread);
     }
     return response;
   } catch (error) {
@@ -497,7 +510,7 @@ export const UpdateChatThreadSelectedModel = async (
     if (response.status === "OK") {
       const chatThread = response.response;
       chatThread.selectedModel = selectedModel;
-      return await UpsertChatThread(chatThread);
+      return await saveChatThread(chatThread);
     }
     return response;
   } catch (error) {
@@ -527,7 +540,7 @@ export const UpdateChatThreadReasoningEffort = async (
     if (response.status === "OK") {
       const chatThread = response.response;
       chatThread.reasoningEffort = reasoningEffort;
-      return await UpsertChatThread(chatThread);
+      return await saveChatThread(chatThread);
     }
     return response;
   } catch (error) {
@@ -551,7 +564,7 @@ export const UpdateChatThreadCodeInterpreterContainer = async (
       if (fileIdsSignature !== undefined) {
         chatThread.codeInterpreterFileIdsSignature = fileIdsSignature;
       }
-      return await UpsertChatThread(chatThread);
+      return await saveChatThread(chatThread);
     }
     return response;
   } catch (error) {
@@ -571,7 +584,7 @@ export const UpdateChatThreadAttachedFiles = async (
     if (response.status === "OK") {
       const chatThread = response.response;
       chatThread.attachedFiles = attachedFiles;
-      return await UpsertChatThread(chatThread);
+      return await saveChatThread(chatThread);
     }
     return response;
   } catch (error) {
@@ -594,7 +607,7 @@ export const AddAttachedFile = async (
       // Avoid duplicates
       if (!existingFiles.some(f => f.id === file.id)) {
         chatThread.attachedFiles = [...existingFiles, file];
-        return await UpsertChatThread(chatThread);
+        return await saveChatThread(chatThread);
       }
       return response;
     }
@@ -616,7 +629,7 @@ export const RemoveAttachedFile = async (
     if (response.status === "OK") {
       const chatThread = response.response;
       chatThread.attachedFiles = (chatThread.attachedFiles || []).filter(f => f.id !== fileId);
-      return await UpsertChatThread(chatThread);
+      return await saveChatThread(chatThread);
     }
     return response;
   } catch (error) {
@@ -675,7 +688,7 @@ export const UpdateChatThreadUsage = async (
           ? { lastPromptTokens }
           : {}),
       };
-      return await UpsertChatThread(chatThread);
+      return await saveChatThread(chatThread);
     }
     return response;
   } catch (error) {

@@ -1,6 +1,6 @@
 import { userHashedId } from "@/features/auth-page/helpers";
 import { ChatHome } from "@/features/chat-home-page/chat-home";
-import { GetAllAgentStats } from "@/features/common/services/agent-stats-service";
+import { GetAgentStatsForPersonas } from "@/features/common/services/agent-stats-service";
 import { FindAllNewsArticles } from "@/features/common/services/news-service/news-service";
 import { FindAllExtensionForCurrentUser } from "@/features/extensions-page/extension-services/extension-service";
 import { GetUserFavoriteAgents } from "@/features/persona-page/persona-services/agent-favorite-service";
@@ -8,13 +8,18 @@ import { FindAllPersonaForCurrentUser } from "@/features/persona-page/persona-se
 import { DisplayError } from "@/features/ui/error/display-error";
 
 export default async function Home() {
+  const personasPromise = FindAllPersonaForCurrentUser();
+  // Stats only for the agents this user can open.
+  const agentStatsPromise = personasPromise.then((r) =>
+    r.status === "OK" ? GetAgentStatsForPersonas(r.response.map((p) => p.id)) : {}
+  );
   const [personaResponse, extensionResponse, newsResponse, favoriteAgentIds, currentUserId, agentStats] = await Promise.all([
-    FindAllPersonaForCurrentUser(),
+    personasPromise,
     FindAllExtensionForCurrentUser(),
     FindAllNewsArticles(),
     GetUserFavoriteAgents(),
     userHashedId(),
-    GetAllAgentStats(),
+    agentStatsPromise,
   ]);
 
   if (personaResponse.status !== "OK") {
