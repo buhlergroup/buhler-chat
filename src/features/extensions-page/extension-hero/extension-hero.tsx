@@ -5,7 +5,7 @@ import { Hero } from "@/features/ui/hero";
 import { PocketKnife } from "lucide-react";
 import { AISearch } from "./ai-search-issues";
 import { BingSearch } from "./bing-search";
-import { NewExtension } from "./new-extension";
+import { NewExtension, NewMcpExtension } from "./new-extension";
 
 export const ExtensionHero = () => {
   return (
@@ -19,6 +19,7 @@ export const ExtensionHero = () => {
         resources`}
     >
       <NewExtension />
+      <NewMcpExtension />
       <BingSearch />
       <AISearch />
     </Hero>

@@ -28,6 +28,7 @@ import {
   ToolOutput,
 } from "@/components/ai-elements/tool";
 import type { ReactNode } from "react";
+import { McpConnectButton } from "@/features/extensions-page/mcp-connect-button";
 import {
   isImageReference,
   resolveBlobReferenceToPath,
@@ -236,8 +237,42 @@ function extractImageGenSrc(output: unknown): string | null {
  * either the model context or the assistant text, so the model never
  * echoes a renderable URL — no duplicate render with Streamdown.
  */
+/**
+ * `mcpConnect` marks the result of an OAuth MCP tool the user has not
+ * signed in to (mcp-tool.ts mcpConnectRequired): show why, and the
+ * "Connect <extension>" action that starts the user's own sign-in.
+ */
+function extractMcpConnect(
+  output: unknown
+): { text: string; extensionId: string; extensionName: string; personaId?: string } | null {
+  if (!isPlainObject(output)) return null;
+  const connect = output.mcpConnect;
+  if (!isPlainObject(connect)) return null;
+  const { extensionId, extensionName, personaId } = connect;
+  if (typeof extensionId !== "string" || typeof extensionName !== "string") return null;
+  return {
+    text: typeof output.text === "string" ? output.text : "",
+    extensionId,
+    extensionName,
+    personaId: typeof personaId === "string" ? personaId : undefined,
+  };
+}
+
 export function renderToolOutput(output: unknown, toolName?: string): ReactNode {
   if (output === null || output === undefined) return undefined;
+  const mcpConnect = extractMcpConnect(output);
+  if (mcpConnect) {
+    return (
+      <div className="flex flex-col gap-2 items-start">
+        <span className="text-sm">Sign in to {mcpConnect.extensionName} to use its tools.</span>
+        <McpConnectButton
+          extensionId={mcpConnect.extensionId}
+          extensionName={mcpConnect.extensionName}
+          personaId={mcpConnect.personaId}
+        />
+      </div>
+    );
+  }
   if (toolName === "image_generation") {
     const src = extractImageGenSrc(output);
     if (src) {

@@ -187,3 +187,15 @@ describe("renderToolOutput", () => {
     );
   });
 });
+
+describe("renderToolOutput — MCP sign-in needed", () => {
+  it("shows a Connect <extension> action instead of the raw result", async () => {
+    const { render, screen } = await import("@testing-library/react");
+    const node = renderToolOutput({
+      text: "The user is not connected.",
+      mcpConnect: { extensionId: "ext1", extensionName: "Market data", personaId: "agent-1" },
+    });
+    render(<>{node}</>);
+    expect(screen.getByRole("button", { name: /Connect Market data/ })).toBeInTheDocument();
+  });
+});

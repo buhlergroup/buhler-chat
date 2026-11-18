@@ -96,7 +96,8 @@ if (typeof globalThis.ResizeObserver === "undefined") {
   } as unknown as typeof ResizeObserver;
 }
 
-if (typeof globalThis.matchMedia === "undefined") {
+// Node-environment tests (// @vitest-environment node) have no window.
+if (typeof window !== "undefined" && typeof globalThis.matchMedia === "undefined") {
   Object.defineProperty(window, "matchMedia", {
     writable: true,
     value: (query: string) => ({

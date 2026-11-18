@@ -58,10 +58,7 @@ import {
 } from "@/features/chat-page/chat-services/chat-api/prompt-builder";
 import { resolvePromptCacheKey } from "@/features/chat-page/chat-services/models/prompt-cache-key";
 import { CHAT_DEFAULT_SYSTEM_PROMPT } from "@/features/theme/theme-config";
-import {
-  FindAllExtensionForCurrentUserAndIds,
-  FindSecureHeaderValue,
-} from "@/features/extensions-page/extension-services/extension-service";
+import { resolveExtensionsForChat } from "@/features/extensions-page/extension-services/extension-runtime";
 import { logError, logInfo, logWarn } from "@/features/common/services/logger";
 import { type UserPrompt } from "@/features/chat-page/chat-services/models";
 
@@ -291,33 +288,18 @@ export async function POST(req: Request) {
     });
   // ── end prompt prefix assembly ─────────────────────────────────────────
 
-  // Resolve extension IDs → full objects with header secrets for buildToolset
-  type ResolvedExt = Parameters<typeof buildToolset>[0]["extensions"][number];
-  const resolvedExtensions: ResolvedExt[] = [];
-  if (ctx.extensions.length > 0) {
-    const extResp = await FindAllExtensionForCurrentUserAndIds(ctx.extensions);
-    if (extResp.status === "OK") {
-      // FindAllExtensionForCurrentUserAndIds is deliberately over-broad
-      // (isPublished=true OR userId=@userId OR id IN @ids) so it can resolve
-      // publisher-owned extensions the current user doesn't own. That means
-      // it can return every published/owned extension the user has access
-      // to, not just the ones configured on this thread. Narrow back down to
-      // exactly ctx.extensions (the thread's configured extension ids) so an
-      // agent/persona only gets the tools it was actually wired with.
-      const configuredExtensions = extResp.response.filter((e) =>
-        ctx.extensions.includes(e.id)
-      );
-      for (const ext of configuredExtensions) {
-        const headerSecrets: Record<string, string> = {};
-        for (const h of ext.headers) {
-          const v = await FindSecureHeaderValue(h.id);
-          if (v.status === "OK") headerSecrets[h.key] = v.response;
-          else logWarn("/api/chat: failed to resolve extension header", { headerId: h.id });
-        }
-        resolvedExtensions.push({ extension: ext as ResolvedExt["extension"], headerSecrets });
-      }
-    }
-  }
+  // Resolve extension IDs → full objects with secrets for buildToolset.
+  // resolveExtensionsForChat applies THE access rule (extension-access.ts):
+  // only ids configured on this thread, and of those only extensions the user
+  // owns, published ones, and the extensions of the agent this thread runs
+  // (thread.personaId) when the user can open that agent.
+  const resolvedExtensions =
+    ctx.extensions.length > 0
+      ? await resolveExtensionsForChat({
+          extensionIds: ctx.extensions,
+          personaId: ctx.thread.personaId,
+        })
+      : [];
 
   const tools = await buildToolset({
     user: ctx.user.id,

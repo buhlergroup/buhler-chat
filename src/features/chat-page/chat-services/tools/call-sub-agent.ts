@@ -12,6 +12,7 @@ import { toolsetSignature } from "../models/prompt-cache-key";
 import { stabilizeToolset } from "./stabilize-toolset";
 import { computeTokenCostUsd } from "../chat-api/usage-data";
 import type { ToolContext } from "./tool-context";
+import { resolveExtensionsForChat } from "@/features/extensions-page/extension-services/extension-runtime";
 
 const MAX_SUB_AGENT_DEPTH = 2;
 
@@ -91,7 +92,14 @@ export function callSubAgentTool(ctx: ToolContext) {
           threadDocumentIds: ctx.threadDocumentIds,
           personaDocumentIds: persona.personaDocumentIds ?? [],
           defaultTools: persona.defaultTools ?? {},
-          extensions: [], // Sub-agents don't inherit thread extensions
+          // A sub-agent does not inherit the thread's extensions; it gets its
+          // OWN extensions under the same access rule as a chat with that
+          // agent (extension-access.ts): access to the agent grants use of
+          // the extensions its owner attached.
+          extensions: await resolveExtensionsForChat({
+            extensionIds: persona.extensionIds ?? [],
+            personaId: persona.id,
+          }),
           // A sub-agent's own sub-agents are read off the persona; the
           // tool only registers when the persona declares them, matching
           // the top-level behaviour.
