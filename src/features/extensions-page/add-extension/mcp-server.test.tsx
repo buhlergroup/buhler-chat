@@ -3,6 +3,7 @@ import { act, fireEvent, render, screen } from "@testing-library/react";
 
 vi.mock("../extension-services/mcp/mcp-service", () => ({
   DiscoverMcpTools: vi.fn(),
+  DiscoverDraftMcpTools: vi.fn(),
   DisconnectMcpOAuth: vi.fn(),
   GetMcpConnections: vi.fn().mockResolvedValue({ status: "OK", response: [] }),
   StartMcpOAuth: vi.fn(),
