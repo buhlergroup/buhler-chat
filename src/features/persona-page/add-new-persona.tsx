@@ -37,6 +37,7 @@ import {
 } from "./persona-services/models";
 import { PersonaDocuments } from "./persona-documents/persona-documents";
 import { CodeInterpreterDocuments } from "./persona-documents/code-interpreter-documents";
+import { PersonaSkills } from "./persona-skills/persona-skills";
 import { PersonaAccessGroup } from "./persona-access-group/persona-access-group";
 import { TooltipProvider } from "@radix-ui/react-tooltip";
 import { useResetableActionState } from "../common/hooks/useResetableActionState";
@@ -357,6 +358,7 @@ export const AddNewPersona: FC<Props> = (props) => {
                 <CodeInterpreterDocuments
                   initialCIDocumentIds={persona.codeInterpreterDocumentIds || []}
                 />
+                <PersonaSkills personaId={persona.id} />
               </div>
             </ScrollArea>
             <SheetFooter className="py-2 flex justify-end flex-row">

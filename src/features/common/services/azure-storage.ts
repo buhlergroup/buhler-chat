@@ -145,3 +145,30 @@ export const GetBlob = async (
     };
   }
 };
+
+/**
+ * Deletes a blob. A missing blob counts as deleted (idempotent cleanup).
+ */
+export const DeleteBlob = async (
+  containerName: string,
+  blobPath: string
+): Promise<ServerActionResponse<boolean>> => {
+  const blobServiceClient = InitBlobServiceClient();
+  const blockBlobClient = blobServiceClient
+    .getContainerClient(containerName)
+    .getBlockBlobClient(blobPath);
+  try {
+    await blockBlobClient.deleteIfExists();
+    return { status: "OK", response: true };
+  } catch (error) {
+    logError("Azure Storage delete error", {
+      error: error instanceof Error ? error.message : String(error),
+      blobPath,
+      containerName,
+    });
+    return {
+      status: "ERROR",
+      errors: [{ message: `Error deleting blob: ${blobPath}` }],
+    };
+  }
+};

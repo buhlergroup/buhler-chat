@@ -13,6 +13,8 @@ import { stabilizeToolset } from "./stabilize-toolset";
 import { computeTokenCostUsd } from "../chat-api/usage-data";
 import type { ToolContext } from "./tool-context";
 import { resolveExtensionsForChat } from "@/features/extensions-page/extension-services/extension-runtime";
+import { loadUsableSkills } from "@/features/persona-page/persona-services/skills/persona-skill-store";
+import { buildSkillCatalogPrompt } from "@/features/persona-page/persona-services/skills/skill-models";
 
 const MAX_SUB_AGENT_DEPTH = 2;
 
@@ -81,6 +83,10 @@ export function callSubAgentTool(ctx: ToolContext) {
       // Build sub-context and tools (recursion-guarded)
       const currentDepth = ctx.depth ?? 0;
       let subToolset: Record<string, any> = {};
+      // The sub-agent's own skills (same access rule as a direct chat). A
+      // sub-agent has no code interpreter, so load_skill serves SKILL.md and
+      // the text files only.
+      let subSkillCatalog = "";
 
       if (currentDepth < MAX_SUB_AGENT_DEPTH) {
         // Lazy import to avoid a circular dependency at module load time.
@@ -105,7 +111,10 @@ export function callSubAgentTool(ctx: ToolContext) {
           // the top-level behaviour.
           subAgentIds: persona.subAgentIds,
           depth: currentDepth + 1,
+          skills: await loadUsableSkills(persona.id),
+          skillsInCodeInterpreter: [],
         };
+        subSkillCatalog = buildSkillCatalogPrompt(subCtx.skills ?? []);
 
         subToolset = await buildToolset(subCtx);
       } else {
@@ -160,7 +169,7 @@ export function callSubAgentTool(ctx: ToolContext) {
 
       const result = await generateText({
         model: resolved.model,
-        instructions: persona.personaMessage,
+        instructions: persona.personaMessage + subSkillCatalog,
         messages: [{ role: "user", content: args.task }],
         // Same canonical tool order as the main path — a sub-agent's prefix
         // is cached under its own key and has to be just as stable.

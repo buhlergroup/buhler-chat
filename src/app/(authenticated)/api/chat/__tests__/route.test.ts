@@ -2,6 +2,11 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 
 // ── Heavy server-only modules ─────────────────────────────────────────────────
 vi.mock("server-only", () => ({}));
+// Agent skills: no skills in these tests (the store would reach Cosmos).
+vi.mock("@/features/persona-page/persona-services/skills/persona-skill-store", () => ({
+  loadUsableSkills: vi.fn(async () => []),
+  readSkillFile: vi.fn(),
+}));
 vi.mock("@/features/common/services/logger", () => ({
   logError: vi.fn(),
   logWarn: vi.fn(),

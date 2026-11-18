@@ -58,6 +58,8 @@ param searchServiceSkuName string = 'standard'
 // TODO: define good default Sku and settings for storage account
 param storageServiceSku object = { name: 'Standard_LRS' } 
 param storageServiceImageContainerName string = 'images'
+// Private container for agent skill packages (.zip). Hyphens allowed.
+param storageServiceSkillContainerName string = 'agent-skills'
 
 param resourceGroupName string = 'buhler-alm-chatgpt'
 
@@ -104,6 +106,7 @@ module resources 'resources.bicep' = {
     searchServiceSkuName: searchServiceSkuName
     storageServiceSku: storageServiceSku
     storageServiceImageContainerName: storageServiceImageContainerName
+    storageServiceSkillContainerName: storageServiceSkillContainerName
     location: location
   }
 }

@@ -85,6 +85,21 @@ export const GetThreadAndImageFromUrl = async (
     };
   }
 
+  // Extra measure: agent skill packages live in their own private container
+  // (persona-skill-store.ts), but this route never serves an
+  // "agent-skills/" path, and no "." / ".." segment may steer the blob path.
+  const blobPath = `${threadId}/${imgName}`.replace(/\\/g, "/");
+  const segments = blobPath.split("/");
+  if (
+    segments[0] === "agent-skills" ||
+    segments.some((segment) => segment === "." || segment === "..")
+  ) {
+    return {
+      status: "ERROR",
+      errors: [{ message: "Invalid URL, threadId and/or imgName not formatted correctly." }],
+    };
+  }
+
   return {
     status: "OK",
     response: {
