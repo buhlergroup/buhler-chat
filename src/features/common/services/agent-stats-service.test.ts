@@ -143,37 +143,68 @@ describe("common.unit.agent-stats — RecordAgentInteraction", () => {
   });
 });
 
-describe("common.unit.agent-stats — GetAllAgentStats", () => {
+describe("common.unit.agent-stats — GetAgentStatsForPersonas", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     lastQuerySpec = null;
     lastQueryOpts = null;
   });
 
-  it("agent-stats.007: single-partition query, returns map keyed by personaId", async () => {
+  it("agent-stats.007: single-partition query scoped to the given ids, map keyed by personaId (allowed)", async () => {
     mockQueryFetchAll.mockResolvedValueOnce({
       resources: [
         { personaId: "a", messageCount: 5 },
         { personaId: "b", messageCount: 9 },
       ],
     });
-    const { GetAllAgentStats } = await import("./agent-stats-service");
-    const result = await GetAllAgentStats();
+    const { GetAgentStatsForPersonas } = await import("./agent-stats-service");
+    const result = await GetAgentStatsForPersonas(["a", "b"]);
 
     expect(lastQueryOpts).toEqual({ partitionKey: "AGENT_STATS" });
     expect(lastQuerySpec.parameters).toEqual([
       { name: "@type", value: "AGENT_STATS" },
       { name: "@pk", value: "AGENT_STATS" },
+      { name: "@personaIds", value: ["a", "b"] },
     ]);
     expect(Object.keys(result)).toEqual(["a", "b"]);
     expect(result["b"].messageCount).toBe(9);
   });
 
+  it("agent-stats.007b: never returns stats of an agent id the caller did not pass (denied)", async () => {
+    // Even if the store returns more rows, a private agent's stats stay out.
+    mockQueryFetchAll.mockResolvedValueOnce({
+      resources: [
+        { personaId: "visible", messageCount: 1 },
+        { personaId: "private-of-someone-else", messageCount: 42 },
+      ],
+    });
+    const { GetAgentStatsForPersonas } = await import("./agent-stats-service");
+    const result = await GetAgentStatsForPersonas(["visible"]);
+    expect(Object.keys(result)).toEqual(["visible"]);
+  });
+
+  it("agent-stats.007c: no ids, no query, empty map", async () => {
+    const { GetAgentStatsForPersonas } = await import("./agent-stats-service");
+    await expect(GetAgentStatsForPersonas([])).resolves.toEqual({});
+    expect(lastQuerySpec).toBeNull();
+  });
+
   it("agent-stats.008: degrades to empty map on query failure", async () => {
     mockQueryFetchAll.mockRejectedValueOnce(new Error("cosmos down"));
-    const { GetAllAgentStats } = await import("./agent-stats-service");
-    await expect(GetAllAgentStats()).resolves.toEqual({});
+    const { GetAgentStatsForPersonas } = await import("./agent-stats-service");
+    await expect(GetAgentStatsForPersonas(["a"])).resolves.toEqual({});
     expect(mockLogError).toHaveBeenCalled();
+  });
+
+  it("agent-stats.010: the module is not a server action file (no RPC endpoints)", async () => {
+    const { readFileSync } = await import("node:fs");
+    const path = await import("node:path");
+    // vitest runs from src/ (vitest.config.ts lives there).
+    const source = readFileSync(
+      path.resolve(process.cwd(), "features/common/services/agent-stats-service.ts"),
+      "utf8"
+    );
+    expect(source).not.toMatch(/^\s*["']use server["']/m);
   });
 });
 

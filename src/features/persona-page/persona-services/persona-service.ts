@@ -2,7 +2,7 @@
 import "server-only";
 
 import { getCurrentUser, userHashedId } from "@/features/auth-page/helpers";
-import { UpsertChatThread } from "@/features/chat-page/chat-services/chat-thread-service";
+import { saveChatThread } from "@/features/chat-page/chat-services/chat-thread-write";
 import {
   CHAT_THREAD_ATTRIBUTE,
   ChatThreadModel,
@@ -38,6 +38,7 @@ import { UploadFileForCodeInterpreter } from "@/features/chat-page/chat-services
 import { UserAccessGroups } from "./access-group-service";
 import {
   canOpenPersona,
+  checkPersonaEdit,
   currentPersonaViewer,
   findPersonaDocument,
 } from "./persona-access";
@@ -187,14 +188,13 @@ export const CreatePersona = async (
 export const EnsurePersonaOperation = async (
   personaId: string
 ): Promise<ServerActionResponse<PersonaModel>> => {
-  const personaResponse = await FindPersonaByID(personaId);
-  const currentUser = await getCurrentUser();
-  const hashedId = await userHashedId();
+  // checkPersonaEdit: owner or admin may edit (canEditPersona). A user who
+  // can only open the agent gets "not allowed"; for an agent the user cannot
+  // open, the answer stays the same as for an unknown id.
+  const editCheck = await checkPersonaEdit(personaId);
 
-  if (personaResponse.status === "OK") {
-    if (currentUser.isAdmin || personaResponse.response.userId === hashedId) {
-      return personaResponse;
-    }
+  if (editCheck.status === "OK" || editCheck.status === "UNAUTHORIZED") {
+    return editCheck;
   }
 
   return {
@@ -214,7 +214,12 @@ export const DeletePersona = async (
     const personaResponse = await EnsurePersonaOperation(personaId);
 
     if (personaResponse.status === "OK") {
-      await DeletePersonaDocumentsByPersonaId(personaId);
+      const documentsResponse = await DeletePersonaDocumentsByPersonaId(
+        personaId
+      );
+      if (documentsResponse.status !== "OK") {
+        return documentsResponse;
+      }
 
       const { resource: deletedPersona } = await HistoryContainer()
         .item(personaId, personaResponse.response.userId)
@@ -254,9 +259,12 @@ export const UpsertPersona = async (
     if (personaResponse.status === "OK") {
       const { response: persona } = personaResponse;
 
+      // The documents to remove are computed from the STORED list, not from
+      // the ids the client sends, so a save can only remove documents of
+      // this agent.
       const personaDocumentIdsResponse = await AddOrUpdatePersonaDocuments(
         sharePointFiles,
-        personaInput.personaDocumentIds || []
+        persona.personaDocumentIds || []
       );
 
       let personaDocumentIds: string[] = [];
@@ -508,7 +516,9 @@ export const CreatePersonaChat = async (
       }
     }
 
-    const response = await UpsertChatThread({
+    // Server-built thread: saveChatThread, not the client-facing
+    // UpsertChatThread (which takes only the title and the bookmark).
+    const response = await saveChatThread({
       name: persona.name,
       useName: user.name,
       userId: await userHashedId(),

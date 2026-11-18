@@ -54,8 +54,8 @@ vi.mock("@/features/common/services/azure-default-credential", () => ({
 }));
 
 // ── chat-thread-service ───────────────────────────────────────────────────────
-vi.mock("@/features/chat-page/chat-services/chat-thread-service", () => ({
-  UpsertChatThread: vi.fn(async (payload: any) => ({ status: "OK", response: { ...payload } })),
+vi.mock("@/features/chat-page/chat-services/chat-thread-write", () => ({
+  saveChatThread: vi.fn(async (payload: any) => ({ status: "OK", response: { ...payload } })),
 }));
 
 vi.mock("@/features/common/services/logger", () => ({
@@ -76,7 +76,7 @@ import {
   CreateChatWithExtension,
 } from "./extension-service";
 
-import { UpsertChatThread } from "@/features/chat-page/chat-services/chat-thread-service";
+import { saveChatThread as UpsertChatThread } from "@/features/chat-page/chat-services/chat-thread-write";
 
 // ── helpers ──────────────────────────────────────────────────────────────────
 const validFunction = () => ({
@@ -359,6 +359,29 @@ describe("extension-service.ts", () => {
     expect(UpsertChatThread).toHaveBeenCalled();
     const callArg = vi.mocked(UpsertChatThread).mock.calls[0][0] as any;
     expect(callArg.extension).toEqual(["e1"]);
+  });
+
+  // 018b – another user's private extension: same answer as an unknown id
+  it("018b CreateChatWithExtension denies another user's private extension", async () => {
+    seedExtension({ id: "e-private", userId: "other-hash", isPublished: false });
+
+    const result = await CreateChatWithExtension("e-private");
+
+    expect(result.status).toBe("ERROR");
+    if (result.status === "ERROR") {
+      expect(result.errors[0].message).toBe("Extension not found with id: e-private");
+    }
+    expect(UpsertChatThread).not.toHaveBeenCalled();
+  });
+
+  // 018c – a published extension of another user is allowed
+  it("018c CreateChatWithExtension allows a published extension of another user", async () => {
+    seedExtension({ id: "e-pub", userId: "other-hash", isPublished: true });
+
+    const result = await CreateChatWithExtension("e-pub");
+
+    expect(result.status).toBe("OK");
+    expect(UpsertChatThread).toHaveBeenCalled();
   });
 
   // 019 – CreateChatWithExtension surfaces FindExtensionByID error

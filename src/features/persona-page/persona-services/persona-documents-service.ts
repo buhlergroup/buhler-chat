@@ -20,7 +20,7 @@ import {
 import { uniqueId } from "@/features/common/util";
 import { HistoryContainer } from "@/features/common/services/cosmos";
 import { SqlQuerySpec } from "@azure/cosmos";
-import { FindPersonaByID } from "./persona-service";
+import { checkPersonaEdit } from "./persona-access";
 import {
   DeleteSearchDocumentByPersonaDocumentId,
   IndexDocuments,
@@ -161,22 +161,25 @@ function IsDocumentLimitExceeded(sharePointFiles: DocumentMetadata[]): boolean {
 }
 
 async function RemoveUnselectedPersonaDocuments(removeDocuments: string[]) {
-  try {
-    await Promise.all(
-      removeDocuments.map(async (id) => {
-        await HistoryContainer()
-          .item(id, await userHashedId())
-          .delete();
-      })
-    );
-    await Promise.all(
-      removeDocuments.map(async (oldDocumentId) => {
-        await DeleteSearchDocumentByPersonaDocumentId(oldDocumentId);
-      })
-    );
-  } catch (error) {
-    // Fail silently because we don't want to block the process if we can't delete the document
-  }
+  const userId = await userHashedId();
+  await Promise.all(
+    removeDocuments.map(async (id) => {
+      try {
+        // The delete runs in the caller's partition, so it succeeds only for
+        // a document the caller owns. Only then is the search index entry
+        // removed: an id of a document that belongs to someone else is
+        // skipped.
+        await HistoryContainer().item(id, userId).delete();
+      } catch {
+        return;
+      }
+      try {
+        await DeleteSearchDocumentByPersonaDocumentId(id);
+      } catch {
+        // Fail silently because we don't want to block the process if we can't delete the document
+      }
+    })
+  );
 }
 
 async function GetNewNotIndexedDocuments(sharePointFiles: DocumentMetadata[]) {
@@ -313,16 +316,20 @@ export const PersonaDocumentById = async (
   }
 };
 
-export const DeletePersonaDocumentsByPersonaId = async (personaId: string) => {
-  const persona = await FindPersonaByID(personaId);
+export const DeletePersonaDocumentsByPersonaId = async (
+  personaId: string
+): Promise<ServerActionResponse<void>> => {
+  // Edit rights (owner or admin), the same rule as EnsurePersonaOperation.
+  // Being able to open (use) a shared or published agent is not enough.
+  const persona = await checkPersonaEdit(personaId);
 
   if (persona.status !== "OK") {
-    throw new Error("Persona not found");
+    return persona;
   }
 
   const personaDocuments = persona.response.personaDocumentIds;
   if (!personaDocuments || personaDocuments.length === 0) {
-    return;
+    return { status: "OK", response: undefined };
   }
 
   // Delete Documents from Azure Search
@@ -333,9 +340,15 @@ export const DeletePersonaDocumentsByPersonaId = async (personaId: string) => {
   );
 
   // Delete Documents from Cosmos DB
-  for (const id of persona.response.personaDocumentIds || []) {
-    DeletePersonaDocumentById(id);
-  }
+  await Promise.all(
+    personaDocuments.map((id) =>
+      DeletePersonaDocumentById(id).catch(() => {
+        // Best effort, as before: a missing document does not block the delete.
+      })
+    )
+  );
+
+  return { status: "OK", response: undefined };
 };
 
 const DeletePersonaDocumentById = async (personaDocumentId: string) => {

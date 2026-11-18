@@ -1,5 +1,9 @@
-"use server";
 import "server-only";
+
+// No "use server" here on purpose: these functions are called only from
+// server code (pages, the chat route, persona-service). As server actions they
+// were RPC endpoints that any signed-in user could call with any agent id:
+// read the stats of every agent, raise the counters or delete them.
 
 import { PatchOperation, SqlQuerySpec } from "@azure/cosmos";
 import {
@@ -105,19 +109,26 @@ export const RecordAgentInteraction = async (
 };
 
 /**
- * All agent stats keyed by personaId — a single-partition query (sentinel
- * partition), never a container scan. Errors degrade to an empty map so
- * pages render without stats rather than failing.
+ * Agent stats keyed by personaId, ONLY for the given agent ids. Callers pass
+ * the ids of the agents the user can open (FindAllPersonaForCurrentUser), so
+ * the result never shows that a private agent exists or how it is used.
+ * A single-partition query (sentinel partition), never a container scan.
+ * Errors degrade to an empty map so pages render without stats rather than
+ * failing.
  */
-export const GetAllAgentStats = async (): Promise<
-  Record<string, AgentStatsModel>
-> => {
+export const GetAgentStatsForPersonas = async (
+  personaIds: string[]
+): Promise<Record<string, AgentStatsModel>> => {
+  const wanted = new Set(personaIds);
+  if (wanted.size === 0) return {};
   try {
     const querySpec: SqlQuerySpec = {
-      query: "SELECT * FROM root r WHERE r.type=@type AND r.userId=@pk",
+      query:
+        "SELECT * FROM root r WHERE r.type=@type AND r.userId=@pk AND ARRAY_CONTAINS(@personaIds, r.personaId)",
       parameters: [
         { name: "@type", value: AGENT_STATS_ATTRIBUTE },
         { name: "@pk", value: AGENT_STATS_PARTITION },
+        { name: "@personaIds", value: [...wanted] },
       ],
     };
     const { resources } = await HistoryContainer()
@@ -125,9 +136,14 @@ export const GetAllAgentStats = async (): Promise<
         partitionKey: AGENT_STATS_PARTITION,
       })
       .fetchAll();
-    return Object.fromEntries(resources.map((s) => [s.personaId, s]));
+    // Filter again in code: the result must hold only the wanted ids.
+    return Object.fromEntries(
+      resources
+        .filter((s) => wanted.has(s.personaId))
+        .map((s) => [s.personaId, s])
+    );
   } catch (error) {
-    logError("agent-stats: GetAllAgentStats failed", {
+    logError("agent-stats: GetAgentStatsForPersonas failed", {
       error: error instanceof Error ? error.message : String(error),
     });
     return {};

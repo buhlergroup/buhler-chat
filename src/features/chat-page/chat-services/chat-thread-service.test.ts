@@ -250,11 +250,71 @@ describe("chat-page.unit.thread-service.010 — UpsertChatThread allows admin", 
   });
 });
 
-describe("chat-page.unit.thread-service.011 — UpsertChatThread skips EnsureChatThreadOperation when no id", () => {
-  it("upserts new thread without precheck", async () => {
+describe("chat-page.unit.thread-service.011 — UpsertChatThread does not create threads", () => {
+  it("returns NOT_FOUND for a thread without id and writes nothing", async () => {
     const thread = makeThread({ id: undefined });
     const result = await UpsertChatThread(thread);
+    expect(result.status).toBe("NOT_FOUND");
+    expect(historyContainer.items.upsert).not.toHaveBeenCalled();
+  });
+
+  it("returns NOT_FOUND for an unknown id (e.g. a thread in another user's partition) and writes nothing", async () => {
+    historyContainer.item.mockImplementation(() => ({
+      read: vi.fn(async () => ({ resource: undefined })),
+    }));
+    const result = await UpsertChatThread(
+      makeThread({ id: "victim-thread", userId: "victim-hash", name: "pwned" })
+    );
+    expect(result.status).toBe("NOT_FOUND");
+    expect(historyContainer.items.upsert).not.toHaveBeenCalled();
+  });
+});
+
+describe("chat-page.unit.thread-service.011b — UpsertChatThread takes only user-editable fields", () => {
+  it("allowed: name and bookmarked change", async () => {
+    historyContainer.item.mockImplementation(() => ({
+      read: vi.fn(async () => ({ resource: makeThread({ name: "Old", bookmarked: false }) })),
+    }));
+    const result = await UpsertChatThread(makeThread({ name: "New", bookmarked: true }));
     expect(result.status).toBe("OK");
+    const doc = historyContainer.items.upsert.mock.calls[0][0];
+    expect(doc.name).toBe("New");
+    expect(doc.bookmarked).toBe(true);
+  });
+
+  it("denied: personaId, extension ids and other capability fields from the client are ignored", async () => {
+    const stored = makeThread({
+      personaId: "agent-1",
+      extension: ["ext-own"],
+      personaDocumentIds: ["doc-1"],
+      personaMessage: "stored system prompt",
+      subAgentIds: [],
+    });
+    historyContainer.item.mockImplementation(() => ({
+      read: vi.fn(async () => ({ resource: stored })),
+    }));
+    const result = await UpsertChatThread(
+      makeThread({
+        name: "Renamed",
+        personaId: "private-agent-of-someone-else",
+        extension: ["private-extension-of-someone-else"],
+        personaDocumentIds: ["foreign-doc"],
+        personaMessage: "injected",
+        subAgentIds: ["foreign-agent"],
+        defaultTools: { webSearch: true },
+        userId: "victim-hash",
+      })
+    );
+    expect(result.status).toBe("OK");
+    const doc = historyContainer.items.upsert.mock.calls[0][0];
+    expect(doc.name).toBe("Renamed");
+    expect(doc.personaId).toBe("agent-1");
+    expect(doc.extension).toEqual(["ext-own"]);
+    expect(doc.personaDocumentIds).toEqual(["doc-1"]);
+    expect(doc.personaMessage).toBe("stored system prompt");
+    expect(doc.subAgentIds).toEqual([]);
+    expect(doc.defaultTools).toBeUndefined();
+    expect(doc.userId).toBe(hashedEmail);
   });
 });
 
@@ -262,8 +322,10 @@ describe("chat-page.unit.thread-service.012 — UpsertChatThread sets lastMessag
   it("stamps lastMessageAt", async () => {
     const frozen = new Date("2026-05-15T10:00:00.000Z");
     vi.setSystemTime(frozen);
-    const thread = makeThread({ id: undefined });
-    await UpsertChatThread(thread);
+    historyContainer.item.mockImplementation(() => ({
+      read: vi.fn(async () => ({ resource: makeThread() })),
+    }));
+    await UpsertChatThread(makeThread());
     const doc = historyContainer.items.upsert.mock.calls[0][0];
     expect(new Date(doc.lastMessageAt).toISOString()).toBe(frozen.toISOString());
     vi.useRealTimers();
@@ -284,7 +346,10 @@ describe("chat-page.unit.thread-service.013 — AddExtensionToChatThread is idem
 });
 
 describe("chat-page.unit.thread-service.014 — AddExtensionToChatThread appends new extension", () => {
-  it("upserts with extension added", async () => {
+  it("allowed: upserts with a published extension added", async () => {
+    historyItems = [
+      { id: "ext-1", type: "EXTENSION", userId: "publisher-hash", isPublished: true },
+    ];
     historyContainer.item.mockImplementation(() => ({
       read: vi.fn(async () => ({
         resource: makeThread({ extension: [] }),
@@ -294,6 +359,39 @@ describe("chat-page.unit.thread-service.014 — AddExtensionToChatThread appends
     expect(result.status).toBe("OK");
     const doc = historyContainer.items.upsert.mock.calls[0][0];
     expect(doc.extension).toContain("ext-1");
+  });
+
+  it("allowed: the user's own private extension", async () => {
+    historyItems = [
+      { id: "ext-mine", type: "EXTENSION", userId: hashedEmail, isPublished: false },
+    ];
+    historyContainer.item.mockImplementation(() => ({
+      read: vi.fn(async () => ({ resource: makeThread({ extension: [] }) })),
+    }));
+    const result = await AddExtensionToChatThread({ chatThreadId: "t1", extensionId: "ext-mine" });
+    expect(result.status).toBe("OK");
+  });
+
+  it("denied: another user's private extension is NOT_FOUND and not added", async () => {
+    historyItems = [
+      { id: "ext-private", type: "EXTENSION", userId: "other-hash", isPublished: false },
+    ];
+    historyContainer.item.mockImplementation(() => ({
+      read: vi.fn(async () => ({ resource: makeThread({ extension: [] }) })),
+    }));
+    const result = await AddExtensionToChatThread({ chatThreadId: "t1", extensionId: "ext-private" });
+    expect(result.status).toBe("NOT_FOUND");
+    expect(historyContainer.items.upsert).not.toHaveBeenCalled();
+  });
+
+  it("denied: an unknown extension id is NOT_FOUND", async () => {
+    historyItems = [];
+    historyContainer.item.mockImplementation(() => ({
+      read: vi.fn(async () => ({ resource: makeThread({ extension: [] }) })),
+    }));
+    const result = await AddExtensionToChatThread({ chatThreadId: "t1", extensionId: "nope" });
+    expect(result.status).toBe("NOT_FOUND");
+    expect(historyContainer.items.upsert).not.toHaveBeenCalled();
   });
 });
 
