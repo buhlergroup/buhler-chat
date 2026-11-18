@@ -13,10 +13,9 @@ import {
   ExtensionModel,
   HeaderModel,
   McpConfigModel,
-  McpSecretPlacement,
+  McpSecretModel,
   McpToolInfo,
 } from "./extension-services/models";
-import { parseMcpImportText } from "./extension-services/mcp/mcp-import";
 
 /** Mask the server sends for a stored secret; sending it back keeps the value. */
 export const SECRET_MASK = "**********";
@@ -43,8 +42,10 @@ class ExtensionState {
   public defaultModel: ExtensionModel = this.createDefaultModel();
 
   public isLoading: boolean = false;
-  /** Ids of MCP secrets stored on the server (their value is the mask). */
+  /** Ids of MCP header rows stored on the server (their value is the mask). */
   public savedSecretIds: string[] = [];
+  /** Header rows as stored, to undo a legacy bearer row's switch to a plain header. */
+  private savedSecrets: Record<string, Pick<McpSecretModel, "name" | "placement" | "target">> = {};
   /** True when the server holds an OAuth client secret for this extension. */
   public hasSavedClientSecret: boolean = false;
   public isOpened: boolean = false;
@@ -200,6 +201,9 @@ class ExtensionState {
       ...models,
     };
     this.savedSecretIds = models.mcp?.secrets.map((s) => s.id) ?? [];
+    this.savedSecrets = Object.fromEntries(
+      (models.mcp?.secrets ?? []).map((s) => [s.id, { name: s.name, placement: s.placement, target: s.target }])
+    );
     this.hasSavedClientSecret = models.mcp?.oauth?.clientSecret === SECRET_MASK;
     this.resetAndOpenSlider();
   }
@@ -207,6 +211,7 @@ class ExtensionState {
   public newAndOpenSlider(kind: ExtensionKind = "http") {
     this.extension = this.createDefaultModel();
     this.savedSecretIds = [];
+    this.savedSecrets = {};
     this.hasSavedClientSecret = false;
     if (kind === "mcp") {
       this.extension.kind = "mcp";
@@ -230,27 +235,50 @@ class ExtensionState {
     this.mcp.oauth = { ...(this.mcp.oauth ?? {}), ...patch };
   }
 
-  public addMcpSecret(
-    secret: { name?: string; value?: string; placement?: McpSecretPlacement } = {}
-  ) {
-    this.mcp.secrets.push({
-      id: uniqueId(),
-      name: secret.name ?? "",
-      value: secret.value ?? "",
-      placement: secret.placement ?? "bearer",
-      target: "",
-    });
+  /** Adds an empty header row. New rows are always plain headers. */
+  public addMcpHeader() {
+    this.mcp.secrets.push({ id: uniqueId(), name: "", value: "", placement: "header", target: "" });
   }
 
-  public updateMcpSecret(
-    id: string,
-    patch: Partial<{ name: string; value: string; placement: McpSecretPlacement; target: string }>
-  ) {
+  public setMcpHeaderName(id: string, name: string) {
     const secret = this.mcp.secrets.find((s) => s.id === id);
-    if (secret) Object.assign(secret, patch);
+    // Legacy bearer / query rows keep their name until they get a new value.
+    if (!secret || secret.placement !== "header") return;
+    secret.name = name;
+    secret.target = name;
   }
 
-  public removeMcpSecret(id: string) {
+  /**
+   * Sets a header value. Empty on a saved row keeps the saved value (mask).
+   * A legacy bearer row with a new value becomes a plain `Authorization`
+   * header, sent exactly as typed; clearing the value again restores it.
+   */
+  public setMcpHeaderValue(id: string, value: string) {
+    const secret = this.mcp.secrets.find((s) => s.id === id);
+    if (!secret || secret.placement === "query") return;
+    const saved = this.savedSecrets[secret.id];
+    if (value) {
+      if (secret.placement === "bearer") {
+        secret.placement = "header";
+        secret.name = "Authorization";
+        secret.target = "Authorization";
+      }
+      secret.value = value;
+      return;
+    }
+    if (!saved) {
+      secret.value = "";
+      return;
+    }
+    secret.value = SECRET_MASK;
+    if (saved.placement === "bearer") {
+      secret.placement = "bearer";
+      secret.name = saved.name;
+      secret.target = saved.target;
+    }
+  }
+
+  public removeMcpHeader(id: string) {
     this.mcp.secrets = this.mcp.secrets.filter((s) => s.id !== id);
   }
 
@@ -263,23 +291,6 @@ class ExtensionState {
 
   public setMcpTools(tools: McpToolInfo[] | undefined) {
     this.mcp.tools = tools;
-  }
-
-  /**
-   * Fills the form from pasted connection text (type / url / NAME=value).
-   * A secret with a name that exists gets the new value; others are added.
-   * Returns the parse errors (they never contain secret values).
-   */
-  public importMcpText(text: string): string[] {
-    const parsed = parseMcpImportText(text);
-    if (parsed.url) this.mcp.url = parsed.url;
-    if (parsed.transport) this.mcp.transport = parsed.transport;
-    for (const secret of parsed.secrets) {
-      const existing = this.mcp.secrets.find((s) => s.name === secret.name);
-      if (existing) existing.value = secret.value;
-      else this.addMcpSecret(secret);
-    }
-    return parsed.errors;
   }
 
   public setErrors(messages: string[]) {

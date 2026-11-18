@@ -7,7 +7,7 @@ import "server-only";
 // with the mask as value and make the chat read that extension's secret.
 
 import { KEY_VAULT_MASK, mcpOAuthSecretNames } from "./extension-secrets";
-import type { HeaderModel, McpConfigModel } from "./models";
+import { mcpSecretTargetName, type HeaderModel, type McpConfigModel } from "./models";
 
 export interface SecretPlan {
   writes: Array<{ name: string; value: string }>;
@@ -45,7 +45,7 @@ export function planHeaders(
 }
 
 /**
- * Remote MCP settings. Secrets follow the header rules above. The
+ * Remote MCP settings. Header rows follow the header rules above. The
  * discovered tool list is server-managed: taken from the stored extension,
  * never from the browser, and cleared when URL, transport or auth mode
  * change. OAuth tokens need no reset here: they are stored per user with
@@ -58,20 +58,30 @@ export function planMcpConfig(
   newId: () => string
 ): { config: McpConfigModel; plan: SecretPlan; connectionChanged: boolean } {
   const plan = emptyPlan();
-  const storedSecretIds = new Set((stored?.secrets ?? []).map((s) => s.id));
+  const storedSecrets = new Map((stored?.secrets ?? []).map((s) => [s.id, s]));
 
   const secrets = input.secrets.map((s) => {
-    const known = !!s.id && storedSecretIds.has(s.id);
-    const id = known ? s.id : newId();
+    const previous = s.id ? storedSecrets.get(s.id) : undefined;
+    const id = previous ? s.id : newId();
+    const label = mcpSecretTargetName(s) || "without a name";
+    // New rows are plain headers. Legacy bearer / query records keep their
+    // placement; a row that changes placement needs a new value, because the
+    // stored value was saved for the old placement.
+    if (s.placement !== "header" && s.placement !== previous?.placement) {
+      plan.errors.push(`Send ${label} as a header.`);
+    }
     if (s.value === KEY_VAULT_MASK) {
-      if (!known) plan.errors.push(`Enter a value for secret ${s.name}`);
+      if (!previous) plan.errors.push(`Enter a value for header ${label}`);
+      else if (previous.placement !== s.placement) plan.errors.push(`Enter a new value for header ${label}`);
+    } else if (!s.value) {
+      plan.errors.push(`Enter a value for header ${label}`);
     } else {
       plan.writes.push({ name: id, value: s.value });
     }
     return { ...s, id, target: s.target || undefined, value: KEY_VAULT_MASK };
   });
   const kept = new Set(secrets.map((s) => s.id));
-  plan.deletes.push(...[...storedSecretIds].filter((id) => !kept.has(id)));
+  plan.deletes.push(...[...storedSecrets.keys()].filter((id) => !kept.has(id)));
 
   const connectionChanged =
     !stored ||

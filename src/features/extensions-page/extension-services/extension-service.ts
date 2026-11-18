@@ -38,6 +38,7 @@ import {
   ExtensionModel,
   ExtensionModelSchema,
   extensionKind,
+  mcpHeaderErrors,
 } from "./models";
 
 const queryById = async (id: string): Promise<ExtensionModel | undefined> => {
@@ -591,6 +592,14 @@ export const CreateChatWithExtension = async (
 };
 
 const validateSchema = (model: ExtensionModel): ServerActionResponse => {
+  // Header rules first: their messages name the header.
+  if (extensionKind(model) === "mcp" && model.mcp) {
+    const headerErrors = mcpHeaderErrors(model.mcp);
+    if (headerErrors.length > 0) {
+      return { status: "ERROR", errors: headerErrors.map((message) => ({ message })) };
+    }
+  }
+
   const validatedFields = ExtensionModelSchema.safeParse(model);
 
   if (!validatedFields.success) {
@@ -603,14 +612,6 @@ const validateSchema = (model: ExtensionModel): ServerActionResponse => {
   if (extensionKind(model) === "mcp") {
     if (!model.mcp) {
       return { status: "ERROR", errors: [{ message: "Server URL cannot be empty" }] };
-    }
-    const names = model.mcp.secrets.map((s) => s.name);
-    const duplicate = names.find((n, i) => names.indexOf(n) !== i);
-    if (duplicate) {
-      return {
-        status: "ERROR",
-        errors: [{ message: `Secret name ${duplicate} is already used.` }],
-      };
     }
     return { status: "OK", response: model };
   }

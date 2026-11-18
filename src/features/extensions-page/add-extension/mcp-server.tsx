@@ -12,7 +12,6 @@ import {
   SelectValue,
 } from "@/features/ui/select";
 import { SheetTitle } from "@/features/ui/sheet";
-import { Textarea } from "@/features/ui/textarea";
 import { KeyRound, Plug, Plus, RefreshCw, Trash, Unplug } from "lucide-react";
 import { FC, useEffect, useState } from "react";
 import {
@@ -21,18 +20,12 @@ import {
   GetMcpConnections,
   StartMcpOAuth,
 } from "../extension-services/mcp/mcp-service";
-import type {
-  McpSecretModel,
-  McpSecretPlacement,
-  McpTransport,
+import {
+  mcpSecretTargetName,
+  type McpSecretModel,
+  type McpTransport,
 } from "../extension-services/models";
 import { SECRET_MASK, extensionStore, useExtensionState } from "../extension-store";
-
-const PLACEMENT_LABELS: Record<McpSecretPlacement, string> = {
-  bearer: "Bearer token",
-  header: "Header",
-  query: "Query parameter",
-};
 
 const TRANSPORT_LABELS: Record<McpTransport, string> = {
   auto: "Automatic",
@@ -40,120 +33,74 @@ const TRANSPORT_LABELS: Record<McpTransport, string> = {
   sse: "SSE",
 };
 
-const McpImport: FC = () => {
-  const [text, setText] = useState("");
-  return (
-    <div className="grid gap-2">
-      <Label htmlFor="mcp-import">Paste connection details</Label>
-      <Textarea
-        id="mcp-import"
-        value={text}
-        onChange={(e) => setText(e.target.value)}
-        placeholder={"type: streamable-http\nurl: https://example.com/mcp\nMY_TOKEN=..."}
-        className="font-mono text-xs"
-        autoComplete="off"
-        spellCheck={false}
-      />
-      <div>
-        <Button
-          type="button"
-          variant="outline"
-          disabled={!text.trim()}
-          onClick={() => {
-            const errors = extensionStore.importMcpText(text);
-            extensionStore.setErrors(errors);
-            setText("");
-          }}
-        >
-          Fill in
-        </Button>
-      </div>
-    </div>
-  );
-};
-
-const McpSecretRow: FC<{ secret: McpSecretModel; saved: boolean }> = ({ secret, saved }) => {
+const McpHeaderRow: FC<{ secret: McpSecretModel; saved: boolean; first: boolean }> = ({
+  secret,
+  saved,
+  first,
+}) => {
   const showsMask = saved && secret.value === SECRET_MASK;
+  const legacyQuery = secret.placement === "query";
+  const legacyBearer = secret.placement === "bearer";
+  const name = mcpSecretTargetName(secret);
   return (
-    <div className="flex flex-col gap-2 border rounded-md p-3">
+    <div className="flex flex-col gap-2">
       <div className="flex gap-2">
         <Input
-          aria-label="Secret name"
-          placeholder="NAME"
+          aria-label="Header name"
+          placeholder="Header name"
           className="flex-1 font-mono"
-          value={secret.name}
-          onChange={(e) => extensionStore.updateMcpSecret(secret.id, { name: e.target.value })}
+          value={name}
+          readOnly={legacyQuery || legacyBearer}
+          onChange={(e) => extensionStore.setMcpHeaderName(secret.id, e.target.value)}
         />
         <Input
-          aria-label="Secret value"
+          aria-label="Value"
           type="password"
           autoComplete="new-password"
           className="flex-1"
-          placeholder={saved ? "Saved. Type to replace." : "Value"}
+          placeholder={saved ? "Saved. Type to replace." : first ? "Bearer <token>" : "Value"}
           value={showsMask ? "" : secret.value}
-          onChange={(e) =>
-            extensionStore.updateMcpSecret(secret.id, {
-              value: e.target.value || (saved ? SECRET_MASK : ""),
-            })
-          }
+          readOnly={legacyQuery}
+          onChange={(e) => extensionStore.setMcpHeaderValue(secret.id, e.target.value)}
         />
         <Button
           variant="outline"
           size="icon"
           type="button"
-          onClick={() => extensionStore.removeMcpSecret(secret.id)}
-          aria-label="Remove this secret"
+          onClick={() => extensionStore.removeMcpHeader(secret.id)}
+          aria-label={`Remove header ${name}`.trim()}
         >
           <Trash size={18} />
         </Button>
       </div>
-      <div className="flex gap-2 items-center">
-        <Label className="text-muted-foreground text-xs w-16">Send as</Label>
-        <Select
-          value={secret.placement}
-          onValueChange={(v) =>
-            extensionStore.updateMcpSecret(secret.id, { placement: v as McpSecretPlacement })
-          }
-        >
-          <SelectTrigger className="flex-1" aria-label="Send secret as">
-            <SelectValue />
-          </SelectTrigger>
-          <SelectContent>
-            {Object.entries(PLACEMENT_LABELS).map(([value, label]) => (
-              <SelectItem key={value} value={value}>
-                {label}
-              </SelectItem>
-            ))}
-          </SelectContent>
-        </Select>
-        {secret.placement !== "bearer" && (
-          <Input
-            aria-label={secret.placement === "header" ? "Header name" : "Parameter name"}
-            className="flex-1 font-mono"
-            placeholder={secret.name || (secret.placement === "header" ? "Header name" : "Parameter name")}
-            value={secret.target ?? ""}
-            onChange={(e) => extensionStore.updateMcpSecret(secret.id, { target: e.target.value })}
-          />
-        )}
-      </div>
+      {legacyBearer && (
+        <p className="text-xs text-muted-foreground">
+          The saved value is sent as Bearer &lt;value&gt;. A new value is sent exactly as typed.
+        </p>
+      )}
+      {legacyQuery && (
+        <p className="text-xs text-muted-foreground">
+          Sent as the query parameter {name}. To change it, remove it and add a header.
+        </p>
+      )}
     </div>
   );
 };
 
-const McpSecrets: FC = () => {
+const McpHeaders: FC = () => {
   const { extension, savedSecretIds } = useExtensionState();
   const secrets = extension.mcp?.secrets ?? [];
   return (
     <div className="flex flex-col gap-4 bg-foreground/[0.02] border p-4 rounded-md">
       <div className="flex justify-between items-center gap-2">
-        <SheetTitle>Secrets</SheetTitle>
+        <SheetTitle>Headers</SheetTitle>
         <Button
           type="button"
           variant="outline"
           className="flex gap-2"
-          onClick={() => extensionStore.addMcpSecret()}
+          onClick={() => extensionStore.addMcpHeader()}
         >
-          <Plus size={18} /> Add secret
+          <Plus size={18} /> Add header
         </Button>
       </div>
       <Alert className="text-xs">
@@ -164,8 +111,13 @@ const McpSecrets: FC = () => {
           this extension use the tools, never the values.
         </AlertDescription>
       </Alert>
-      {secrets.map((secret) => (
-        <McpSecretRow key={secret.id} secret={secret} saved={savedSecretIds.includes(secret.id)} />
+      {secrets.map((secret, index) => (
+        <McpHeaderRow
+          key={secret.id}
+          secret={secret}
+          saved={savedSecretIds.includes(secret.id)}
+          first={index === 0}
+        />
       ))}
     </div>
   );
@@ -338,7 +290,6 @@ export const McpServerSection: FC = () => {
   const mcp = extension.mcp;
   return (
     <div className="flex flex-col gap-8">
-      <McpImport />
       <div className="grid gap-2">
         <Label htmlFor="mcp-url">Server URL</Label>
         <Input
@@ -379,13 +330,13 @@ export const McpServerSection: FC = () => {
               <SelectValue />
             </SelectTrigger>
             <SelectContent>
-              <SelectItem value="none">Secrets only</SelectItem>
+              <SelectItem value="none">None</SelectItem>
               <SelectItem value="oauth">OAuth</SelectItem>
             </SelectContent>
           </Select>
         </div>
       </div>
-      <McpSecrets />
+      <McpHeaders />
       {mcp?.auth === "oauth" && <McpOAuth />}
       <McpTools />
     </div>
