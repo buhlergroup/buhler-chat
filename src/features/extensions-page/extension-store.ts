@@ -1,11 +1,23 @@
 import { proxy, useSnapshot } from "valtio";
 import { RevalidateCache } from "../common/navigation-helpers";
-import { ServerActionError } from "../common/server-action-response";
+import { ServerActionError, type ServerActionResponse } from "../common/server-action-response";
 import { uniqueId } from "../common/util";
+import {
+  completeDraftKey,
+  NO_TOOL_SELECTED_MESSAGE,
+  reconcileSelection,
+  selectionFromChecked,
+  toggleTool,
+  type ToolSelection,
+} from "./add-extension/mcp-tool-selection";
 import {
   CreateExtension,
   UpdateExtension,
 } from "./extension-services/extension-service";
+import {
+  DiscoverDraftMcpTools,
+  DiscoverMcpTools,
+} from "./extension-services/mcp/mcp-service";
 import {
   EndpointType,
   ExtensionFunctionModel,
@@ -19,6 +31,23 @@ import {
 
 /** Mask the server sends for a stored secret; sending it back keeps the value. */
 export const SECRET_MASK = "**********";
+
+/**
+ * The parts of an MCP config that decide the connection. Header values are
+ * the mask for saved rows, so a retyped value makes the key differ. Client
+ * memory only; never logged or sent anywhere.
+ */
+const mcpConnectionKey = (mcp: McpConfigModel | undefined): string =>
+  mcp
+    ? JSON.stringify([
+        mcp.url,
+        mcp.transport,
+        mcp.auth,
+        mcp.secrets.map((s) => [s.id, s.name, s.placement, s.target ?? "", s.value]),
+      ])
+    : "";
+
+const plain = <T>(value: T): T => JSON.parse(JSON.stringify(value)) as T;
 
 const createDefaultMcpConfig = (): McpConfigModel => ({
   url: "",
@@ -48,6 +77,20 @@ class ExtensionState {
   private savedSecrets: Record<string, Pick<McpSecretModel, "name" | "placement" | "target">> = {};
   /** True when the server holds an OAuth client secret for this extension. */
   public hasSavedClientSecret: boolean = false;
+  /** The user unchecked every MCP tool. Not saved: the save is blocked. */
+  public mcpNoToolSelected: boolean = false;
+  /** An MCP tool list is being read. */
+  public toolsLoading: boolean = false;
+  /** Why the last MCP tool list read failed, shown under the tools. */
+  public toolsError: string = "";
+  /** Draft key (completeDraftKey) of the last tool read, so it is not repeated by itself. */
+  public toolsDraftKey: string = "";
+  /** Short confirmation after a save that keeps the sheet open. */
+  public saveNotice: string = "";
+  /** Connection key of the saved MCP config, to tell an unsaved draft apart. */
+  private savedConnectionKey: string = "";
+  /** Increments per tool read; an older answer is ignored. */
+  private toolsRequest: number = 0;
   public isOpened: boolean = false;
   public extension: ExtensionModel = { ...this.defaultModel };
 
@@ -90,6 +133,15 @@ class ExtensionState {
   }
 
   public async submitForm(modelToSubmit: ExtensionModel) {
+    const isMcp = modelToSubmit.kind === "mcp";
+    this.saveNotice = "";
+    if (isMcp && this.mcpNoToolSelected) {
+      // "None checked" has no stored form (empty = all tools): never save it.
+      this.setErrors([NO_TOOL_SELECTED_MESSAGE]);
+      this.isOpened = true;
+      return;
+    }
+
     this.isLoading = true;
     this.formState = {
       success: true,
@@ -110,10 +162,50 @@ class ExtensionState {
       RevalidateCache({
         page: "extensions",
       });
+      if (isMcp) {
+        // MCP: the sheet stays open, so the owner can connect, check the
+        // tools and save again (now as an update: the id is set).
+        this.applySavedExtension(response.response);
+        this.saveNotice = "Saved.";
+      }
     }
 
     this.isLoading = false;
-    this.isOpened = !this.formState.success;
+    this.isOpened = isMcp || !this.formState.success;
+
+    const mcp = this.extension.mcp;
+    if (isMcp && this.formState.success && mcp && !mcp.tools && mcp.auth === "none") {
+      void this.loadMcpTools();
+    }
+  }
+
+  /** Takes the saved MCP extension as the new form state; keeps a tool list read before the save. */
+  private applySavedExtension(saved: ExtensionModel) {
+    const draftTools = this.extension.mcp?.tools;
+    this.extension = {
+      ...saved,
+      ...(saved.mcp ? { mcp: { ...saved.mcp, tools: saved.mcp.tools ?? draftTools } } : {}),
+    };
+    this.rememberSaved(saved);
+  }
+
+  /** What the server holds, so masks and the "unchanged" check work. */
+  private rememberSaved(saved: ExtensionModel) {
+    this.savedSecretIds = saved.mcp?.secrets.map((s) => s.id) ?? [];
+    this.savedSecrets = Object.fromEntries(
+      (saved.mcp?.secrets ?? []).map((s) => [s.id, { name: s.name, placement: s.placement, target: s.target }])
+    );
+    this.hasSavedClientSecret = saved.mcp?.oauth?.clientSecret === SECRET_MASK;
+    this.savedConnectionKey = saved.id ? mcpConnectionKey(saved.mcp) : "";
+  }
+
+  private resetMcpUi() {
+    this.mcpNoToolSelected = false;
+    this.toolsLoading = false;
+    this.toolsError = "";
+    this.toolsDraftKey = "";
+    this.saveNotice = "";
+    this.toolsRequest++;
   }
 
   public updateOpened(value: boolean) {
@@ -200,11 +292,8 @@ class ExtensionState {
     this.extension = {
       ...models,
     };
-    this.savedSecretIds = models.mcp?.secrets.map((s) => s.id) ?? [];
-    this.savedSecrets = Object.fromEntries(
-      (models.mcp?.secrets ?? []).map((s) => [s.id, { name: s.name, placement: s.placement, target: s.target }])
-    );
-    this.hasSavedClientSecret = models.mcp?.oauth?.clientSecret === SECRET_MASK;
+    this.rememberSaved(models);
+    this.resetMcpUi();
     this.resetAndOpenSlider();
   }
 
@@ -213,6 +302,8 @@ class ExtensionState {
     this.savedSecretIds = [];
     this.savedSecrets = {};
     this.hasSavedClientSecret = false;
+    this.savedConnectionKey = "";
+    this.resetMcpUi();
     if (kind === "mcp") {
       this.extension.kind = "mcp";
       this.extension.headers = [];
@@ -228,19 +319,23 @@ class ExtensionState {
   }
 
   public updateMcp(patch: Partial<McpConfigModel>) {
+    this.saveNotice = "";
     Object.assign(this.mcp, patch);
   }
 
   public updateMcpOAuth(patch: Partial<NonNullable<McpConfigModel["oauth"]>>) {
+    this.saveNotice = "";
     this.mcp.oauth = { ...(this.mcp.oauth ?? {}), ...patch };
   }
 
   /** Adds an empty header row. New rows are always plain headers. */
   public addMcpHeader() {
+    this.saveNotice = "";
     this.mcp.secrets.push({ id: uniqueId(), name: "", value: "", placement: "header", target: "" });
   }
 
   public setMcpHeaderName(id: string, name: string) {
+    this.saveNotice = "";
     const secret = this.mcp.secrets.find((s) => s.id === id);
     // Legacy bearer / query rows keep their name until they get a new value.
     if (!secret || secret.placement !== "header") return;
@@ -254,6 +349,7 @@ class ExtensionState {
    * header, sent exactly as typed; clearing the value again restores it.
    */
   public setMcpHeaderValue(id: string, value: string) {
+    this.saveNotice = "";
     const secret = this.mcp.secrets.find((s) => s.id === id);
     if (!secret || secret.placement === "query") return;
     const saved = this.savedSecrets[secret.id];
@@ -279,18 +375,98 @@ class ExtensionState {
   }
 
   public removeMcpHeader(id: string) {
+    this.saveNotice = "";
     this.mcp.secrets = this.mcp.secrets.filter((s) => s.id !== id);
   }
 
-  public toggleMcpTool(name: string, allowed: boolean) {
-    const list = new Set(this.mcp.toolAllowList);
-    if (allowed) list.add(name);
-    else list.delete(name);
-    this.mcp.toolAllowList = [...list];
+  private get toolSelection(): ToolSelection {
+    return { toolAllowList: [...this.mcp.toolAllowList], noneSelected: this.mcpNoToolSelected };
   }
 
+  private setToolSelection(selection: ToolSelection) {
+    this.mcp.toolAllowList = selection.toolAllowList;
+    this.mcpNoToolSelected = selection.noneSelected;
+    if (!selection.noneSelected && this.formState.errors.some((e) => e.message === NO_TOOL_SELECTED_MESSAGE)) {
+      this.setErrors([]);
+    }
+  }
+
+  private get toolNames(): string[] {
+    return (this.mcp.tools ?? []).map((t) => t.name);
+  }
+
+  /** One checkbox. Every box checked is stored as an empty list (all tools). */
+  public toggleMcpTool(name: string, allowed: boolean) {
+    this.saveNotice = "";
+    this.setToolSelection(toggleTool(this.toolNames, this.toolSelection, name, allowed));
+  }
+
+  public selectAllMcpTools() {
+    this.saveNotice = "";
+    this.setToolSelection({ toolAllowList: [], noneSelected: false });
+  }
+
+  public clearMcpTools() {
+    this.saveNotice = "";
+    this.setToolSelection(selectionFromChecked(this.toolNames, new Set()));
+  }
+
+  /** A new tool list: allowed names the server no longer has are dropped. */
   public setMcpTools(tools: McpToolInfo[] | undefined) {
     this.mcp.tools = tools;
+    if (tools) this.setToolSelection(reconcileSelection(this.toolNames, this.toolSelection));
+  }
+
+  /** True when the MCP form shows the saved connection unchanged. */
+  private get mcpDraftIsSaved(): boolean {
+    return !!this.extension.id && mcpConnectionKey(this.extension.mcp) === this.savedConnectionKey;
+  }
+
+  /**
+   * Reads the tool list. OAuth, or a saved connection without changes: from
+   * the saved extension (the server stores the list). Otherwise from the
+   * form values (draft discovery, nothing stored; the save stores it).
+   */
+  public async loadMcpTools() {
+    const mcp = this.extension.mcp;
+    if (!mcp) return;
+    const request = ++this.toolsRequest;
+    this.toolsDraftKey = completeDraftKey(mcp);
+    this.toolsLoading = true;
+    this.toolsError = "";
+
+    let response: ServerActionResponse<McpToolInfo[] | undefined>;
+    try {
+      if (mcp.auth === "oauth" || this.mcpDraftIsSaved) {
+        if (!this.extension.id) {
+          response = { status: "ERROR", errors: [{ message: "Save to connect." }] };
+        } else {
+          const saved = await DiscoverMcpTools(this.extension.id);
+          response = saved.status === "OK" ? { status: "OK", response: saved.response.mcp?.tools } : saved;
+        }
+      } else {
+        response = await DiscoverDraftMcpTools({
+          extensionId: this.extension.id || undefined,
+          url: mcp.url,
+          transport: mcp.transport,
+          secrets: plain(mcp.secrets),
+        });
+      }
+    } catch {
+      response = { status: "ERROR", errors: [{ message: "Could not read the tools of the MCP server." }] };
+    }
+
+    if (request !== this.toolsRequest) return;
+    this.toolsLoading = false;
+    if (response.status !== "OK") {
+      this.toolsError = response.errors.map((e) => e.message).join(" ");
+      return;
+    }
+    this.setMcpTools(response.response ?? []);
+  }
+
+  public clearSaveNotice() {
+    if (this.saveNotice) this.saveNotice = "";
   }
 
   public setErrors(messages: string[]) {

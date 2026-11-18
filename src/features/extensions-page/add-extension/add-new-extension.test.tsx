@@ -13,6 +13,7 @@ const { mockExtensionState } = vi.hoisted(() => ({
   mockExtensionState: {
     isOpened: true,
     isLoading: false,
+    saveNotice: "",
     extension: {
       id: "",
       name: "",
@@ -31,6 +32,7 @@ const { mockExtensionState } = vi.hoisted(() => ({
 vi.mock("../extension-store", () => ({
   extensionStore: {
     updateOpened: vi.fn(),
+    clearSaveNotice: vi.fn(),
   },
   useExtensionState: vi.fn().mockReturnValue(mockExtensionState),
   AddOrUpdateExtension: vi.fn().mockResolvedValue({ status: "OK", response: {} }),
@@ -90,6 +92,22 @@ describe("extensions-page.unit.components.001 — AddExtension", () => {
   it("renders error messages area", () => {
     render(<AddExtension />);
     expect(screen.getByTestId("error-messages")).toBeInTheDocument();
+  });
+
+  it("shows the save confirmation next to Save while the sheet stays open", () => {
+    (useExtensionState as any).mockReturnValue({ ...mockExtensionState, saveNotice: "Saved." });
+    render(<AddExtension />);
+    expect(screen.getByRole("status")).toHaveTextContent("Saved.");
+    expect(screen.getByRole("button", { name: /save/i })).toBeInTheDocument();
+  });
+
+  it("sends the current extension id (a saved MCP extension updates on the next save)", () => {
+    (useExtensionState as any).mockReturnValue({
+      ...mockExtensionState,
+      extension: { ...mockExtensionState.extension, id: "saved-id" },
+    });
+    const { container } = render(<AddExtension />);
+    expect(container.ownerDocument.querySelector('input[name="id"]')).toHaveValue("saved-id");
   });
 
   it("does not render when isOpened is false", () => {

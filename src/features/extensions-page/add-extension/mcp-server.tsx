@@ -12,20 +12,25 @@ import {
   SelectValue,
 } from "@/features/ui/select";
 import { SheetTitle } from "@/features/ui/sheet";
+import { LoadingIndicator } from "@/features/ui/loading";
 import { KeyRound, Plug, Plus, RefreshCw, Trash, Unplug } from "lucide-react";
 import { FC, useEffect, useState } from "react";
 import {
-  DiscoverMcpTools,
   DisconnectMcpOAuth,
   GetMcpConnections,
   StartMcpOAuth,
 } from "../extension-services/mcp/mcp-service";
 import {
   mcpSecretTargetName,
+  type McpConfigModel,
   type McpSecretModel,
   type McpTransport,
 } from "../extension-services/models";
 import { SECRET_MASK, extensionStore, useExtensionState } from "../extension-store";
+import { checkedToolNames, completeDraftKey, selectionSummary } from "./mcp-tool-selection";
+
+/** Wait after the last keystroke before the tools load by themselves. */
+export const MCP_AUTO_LOAD_DELAY_MS = 800;
 
 const TRANSPORT_LABELS: Record<McpTransport, string> = {
   auto: "Automatic",
@@ -144,7 +149,10 @@ const McpOAuth: FC = () => {
 
   const connect = async () => {
     setBusy(true);
-    const response = await StartMcpOAuth(extension.id, { returnTo: "/extensions" });
+    // Back to this extension's sheet; it loads the tools (see ExtensionEditFromQuery).
+    const response = await StartMcpOAuth(extension.id, {
+      returnTo: `/extensions?edit=${encodeURIComponent(extension.id)}`,
+    });
     setBusy(false);
     if (response.status !== "OK") {
       extensionStore.setErrors(response.errors.map((e) => e.message));
@@ -154,6 +162,7 @@ const McpOAuth: FC = () => {
       window.location.href = response.response.authorizationUrl;
     } else {
       setConnected(true);
+      void extensionStore.loadMcpTools();
     }
   };
 
@@ -221,64 +230,118 @@ const McpOAuth: FC = () => {
           )}
         </div>
       ) : (
-        <p className="text-sm">Save the extension to connect.</p>
+        <p className="text-sm">Save to connect.</p>
       )}
     </div>
   );
 };
 
 const McpTools: FC = () => {
-  const { extension } = useExtensionState();
-  const [busy, setBusy] = useState(false);
-  const tools = extension.mcp?.tools ?? [];
-  const allowList = extension.mcp?.toolAllowList ?? [];
+  const { extension, toolsLoading, toolsError, toolsDraftKey, mcpNoToolSelected } = useExtensionState();
+  const mcp = extension.mcp;
+  const tools = mcp?.tools;
+  const oauth = mcp?.auth === "oauth";
+  const names = (tools ?? []).map((t) => t.name);
+  const selection = { toolAllowList: [...(mcp?.toolAllowList ?? [])], noneSelected: mcpNoToolSelected };
+  const checked = checkedToolNames(names, selection);
 
-  const refresh = async () => {
-    setBusy(true);
-    const response = await DiscoverMcpTools(extension.id);
-    setBusy(false);
-    if (response.status !== "OK") {
-      extensionStore.setErrors(response.errors.map((e) => e.message));
-      return;
-    }
-    extensionStore.setErrors([]);
-    extensionStore.setMcpTools(response.response.mcp?.tools);
-  };
+  // Sign-in None: load the tools by themselves once the draft is complete
+  // and no list is shown yet. Retried only when the draft changes.
+  const draftKey = completeDraftKey(mcp as McpConfigModel | undefined);
+  const hasTools = !!tools;
+  useEffect(() => {
+    if (!draftKey || hasTools || draftKey === toolsDraftKey) return;
+    const timer = setTimeout(() => void extensionStore.loadMcpTools(), MCP_AUTO_LOAD_DELAY_MS);
+    return () => clearTimeout(timer);
+  }, [draftKey, hasTools, toolsDraftKey]);
+
+  const canLoad = oauth ? !!extension.id : true;
+  const hint = oauth
+    ? extension.id
+      ? "Connect to load the tools."
+      : "Save to connect. The tools load after you connect."
+    : "Enter the server URL and the header values. The tools load by themselves.";
 
   return (
     <div className="flex flex-col gap-4 bg-foreground/[0.02] border p-4 rounded-md">
       <div className="flex justify-between items-center gap-2">
         <SheetTitle>Tools</SheetTitle>
-        {extension.id && (
-          <Button type="button" variant="outline" className="gap-2" disabled={busy} onClick={refresh}>
-            <RefreshCw size={16} /> Refresh tools
+        {canLoad && (
+          <Button
+            type="button"
+            variant="outline"
+            className="gap-2"
+            disabled={toolsLoading}
+            onClick={() => void extensionStore.loadMcpTools()}
+          >
+            {toolsLoading ? <LoadingIndicator isLoading /> : <RefreshCw size={16} />}
+            {tools ? "Refresh tools" : "Load tools"}
           </Button>
         )}
       </div>
-      <p className="text-xs text-muted-foreground">
-        {extension.id
-          ? "Select tools to limit the extension to them. With no selection, all tools are available."
-          : "Tools load when you save."}
-      </p>
-      {tools.length > 0 && (
-        <div className="flex flex-col gap-2 max-h-[240px] overflow-y-auto border rounded-md p-2">
-          {tools.map((tool) => (
-            <label key={tool.name} className="flex items-start gap-2 cursor-pointer hover:bg-accent rounded p-1">
-              <input
-                type="checkbox"
-                className="h-4 w-4 mt-0.5 rounded border-input"
-                checked={allowList.includes(tool.name)}
-                onChange={(e) => extensionStore.toggleMcpTool(tool.name, e.target.checked)}
-              />
-              <span className="flex flex-col">
-                <span className="text-sm font-mono">{tool.name}</span>
-                {tool.description && (
-                  <span className="text-xs text-muted-foreground line-clamp-2">{tool.description}</span>
-                )}
-              </span>
-            </label>
-          ))}
-        </div>
+      {toolsLoading && (
+        <p className="text-xs text-muted-foreground" role="status">
+          Loading tools...
+        </p>
+      )}
+      {toolsError && (
+        <p className="text-sm text-red-500" role="alert">
+          {toolsError}
+        </p>
+      )}
+      {!tools && !toolsLoading && !toolsError && <p className="text-xs text-muted-foreground">{hint}</p>}
+      {tools && tools.length === 0 && (
+        <p className="text-xs text-muted-foreground">The server has no tools.</p>
+      )}
+      {tools && tools.length > 0 && (
+        <>
+          <div className="flex items-center gap-2">
+            <p
+              className={`text-xs flex-1 ${mcpNoToolSelected ? "text-red-500" : "text-muted-foreground"}`}
+              data-testid="mcp-tool-summary"
+            >
+              {selectionSummary(names, selection)}
+            </p>
+            <Button
+              type="button"
+              variant="link"
+              size="sm"
+              className="h-auto px-1 text-xs"
+              disabled={checked.size === names.length}
+              onClick={() => extensionStore.selectAllMcpTools()}
+            >
+              Select all
+            </Button>
+            <Button
+              type="button"
+              variant="link"
+              size="sm"
+              className="h-auto px-1 text-xs"
+              disabled={checked.size === 0}
+              onClick={() => extensionStore.clearMcpTools()}
+            >
+              Clear
+            </Button>
+          </div>
+          <div className="flex flex-col gap-2 max-h-[240px] overflow-y-auto border rounded-md p-2">
+            {tools.map((tool) => (
+              <label key={tool.name} className="flex items-start gap-2 cursor-pointer hover:bg-accent rounded p-1">
+                <input
+                  type="checkbox"
+                  className="h-4 w-4 mt-0.5 rounded border-input"
+                  checked={checked.has(tool.name)}
+                  onChange={(e) => extensionStore.toggleMcpTool(tool.name, e.target.checked)}
+                />
+                <span className="flex flex-col">
+                  <span className="text-sm font-mono">{tool.name}</span>
+                  {tool.description && (
+                    <span className="text-xs text-muted-foreground line-clamp-2">{tool.description}</span>
+                  )}
+                </span>
+              </label>
+            ))}
+          </div>
+        </>
       )}
     </div>
   );

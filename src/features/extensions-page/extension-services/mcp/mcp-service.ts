@@ -2,12 +2,14 @@
 import "server-only";
 
 // Server actions for Remote MCP extensions. Every export is an async
-// function; nothing is re-exported. Tool discovery: owner or admin. Sign-in,
+// function; nothing is re-exported. Tool discovery: owner or admin; draft
+// discovery (form values, not saved): any signed-in user, saved values only
+// for whoever may edit the extension. Sign-in,
 // disconnect and connection status: every user for THEIR OWN connection,
 // as far as the access rule lets them use the extension.
 
 import { auth } from "@modelcontextprotocol/sdk/client/auth.js";
-import { userHashedId } from "@/features/auth-page/helpers";
+import { getCurrentUser, userHashedId } from "@/features/auth-page/helpers";
 import type { ServerActionResponse } from "@/features/common/server-action-response";
 import { HistoryContainer } from "@/features/common/services/cosmos";
 import { logWarn } from "@/features/common/services/logger";
@@ -19,9 +21,10 @@ import {
   mcpOAuthSecretNames,
   mcpOAuthUserSecretNames,
 } from "../extension-secrets";
-import type { ExtensionModel } from "../models";
+import type { ExtensionModel, McpToolInfo } from "../models";
 import { MCP_LIMITS } from "./mcp-client";
 import { discoverMcpTools } from "./mcp-discovery";
+import { discoverDraftMcpTools, type McpDraftInput } from "./mcp-draft-discovery";
 import { createGuardedFetch } from "./mcp-fetch";
 import {
   createMcpOAuthState,
@@ -70,6 +73,35 @@ export async function DiscoverMcpTools(
     return { status: "OK", response: resource ?? updated };
   } catch (error) {
     logWarn("DiscoverMcpTools failed", { extensionId, error: String(error) });
+    return { status: "ERROR", errors: [{ message: "Could not read the tools of the MCP server." }] };
+  }
+}
+
+/**
+ * Reads the tool list for the connection as typed in the form, before (or
+ * without) a save. Sign-in None only. Stores nothing. Header rows that show
+ * the saved mask use the value stored for that row of the extension being
+ * edited, only for a user who may edit it (owner or admin, the edit check).
+ * Same URL guard, guarded fetch and header rules as save and runtime; see
+ * discoverDraftMcpTools. Returns names, descriptions and input schemas only.
+ */
+export async function DiscoverDraftMcpTools(
+  input: McpDraftInput
+): Promise<ServerActionResponse<McpToolInfo[]>> {
+  try {
+    // Signed-in users only (getCurrentUser throws without a session).
+    const user = await getCurrentUser().catch(() => undefined);
+    if (!user) return { status: "UNAUTHORIZED", errors: [{ message: "Sign in to load the tools." }] };
+    return await discoverDraftMcpTools(input, {
+      loadEditable: async (extensionId) => {
+        const response = await EnsureExtensionOperation(extensionId);
+        return response.status === "OK" ? response.response : undefined;
+      },
+      store: keyVaultSecretStore(),
+    });
+  } catch (error) {
+    // No input in the log: it holds header values.
+    logWarn("DiscoverDraftMcpTools failed", { errorName: (error as { name?: string })?.name });
     return { status: "ERROR", errors: [{ message: "Could not read the tools of the MCP server." }] };
   }
 }
