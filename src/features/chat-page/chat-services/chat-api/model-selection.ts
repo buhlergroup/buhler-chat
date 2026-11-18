@@ -22,6 +22,7 @@ import {
   ModelConfig,
   ProviderReasoningEffort,
   ReasoningEffort,
+  normalizeChatModelId,
   resolveDeployedFallbackModel,
 } from "../models";
 import { resolveReasoningEffort } from "../models/reasoning-effort";
@@ -118,8 +119,12 @@ export async function resolveModelAndLimits(
   },
   thread: ChatThreadModel
 ): Promise<ModelSelectionResult> {
+  // A tab loaded before a model was replaced, or a thread stored before it,
+  // may still name the old id (LEGACY_MODEL_ALIASES).
   let selectedModel: ChatModel =
-    payload.selectedModel ?? thread.selectedModel ?? DEFAULT_MODEL;
+    normalizeChatModelId(payload.selectedModel) ??
+    normalizeChatModelId(thread.selectedModel) ??
+    DEFAULT_MODEL;
   let modelConfig = MODEL_CONFIGS[selectedModel];
 
   // The client bundle cannot read server env vars, so it can send its code
@@ -144,7 +149,8 @@ export async function resolveModelAndLimits(
   // intent routing respects it.
   const explicitPick =
     !!payload.selectedModel ||
-    (!!thread.selectedModel && thread.selectedModel !== DEFAULT_MODEL);
+    (!!thread.selectedModel &&
+      normalizeChatModelId(thread.selectedModel) !== DEFAULT_MODEL);
 
   let fallbackInfo: FallbackResult = { fellBack: false };
   try {
