@@ -81,10 +81,14 @@ afterAll(async () => {
   await new Promise<void>((resolve) => server.close(() => resolve()));
 });
 
-const connection = (token = FAKE_TOKEN): McpConnectionOptions => {
-  const { url, headers } = applyMcpSecrets(baseUrl, [
-    { name: "MCP_FAKE_TOKEN", placement: "bearer", value: token },
-  ]);
+// Legacy bearer record by default; `plain` sends a header row exactly as typed.
+const connection = (token = FAKE_TOKEN, plain = false): McpConnectionOptions => {
+  const { url, headers } = applyMcpSecrets(
+    baseUrl,
+    plain
+      ? [{ name: "Authorization", placement: "header", target: "Authorization", value: `Bearer ${token}` }]
+      : [{ name: "MCP_FAKE_TOKEN", placement: "bearer", value: token }]
+  );
   return {
     url,
     transport: "streamable-http",
@@ -98,6 +102,12 @@ describe("Remote MCP against a local fake server (real SDK on both sides)", () =
     const tools = await listMcpTools(connection());
     expect(tools.map((t) => t.name)).toEqual(["get_price", "fail"]);
     expect(tools[0].inputSchema).toMatchObject({ type: "object", properties: { symbol: { type: "string" } } });
+    expect(seenAuth.at(-1)).toBe(`Bearer ${FAKE_TOKEN}`);
+  });
+
+  it("lists the tools with a plain Authorization header row sent as typed", async () => {
+    const tools = await listMcpTools(connection(FAKE_TOKEN, true));
+    expect(tools.map((t) => t.name)).toEqual(["get_price", "fail"]);
     expect(seenAuth.at(-1)).toBe(`Bearer ${FAKE_TOKEN}`);
   });
 

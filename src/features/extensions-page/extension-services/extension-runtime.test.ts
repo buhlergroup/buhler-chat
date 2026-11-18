@@ -48,6 +48,7 @@ const mcpExtension = (overrides: Partial<ExtensionModel> = {}): ExtensionModel =
       { id: "sec-bearer", name: "MCP_TOKEN", value: "**********", placement: "bearer" },
       { id: "sec-query", name: "key", value: "**********", placement: "query", target: "api_key" },
       { id: "sec-header", name: "X_TEAM", value: "**********", placement: "header" },
+      { id: "sec-plain", name: "X-MCP-Readonly", target: "X-MCP-Readonly", value: "**********", placement: "header" },
     ],
     toolAllowList: [],
     auth: "none",
@@ -66,7 +67,12 @@ const deps = (over: Partial<ResolveExtensionsDeps> = {}): ResolveExtensionsDeps 
   }),
   isGroupMember: async () => false,
   store: () =>
-    fakeStore({ "sec-bearer": FAKE_SECRET, "sec-query": "q-value", "sec-header": "h-value" }),
+    fakeStore({
+      "sec-bearer": FAKE_SECRET,
+      "sec-query": "q-value",
+      "sec-header": "h-value",
+      "sec-plain": "true",
+    }),
   ...over,
 });
 
@@ -80,8 +86,30 @@ describe("resolveExtensionsForChat", () => {
     const mcp = result[0].mcp!;
     expect(mcp.headers.Authorization).toBe(`Bearer ${FAKE_SECRET}`);
     expect(mcp.headers.X_TEAM).toBe("h-value");
+    expect(mcp.headers["X-MCP-Readonly"]).toBe("true");
     expect(new URL(mcp.url).searchParams.get("api_key")).toBe("q-value");
     expect(mcp.authProvider).toBeUndefined();
+  });
+
+  it("sends a plain Authorization header row exactly as typed (no Bearer prefix added)", async () => {
+    const ext = mcpExtension({
+      userId: "chat-user",
+      mcp: {
+        ...mcpExtension().mcp!,
+        secrets: [
+          { id: "sec-auth", name: "Authorization", target: "Authorization", value: "**********", placement: "header" },
+        ],
+      },
+    });
+    const result = await resolveExtensionsForChat(
+      { extensionIds: [ext.id] },
+      deps({
+        findExtensions: async () => [ext],
+        store: () => fakeStore({ "sec-auth": `Token ${FAKE_SECRET}` }),
+      })
+    );
+    expect(result[0].mcp?.headers).toEqual({ Authorization: `Token ${FAKE_SECRET}` });
+    expect(result[0].mcp?.url).toBe("https://mcp.example.com/mcp");
   });
 
   it("gives nothing when the thread has no agent and the user does not own the extension", async () => {

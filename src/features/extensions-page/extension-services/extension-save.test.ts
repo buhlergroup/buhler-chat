@@ -46,10 +46,14 @@ describe("planHeaders", () => {
 });
 
 describe("planMcpConfig", () => {
-  it("stores new secret values in Key Vault and keeps only the mask", () => {
+  it("stores new header values in Key Vault and keeps only the mask", () => {
     const { config, plan } = planMcpConfig(
       "ext1",
-      baseMcp({ secrets: [{ id: "client-id", name: "TOKEN", value: "fake", placement: "bearer" }] }),
+      baseMcp({
+        secrets: [
+          { id: "client-id", name: "Authorization", target: "Authorization", value: "fake", placement: "header" },
+        ],
+      }),
       undefined,
       newId
     );
@@ -58,14 +62,78 @@ describe("planMcpConfig", () => {
     expect(plan.writes).toEqual([{ name: config.secrets[0].id, value: "fake" }]);
   });
 
-  it("refuses a masked secret that is not stored", () => {
+  it("refuses a masked header that is not stored", () => {
     const { plan } = planMcpConfig(
       "ext1",
-      baseMcp({ secrets: [{ id: "foreign", name: "TOKEN", value: MASK, placement: "bearer" }] }),
+      baseMcp({ secrets: [{ id: "foreign", name: "X-Team", target: "X-Team", value: MASK, placement: "header" }] }),
       baseMcp(),
       newId
     );
-    expect(plan.errors).toEqual(["Enter a value for secret TOKEN"]);
+    expect(plan.errors).toEqual(["Enter a value for header X-Team"]);
+  });
+
+  it("needs a value for a new header row", () => {
+    const { plan } = planMcpConfig(
+      "ext1",
+      baseMcp({ secrets: [{ id: "", name: "X-Team", target: "X-Team", value: "", placement: "header" }] }),
+      baseMcp(),
+      newId
+    );
+    expect(plan.errors).toEqual(["Enter a value for header X-Team"]);
+    expect(plan.writes).toEqual([]);
+  });
+
+  it("adds new rows only as plain headers", () => {
+    const { plan } = planMcpConfig(
+      "ext1",
+      baseMcp({
+        secrets: [
+          { id: "", name: "TOKEN", value: "fake", placement: "bearer" },
+          { id: "", name: "key", target: "api_key", value: "fake", placement: "query" },
+        ],
+      }),
+      baseMcp(),
+      newId
+    );
+    expect(plan.errors).toEqual(["Send Authorization as a header.", "Send api_key as a header."]);
+  });
+
+  it("keeps legacy bearer and query records with their saved values", () => {
+    const legacy = [
+      { id: "b", name: "MCP_TOKEN", value: MASK, placement: "bearer" as const },
+      { id: "q", name: "key", target: "api_key", value: MASK, placement: "query" as const },
+    ];
+    const { config, plan } = planMcpConfig("ext1", baseMcp({ secrets: legacy }), baseMcp({ secrets: legacy }), newId);
+    expect(plan).toEqual({ writes: [], deletes: [], errors: [] });
+    expect(config.secrets.map((s) => s.placement)).toEqual(["bearer", "query"]);
+  });
+
+  it("turns a legacy bearer record with a new value into a plain Authorization header", () => {
+    const stored = baseMcp({ secrets: [{ id: "b", name: "MCP_TOKEN", value: MASK, placement: "bearer" }] });
+    const { config, plan } = planMcpConfig(
+      "ext1",
+      baseMcp({
+        secrets: [{ id: "b", name: "Authorization", target: "Authorization", value: "Bearer fake", placement: "header" }],
+      }),
+      stored,
+      newId
+    );
+    expect(plan.errors).toEqual([]);
+    expect(plan.writes).toEqual([{ name: "b", value: "Bearer fake" }]);
+    expect(config.secrets[0]).toMatchObject({ id: "b", placement: "header", target: "Authorization", value: MASK });
+  });
+
+  it("needs a new value when a legacy bearer record changes to a header", () => {
+    const stored = baseMcp({ secrets: [{ id: "b", name: "MCP_TOKEN", value: MASK, placement: "bearer" }] });
+    const { plan } = planMcpConfig(
+      "ext1",
+      baseMcp({
+        secrets: [{ id: "b", name: "Authorization", target: "Authorization", value: MASK, placement: "header" }],
+      }),
+      stored,
+      newId
+    );
+    expect(plan.errors).toEqual(["Enter a new value for header Authorization"]);
   });
 
   it("deletes removed secrets and never trusts a browser-sent tool list", () => {

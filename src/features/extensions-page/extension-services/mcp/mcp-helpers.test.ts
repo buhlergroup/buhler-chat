@@ -1,6 +1,5 @@
 // @vitest-environment node
 import { describe, it, expect, vi } from "vitest";
-import { parseMcpImportText } from "./mcp-import";
 import { applyMcpSecrets } from "./mcp-secrets";
 import { createGuardedFetch } from "./mcp-fetch";
 import {
@@ -15,38 +14,21 @@ import {
   safeReturnPath,
 } from "./mcp-oauth";
 import { MCP_EXTENSION_TAG, mcpOAuthUserSecretNames, type SecretStore } from "../extension-secrets";
-import { McpSecretSchema } from "../models";
+import { mcpHeaderErrors, McpSecretSchema } from "../models";
 
 const FAKE = "fake-secret-value-for-tests";
 
-describe("parseMcpImportText", () => {
-  it("reads the provider format: type, url and NAME=value", () => {
-    const r = parseMcpImportText(
-      `type: streamable-http\nurl: https://staging.example.com/mcp\nMCP_EXAMPLE_TOKEN=${FAKE}\n`
-    );
-    expect(r).toEqual({
-      url: "https://staging.example.com/mcp",
-      transport: "streamable-http",
-      secrets: [{ name: "MCP_EXAMPLE_TOKEN", value: FAKE, placement: "bearer" }],
-      errors: [],
-    });
-  });
-
-  it("keeps an url with a query string, strips quotes, skips comments", () => {
-    const r = parseMcpImportText(`# comment\nurl: https://x.example.com/mcp?a=b\nTOKEN="${FAKE}"\r\n`);
-    expect(r.url).toBe("https://x.example.com/mcp?a=b");
-    expect(r.secrets[0].value).toBe(FAKE);
-  });
-
-  it("reports bad lines without echoing values", () => {
-    const r = parseMcpImportText(`type: websocket\nEMPTY=\nnonsense ${FAKE}`);
-    expect(r.errors).toHaveLength(3);
-    expect(r.errors.join(" ")).not.toContain(FAKE);
-  });
-});
-
 describe("applyMcpSecrets", () => {
-  it("places secrets as bearer, header and query parameter", () => {
+  it("sends a header row exactly as typed", () => {
+    const r = applyMcpSecrets("https://mcp.example.com/mcp", [
+      { name: "Authorization", placement: "header", target: "Authorization", value: `Bearer ${FAKE}` },
+      { name: "X-MCP-Readonly", placement: "header", target: "X-MCP-Readonly", value: "true" },
+    ]);
+    expect(r.headers).toEqual({ Authorization: `Bearer ${FAKE}`, "X-MCP-Readonly": "true" });
+    expect(r.url).toBe("https://mcp.example.com/mcp");
+  });
+
+  it("keeps legacy records working: bearer, header by name, query parameter", () => {
     const r = applyMcpSecrets("https://mcp.example.com/mcp", [
       { name: "TOKEN", placement: "bearer", value: FAKE },
       { name: "X_TEAM", placement: "header", value: "h" },
@@ -64,7 +46,70 @@ describe("McpSecretSchema", () => {
     expect(McpSecretSchema.safeParse({ ...base, name: "Host" }).success).toBe(false);
     expect(McpSecretSchema.safeParse({ ...base, name: "A", target: "Mcp-Session-Id" }).success).toBe(false);
     expect(McpSecretSchema.safeParse({ ...base, name: "A", target: "bad header" }).success).toBe(false);
+    expect(McpSecretSchema.safeParse({ ...base, name: "bad header" }).success).toBe(false);
     expect(McpSecretSchema.safeParse({ ...base, name: "A", target: "x-api-key" }).success).toBe(true);
+    expect(McpSecretSchema.safeParse({ ...base, name: "X-MCP-Readonly", target: "X-MCP-Readonly" }).success).toBe(true);
+  });
+
+  it("still reads legacy bearer and query records", () => {
+    expect(McpSecretSchema.safeParse({ id: "1", name: "MCP_TOKEN", value: "x", placement: "bearer" }).success).toBe(true);
+    expect(
+      McpSecretSchema.safeParse({ id: "2", name: "key", value: "x", placement: "query", target: "api_key" }).success
+    ).toBe(true);
+  });
+});
+
+describe("mcpHeaderErrors", () => {
+  const header = (name: string) => ({ name, placement: "header" as const, target: name });
+
+  it("accepts plain headers, including Authorization without OAuth", () => {
+    expect(
+      mcpHeaderErrors({ auth: "none", secrets: [header("Authorization"), header("X-MCP-Readonly")] })
+    ).toEqual([]);
+  });
+
+  it("requires a name that is a valid HTTP token", () => {
+    expect(mcpHeaderErrors({ auth: "none", secrets: [header("")] })).toEqual(["Enter a name for each header."]);
+    expect(mcpHeaderErrors({ auth: "none", secrets: [header("X Team")] })[0]).toMatch(/Header names can use/);
+    expect(mcpHeaderErrors({ auth: "none", secrets: [header("X:Team")] })).toHaveLength(1);
+  });
+
+  it("refuses duplicate header names, case-insensitive, also against a legacy bearer record", () => {
+    expect(mcpHeaderErrors({ auth: "none", secrets: [header("X-Team"), header("x-team")] })).toEqual([
+      "Use each header name once: x-team",
+    ]);
+    expect(
+      mcpHeaderErrors({
+        auth: "none",
+        secrets: [{ name: "MCP_TOKEN", placement: "bearer" }, header("authorization")],
+      })
+    ).toEqual(["Use each header name once: authorization"]);
+  });
+
+  it.each(["Host", "Content-Length", "Content-Type", "Accept", "Mcp-Session-Id", "MCP-Protocol-Version"])(
+    "refuses %s, which the transport sets itself",
+    (name) => {
+      expect(mcpHeaderErrors({ auth: "none", secrets: [header(name)] })).toEqual([
+        `The connection sets ${name} itself. Use another header name.`,
+      ]);
+    }
+  );
+
+  it("refuses an Authorization header with OAuth sign-in, also a legacy bearer record", () => {
+    const message =
+      "OAuth sign-in sets the Authorization header. Remove the Authorization row or set sign-in to None.";
+    expect(mcpHeaderErrors({ auth: "oauth", secrets: [header("Authorization")] })).toEqual([message]);
+    expect(mcpHeaderErrors({ auth: "oauth", secrets: [{ name: "T", placement: "bearer" }] })).toEqual([message]);
+    expect(mcpHeaderErrors({ auth: "oauth", secrets: [header("X-MCP-Readonly")] })).toEqual([]);
+  });
+
+  it("keeps query parameter names apart from header names", () => {
+    expect(
+      mcpHeaderErrors({
+        auth: "none",
+        secrets: [header("api_key"), { name: "k", placement: "query", target: "api_key" }],
+      })
+    ).toEqual([]);
   });
 });
 

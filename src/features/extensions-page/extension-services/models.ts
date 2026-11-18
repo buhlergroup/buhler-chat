@@ -67,31 +67,43 @@ export const McpTransportSchema = z.enum(["auto", "streamable-http", "sse"]);
 
 export type McpSecretPlacement = z.infer<typeof McpSecretPlacementSchema>;
 /**
- * How a secret travels to the MCP server:
- *   bearer: `Authorization: Bearer <value>`
- *   header: a header named `target` (default: the secret name)
- *   query:  a query parameter named `target` (default: the secret name)
+ * How a stored value travels to the MCP server:
+ *   header: a header named `target` (default: `name`), value exactly as typed.
+ *           Every row the form adds is a header.
+ *   bearer: legacy. `Authorization: Bearer <value>`.
+ *   query:  legacy. A query parameter named `target` (default: `name`).
+ * Legacy records keep working at runtime; no data migration.
  */
 export const McpSecretPlacementSchema = z.enum(["bearer", "header", "query"]);
 
-// HTTP header token characters (RFC 9110 tchar). Also used for query names.
-const HTTP_TOKEN = /^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$/;
+// HTTP header token characters (RFC 9110 / RFC 7230 tchar). Also used for query names.
+export const HTTP_TOKEN = /^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$/;
 
-// Headers the app sets itself, or that would break the transport.
-const RESERVED_SECRET_HEADERS = new Set([
+const HEADER_NAME_RULE =
+  "Header names can use letters, digits and ! # $ % & ' * + - . ^ _ ` | ~";
+
+/** Headers the MCP transport or fetch set themselves, or that would break the connection. */
+export const RESERVED_MCP_HEADERS: ReadonlySet<string> = new Set([
   "host",
   "content-length",
   "content-type",
+  "content-encoding",
   "accept",
+  "accept-encoding",
   "connection",
+  "keep-alive",
   "transfer-encoding",
+  "te",
+  "trailer",
+  "upgrade",
+  "expect",
   "mcp-session-id",
   "mcp-protocol-version",
   "last-event-id",
   "cookie",
 ]);
 
-/** The header or query parameter name a secret is sent under. */
+/** The header or query parameter name a stored value is sent under. */
 export const mcpSecretTargetName = (secret: {
   name: string;
   placement: McpSecretPlacement;
@@ -99,36 +111,77 @@ export const mcpSecretTargetName = (secret: {
 }): string =>
   secret.placement === "bearer" ? "Authorization" : secret.target || secret.name;
 
+/**
+ * Header rules checked on save, with messages that name the header:
+ * a valid HTTP token, not one the transport sets, each name once
+ * (case-insensitive), and no Authorization header with OAuth sign-in.
+ * Never looks at values.
+ */
+export function mcpHeaderErrors(config: {
+  auth: "none" | "oauth";
+  secrets: ReadonlyArray<{ name: string; placement: McpSecretPlacement; target?: string }>;
+}): string[] {
+  const errors: string[] = [];
+  const seenHeaders = new Set<string>();
+  const seenQuery = new Set<string>();
+  for (const secret of config.secrets) {
+    const name = mcpSecretTargetName(secret).trim();
+    if (!name) {
+      errors.push("Enter a name for each header.");
+      continue;
+    }
+    if (!HTTP_TOKEN.test(name)) {
+      errors.push(`${HEADER_NAME_RULE}: "${name.slice(0, 64)}"`);
+      continue;
+    }
+    const key = name.toLowerCase();
+    if (secret.placement === "query") {
+      if (seenQuery.has(key)) errors.push(`Use each query parameter once: ${name}`);
+      seenQuery.add(key);
+      continue;
+    }
+    if (RESERVED_MCP_HEADERS.has(key)) {
+      errors.push(`The connection sets ${name} itself. Use another header name.`);
+    } else if (seenHeaders.has(key)) {
+      errors.push(`Use each header name once: ${name}`);
+    } else if (key === "authorization" && config.auth === "oauth") {
+      errors.push(
+        "OAuth sign-in sets the Authorization header. Remove the Authorization row or set sign-in to None."
+      );
+    }
+    seenHeaders.add(key);
+  }
+  return errors;
+}
+
 export type McpSecretModel = z.infer<typeof McpSecretSchema>;
+/**
+ * One header row (or a legacy bearer / query record). For header rows the
+ * form sets `name` and `target` to the header name.
+ */
 export const McpSecretSchema = z
   .object({
     id: z.string(),
     name: z
       .string()
-      .min(1, { message: "Secret name cannot be empty" })
-      .max(128, { message: "Secret name is too long" })
-      .regex(/^[A-Za-z0-9_.-]+$/, {
-        message: "Secret name can use letters, digits, '_', '-' and '.'",
-      }),
+      .min(1, { message: "Enter a name for each header." })
+      .max(128, { message: "Header names can have up to 128 characters." })
+      .regex(HTTP_TOKEN, { message: HEADER_NAME_RULE }),
     // In Cosmos this is always the Key Vault mask; the value lives in Key Vault.
-    value: z.string().min(1, { message: "Secret value cannot be empty" }),
+    value: z.string().min(1, { message: "Enter a value for each header." }),
     placement: McpSecretPlacementSchema,
     target: z
       .union([
         z.literal(""),
-        z
-          .string()
-          .max(128)
-          .regex(HTTP_TOKEN, { message: "Header or parameter name is not valid" }),
+        z.string().max(128).regex(HTTP_TOKEN, { message: HEADER_NAME_RULE }),
       ])
       .optional(),
   })
   .refine(
     (s) =>
-      s.placement !== "header" ||
-      (HTTP_TOKEN.test(mcpSecretTargetName(s)) &&
-        !RESERVED_SECRET_HEADERS.has(mcpSecretTargetName(s).toLowerCase())),
-    { message: "This header name cannot be used for a secret" }
+      s.placement === "query" ||
+      !RESERVED_MCP_HEADERS.has(mcpSecretTargetName(s).toLowerCase()),
+    { message: "The connection sets this header itself. Use another header name." }
   );
 
 export type McpToolInfo = z.infer<typeof McpToolInfoSchema>;
@@ -163,7 +216,7 @@ export const McpConfigSchema = z.object({
       }
     }, "Server URL must be a valid https URL"),
   transport: McpTransportSchema,
-  secrets: z.array(McpSecretSchema).max(20, { message: "Use 20 secrets or fewer" }),
+  secrets: z.array(McpSecretSchema).max(20, { message: "Use up to 20 headers." }),
   /** Tool names the model may use. Empty: all tools of the server. */
   toolAllowList: z.array(z.string().min(1).max(256)).max(200),
   /** Tools found on the server at the last discovery. Server-managed. */

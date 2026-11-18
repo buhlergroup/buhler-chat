@@ -471,9 +471,17 @@ describe("extension-service.ts", () => {
       mcp: {
         url: "https://mcp.example.com/mcp",
         transport: "auto" as const,
-        secrets: [{ id: "client", name: "MCP_TOKEN", value: "fake-test-value", placement: "bearer" as const }],
+        secrets: [
+          {
+            id: "client",
+            name: "Authorization",
+            target: "Authorization",
+            value: "fake-test-value",
+            placement: "header" as "bearer" | "header" | "query",
+          },
+        ],
         toolAllowList: [],
-        auth: "none" as const,
+        auth: "none" as "none" | "oauth",
       },
     });
 
@@ -543,6 +551,45 @@ describe("extension-service.ts", () => {
       const result = await DeleteExtension("mcpdel2");
       expect(result.status).toBe("OK");
       expect(deleteSpy).toHaveBeenCalled();
+    });
+
+    it("036 create refuses duplicate header names (case-insensitive) and stores nothing", async () => {
+      const input = mcpInput();
+      input.mcp.secrets.push({ ...input.mcp.secrets[0], id: "c2", name: "authorization", target: "authorization" });
+      const result = await CreateExtension(input);
+      expect(result.status).toBe("ERROR");
+      if (result.status === "ERROR") {
+        expect(result.errors[0].message).toBe("Use each header name once: authorization");
+        expect(JSON.stringify(result.errors)).not.toContain("fake-test-value");
+      }
+      expect(mockKvSetSecret).not.toHaveBeenCalled();
+    });
+
+    it("037 create refuses a header the transport sets itself", async () => {
+      const input = mcpInput();
+      input.mcp.secrets[0] = { ...input.mcp.secrets[0], name: "Mcp-Session-Id", target: "Mcp-Session-Id" };
+      const result = await CreateExtension(input);
+      expect(result.status).toBe("ERROR");
+      expect(mockKvSetSecret).not.toHaveBeenCalled();
+    });
+
+    it("038 create refuses an Authorization header with OAuth sign-in", async () => {
+      const input = mcpInput();
+      input.mcp.auth = "oauth";
+      const result = await CreateExtension(input);
+      expect(result.status).toBe("ERROR");
+      if (result.status === "ERROR") {
+        expect(result.errors[0].message).toMatch(/OAuth sign-in sets the Authorization header/);
+      }
+      expect(mockKvSetSecret).not.toHaveBeenCalled();
+    });
+
+    it("039 create refuses a new legacy bearer row", async () => {
+      const input = mcpInput();
+      input.mcp.secrets[0] = { ...input.mcp.secrets[0], name: "MCP_TOKEN", target: "", placement: "bearer" };
+      const result = await CreateExtension(input);
+      expect(result.status).toBe("ERROR");
+      expect(mockKvSetSecret).not.toHaveBeenCalled();
     });
 
     it("034 FindMissingExtensionIds lists ids that no longer exist", async () => {
