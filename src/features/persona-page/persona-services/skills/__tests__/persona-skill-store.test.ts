@@ -11,6 +11,10 @@ vi.mock("@/features/common/services/logger", () => ({
 // ── Cosmos: one PERSONA_SKILL row (plus the persona for access checks) ──────
 let row: Record<string, unknown> | undefined;
 let personaRow: Record<string, unknown> | undefined;
+let skillRows: Record<string, unknown>[] = [];
+/** Next row write fails with 412 after the row became this (a parallel writer). */
+let conflictWith: Record<string, unknown> | undefined;
+// Every row write (upsert, or replace with IfMatch) lands here.
 const upsert = vi.fn(async (doc: Record<string, unknown>) => {
   row = { ...doc };
   return { resource: doc };
@@ -19,18 +23,34 @@ vi.mock("@/features/common/services/cosmos", () => ({
   HistoryContainer: () => ({
     items: {
       upsert: (doc: Record<string, unknown>) => upsert(doc),
-      query: () => ({
-        fetchAll: async () => ({ resources: personaRow ? [personaRow] : [] }),
+      query: (spec: { parameters: { value: string }[] }) => ({
+        fetchAll: async () => ({
+          resources:
+            spec.parameters[0].value === "PERSONA_SKILL"
+              ? skillRows
+              : personaRow
+                ? [personaRow]
+                : [],
+        }),
       }),
     },
     item: () => ({
       read: async () => ({ resource: row }),
       delete: async () => ({}),
+      replace: async (doc: Record<string, unknown>) => {
+        if (conflictWith) {
+          row = conflictWith;
+          conflictWith = undefined;
+          throw Object.assign(new Error("Precondition failed"), { code: 412 });
+        }
+        return upsert(doc);
+      },
     }),
   }),
 }));
 
 vi.mock("@/features/common/services/azure-storage", () => ({
+  UploadBlob: vi.fn(async () => ({ status: "OK", response: "url" })),
   GetBlob: vi.fn(async () => ({
     status: "OK",
     response: { stream: Readable.from([Buffer.from("zip-bytes")]) },
@@ -53,7 +73,7 @@ vi.mock("@/features/chat-page/chat-services/code-interpreter-service", () => ({
   UploadFileForCodeInterpreter: (f: File) => UploadFileForCodeInterpreter(f),
 }));
 
-let currentUser = { isAdmin: false };
+let currentUser = { isAdmin: false, token: "user-token" };
 vi.mock("@/features/auth-page/helpers", () => ({
   userHashedId: async () => "viewer-hash",
   getCurrentUser: async () => currentUser,
@@ -65,6 +85,7 @@ vi.mock("../../access-group-service", () => ({
 import {
   deleteSkillOpenAiFile,
   ensureSkillOpenAiFile,
+  loadUsableSkillsWithStatus,
   refreshSkillOpenAiFiles,
   resolveSkillAccess,
   skillBlobContainer,
@@ -98,7 +119,9 @@ beforeEach(() => {
   nextUploadId = 0;
   row = undefined;
   personaRow = undefined;
-  currentUser = { isAdmin: false };
+  skillRows = [];
+  conflictWith = undefined;
+  currentUser = { isAdmin: false, token: "user-token" };
 });
 
 describe("skill container", () => {
@@ -156,6 +179,27 @@ describe("ensureSkillOpenAiFile — one OpenAI file per skill version", () => {
     expect(upsert).not.toHaveBeenCalled();
   });
 
+  it("does not undo a new version stored meanwhile (412): drops its upload, caches the new one", async () => {
+    const skill = makeSkill();
+    row = { ...skill };
+    conflictWith = { ...skill, blobName: "agent-skills/p1/s1-2.zip" };
+    const id = await ensureSkillOpenAiFile(skill);
+    expect(del).toHaveBeenCalledWith("file-new-1");
+    expect(id).toBe("file-new-2");
+    expect(row).toMatchObject({ blobName: "agent-skills/p1/s1-2.zip", openAiFileId: "file-new-2" });
+  });
+
+  it("412 for another field on the same version: stores its upload on the newer row, no second upload", async () => {
+    const skill = makeSkill();
+    row = { ...skill };
+    conflictWith = { ...skill, description: "Changed meanwhile." };
+    const id = await ensureSkillOpenAiFile(skill);
+    expect(id).toBe("file-new-1");
+    expect(UploadFileForCodeInterpreter).toHaveBeenCalledTimes(1);
+    expect(del).not.toHaveBeenCalled();
+    expect(row).toMatchObject({ description: "Changed meanwhile.", openAiFileId: "file-new-1" });
+  });
+
   it("drops its upload when the skill was deleted meanwhile", async () => {
     row = undefined;
     const id = await ensureSkillOpenAiFile(makeSkill());
@@ -207,10 +251,58 @@ describe("deleteSkillOpenAiFile — best effort", () => {
   });
 });
 
+describe("loadUsableSkillsWithStatus — SharePoint permission per user", () => {
+  it("leaves out a linked skill the user cannot read (Graph 403) and names it", async () => {
+    personaRow = { id: "p1", type: "PERSONA", userId: "owner-hash", isPublished: true };
+    const linked = makeSkill({
+      id: "s2",
+      name: "linked",
+      openAiFileId: "file-linked",
+      source: {
+        kind: "sharepoint",
+        driveId: "b!drive",
+        itemId: "01ITEM",
+        webUrl: "https://example.sharepoint.com/x.zip",
+        name: "linked.zip",
+        version: "c1",
+        lastModifiedDateTime: "2026-11-01T00:00:00Z",
+        size: 9,
+      },
+    });
+    skillRows = [makeSkill(), linked];
+    const fetchMock = vi.fn(async () => ({ ok: false, status: 403, body: null }));
+    vi.stubGlobal("fetch", fetchMock);
+    try {
+      const res = await loadUsableSkillsWithStatus("p1");
+      expect(res.skills.map((s) => s.name)).toEqual(["demo"]);
+      expect(res.unavailable).toEqual(["linked"]);
+      const calls = fetchMock.mock.calls as unknown as [string, RequestInit][];
+      expect(calls).toHaveLength(1);
+      expect(calls[0][1].headers).toMatchObject({ Authorization: "Bearer user-token" });
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("does not call Graph when the agent has no linked skills", async () => {
+    personaRow = { id: "p1", type: "PERSONA", userId: "owner-hash", isPublished: true };
+    skillRows = [makeSkill()];
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+    try {
+      const res = await loadUsableSkillsWithStatus("p1");
+      expect(res).toEqual({ skills: [expect.objectContaining({ name: "demo" })], unavailable: [] });
+      expect(fetchMock).not.toHaveBeenCalled();
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+});
+
 describe("resolveSkillAccess — admins may edit", () => {
   it("an admin who does not own the agent can edit its skills", async () => {
     personaRow = { id: "p1", type: "PERSONA", userId: "owner-hash", isPublished: true };
-    currentUser = { isAdmin: true };
+    currentUser = { isAdmin: true, token: "user-token" };
     const access = await resolveSkillAccess("p1");
     expect(access).toMatchObject({ canUse: true, canEdit: true });
   });

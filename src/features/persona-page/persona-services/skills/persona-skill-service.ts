@@ -10,6 +10,7 @@ import "server-only";
  */
 
 import { ServerActionResponse } from "@/features/common/server-action-response";
+import { getCurrentUser } from "@/features/auth-page/helpers";
 import { HistoryContainer } from "@/features/common/services/cosmos";
 import { DeleteBlob, UploadBlob } from "@/features/common/services/azure-storage";
 import { uniqueId } from "@/features/common/util";
@@ -18,6 +19,8 @@ import {
   PERSONA_SKILL_ATTRIBUTE,
   PersonaSkillModelSchema,
   SKILL_LIMITS,
+  isGraphDriveId,
+  isGraphItemId,
   toSkillSummary,
   type PersonaSkillModel,
   type PersonaSkillSummary,
@@ -25,11 +28,18 @@ import {
 import { SkillZipError, validateSkillZip } from "./skill-zip";
 import {
   deleteSkillOpenAiFile,
+  linkedSkillDeps,
   querySkillsByPersonaId,
   resolveSkillAccess,
   skillBlobContainer,
   skillBlobName,
 } from "./persona-skill-store";
+import {
+  buildSharePointSource,
+  fetchLinkedSkillZip,
+  packageFields,
+  syncLinkedSkill,
+} from "./linked-skill-sync";
 
 const notAllowed = <T,>(): ServerActionResponse<T> => ({
   status: "UNAUTHORIZED",
@@ -191,6 +201,150 @@ export async function UploadPersonaSkill(
       error: error instanceof Error ? error.message : String(error),
     });
     return { status: "ERROR", errors: [{ message: "The skill could not be saved." }] };
+  }
+}
+
+/**
+ * Adds a skill linked to a .zip in SharePoint / OneDrive. Chats then use the
+ * newest version of that file (see linked-skill-sync.ts). Owner/admin only.
+ * The file is read with the current user's token and validated like an
+ * upload; the client sends only the drive and item id, everything else
+ * (name, link, version) comes from Graph.
+ */
+export async function LinkPersonaSkillFromSharePoint(input: {
+  personaId: string;
+  driveId: string;
+  itemId: string;
+}): Promise<ServerActionResponse<PersonaSkillSummary>> {
+  const personaId = typeof input?.personaId === "string" ? input.personaId : "";
+  if (!personaId) return { status: "ERROR", errors: [{ message: "Save the agent first." }] };
+  if (!isGraphDriveId(input.driveId) || !isGraphItemId(input.itemId)) {
+    return { status: "ERROR", errors: [{ message: "Choose a .zip file from SharePoint." }] };
+  }
+  const { driveId, itemId } = input;
+
+  try {
+    const access = await resolveSkillAccess(personaId);
+    if (!access) return notFound();
+    if (!access.canEdit) return notAllowed();
+
+    const existing = await querySkillsByPersonaId(personaId);
+    if (existing.length >= SKILL_LIMITS.maxSkillsPerAgent) {
+      return {
+        status: "ERROR",
+        errors: [{ message: `An agent can have up to ${SKILL_LIMITS.maxSkillsPerAgent} skills.` }],
+      };
+    }
+    if (existing.some((s) => s.source?.driveId === driveId && s.source.itemId === itemId)) {
+      return { status: "ERROR", errors: [{ message: "The agent already uses this file." }] };
+    }
+
+    const { token } = await getCurrentUser();
+    const fetched = await fetchLinkedSkillZip(token, driveId, itemId);
+    if (!fetched.ok) {
+      return { status: "ERROR", errors: [{ message: fetched.message }] };
+    }
+    const { meta, buf, pkg } = fetched;
+
+    if (existing.some((s) => s.name === pkg.name)) {
+      return {
+        status: "ERROR",
+        errors: [{ message: `The agent already has the skill "${pkg.name}".` }],
+      };
+    }
+
+    const skillId = uniqueId();
+    const blobName = skillBlobName(personaId, skillId);
+    const stored = await UploadBlob(skillBlobContainer(), blobName, buf, {
+      contentType: "application/zip",
+      metadata: { personaid: personaId, skillname: pkg.name },
+    });
+    if (stored.status !== "OK") {
+      return { status: "ERROR", errors: [{ message: "The skill could not be saved." }] };
+    }
+
+    const now = new Date();
+    const model: PersonaSkillModel = {
+      id: skillId,
+      type: PERSONA_SKILL_ATTRIBUTE,
+      userId: access.persona.userId,
+      personaId,
+      ...packageFields(pkg),
+      zipFileName: meta.name.slice(0, 255),
+      blobName,
+      source: buildSharePointSource(meta, driveId, itemId),
+      createdAt: now,
+      updatedAt: now,
+    };
+    if (!PersonaSkillModelSchema.safeParse(model).success) {
+      await DeleteBlob(skillBlobContainer(), blobName);
+      return { status: "ERROR", errors: [{ message: "The skill could not be saved." }] };
+    }
+    await HistoryContainer().items.upsert<PersonaSkillModel>(model);
+
+    logInfo("agent skills: SharePoint skill linked", {
+      personaId,
+      skillId,
+      name: pkg.name,
+      files: pkg.files.length,
+      zipBytes: pkg.zipBytes,
+    });
+    return { status: "OK", response: toSkillSummary(model) };
+  } catch (error) {
+    logError("agent skills: link from SharePoint failed", {
+      personaId,
+      error: error instanceof Error ? error.message : String(error),
+    });
+    return { status: "ERROR", errors: [{ message: "The skill could not be saved." }] };
+  }
+}
+
+/**
+ * "Check now" for a linked skill: reads the SharePoint file with the current
+ * user's token and stores a new version when it changed. Also retries a
+ * version that failed before. Owner/admin only.
+ */
+export async function CheckPersonaSkillNow(
+  personaId: string,
+  skillId: string,
+): Promise<
+  ServerActionResponse<{ skill: PersonaSkillSummary; result: "current" | "updated" | "invalid" }>
+> {
+  try {
+    const access = await resolveSkillAccess(personaId);
+    if (!access) return notFound();
+    if (!access.canEdit) return notAllowed();
+
+    const skills = await querySkillsByPersonaId(personaId);
+    const skill = skills.find((s) => s.id === skillId);
+    if (!skill) return { status: "NOT_FOUND", errors: [{ message: "Skill not found." }] };
+    if (!skill.source) {
+      return { status: "ERROR", errors: [{ message: "This skill is an uploaded zip." }] };
+    }
+
+    const { token } = await getCurrentUser();
+    const res = await syncLinkedSkill(skill, token, skills, linkedSkillDeps(), { force: true });
+    switch (res.status) {
+      case "current":
+      case "updated":
+        return { status: "OK", response: { skill: toSkillSummary(res.skill), result: res.status } };
+      case "kept":
+        if (res.invalid) {
+          return { status: "OK", response: { skill: toSkillSummary(res.skill), result: "invalid" } };
+        }
+        return { status: "ERROR", errors: [{ message: res.message }] };
+      case "denied":
+        return { status: "ERROR", errors: [{ message: res.message }] };
+      case "gone":
+        return { status: "NOT_FOUND", errors: [{ message: "Skill not found." }] };
+    }
+  } catch (error) {
+    logError("agent skills: check now failed", {
+      personaId,
+      skillId,
+      error: error instanceof Error ? error.message : String(error),
+    });
+    return { status: "ERROR", errors: [{ message: "The skill could not be checked." }] };
   }
 }
 

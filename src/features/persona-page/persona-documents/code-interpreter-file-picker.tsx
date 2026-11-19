@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect, useRef } from "react";
+import { useState, useEffect, useRef, type ReactNode } from "react";
 import { v4 as uuid } from "uuid";
 import { Button } from "@/features/ui/button";
 import { Edit, ExternalLink } from "lucide-react";
@@ -23,12 +23,25 @@ interface CodeInterpreterFilePickerProps {
   tenantUrl: string;
   token: string;
   onFilesSelected: (files: SharePointFile[]) => void;
+  /** File extensions to offer (".zip"); default: the code interpreter types. */
+  filters?: string[];
+  /** One file instead of several (default: several). */
+  single?: boolean;
+  title?: string;
+  description?: ReactNode;
+  /** Own trigger instead of the edit icon. */
+  trigger?: (open: () => void) => ReactNode;
 }
 
 export function CodeInterpreterFilePicker({
   tenantUrl,
   token,
   onFilesSelected,
+  filters: fileFilters,
+  single = false,
+  title,
+  description,
+  trigger,
 }: CodeInterpreterFilePickerProps) {
   const [showPicker, setShowPicker] = useState(false);
   const iframeRef = useRef<HTMLIFrameElement>(null);
@@ -147,9 +160,9 @@ export function CodeInterpreterFilePicker({
       );
 
       // Filter for Code Interpreter supported extensions
-      const filters = CODE_INTERPRETER_SUPPORTED_EXTENSIONS.map(
-        (ext) => `.${ext.toLowerCase()}`
-      );
+      const filters =
+        fileFilters ??
+        CODE_INTERPRETER_SUPPORTED_EXTENSIONS.map((ext) => `.${ext.toLowerCase()}`);
 
       const options = {
         sdk: "8.0",
@@ -163,11 +176,13 @@ export function CodeInterpreterFilePicker({
           mode: "files",
           filters: filters,
         },
-        selection: {
-          mode: "multiple",
-          enablePersistence: true,
-          maximumCount: documentLimit,
-        },
+        selection: single
+          ? { mode: "single" }
+          : {
+              mode: "multiple",
+              enablePersistence: true,
+              maximumCount: documentLimit,
+            },
       };
 
       const queryString = new URLSearchParams({
@@ -211,23 +226,28 @@ export function CodeInterpreterFilePicker({
 
   return (
     <div className="relative">
-      <Button
-        size={"icon"}
-        onClick={openFilePicker}
-        className="p-1 cursor-pointer"
-        variant={"ghost"}
-        type="button"
-      >
-        <Edit size={15} />
-      </Button>
+      {trigger ? (
+        trigger(openFilePicker)
+      ) : (
+        <Button
+          size={"icon"}
+          onClick={openFilePicker}
+          className="p-1 cursor-pointer"
+          variant={"ghost"}
+          type="button"
+        >
+          <Edit size={15} />
+        </Button>
+      )}
 
       <Dialog open={showPicker} onOpenChange={setShowPicker}>
         <DialogContent className="w-[90vw] max-w-[1500px]">
           <DialogHeader>
             <DialogTitle className="text-xl font-semibold">
-              Select Code Interpreter Files
+              {title ?? "Select Code Interpreter Files"}
             </DialogTitle>
             <DialogDescription className="">
+              {description ?? (
               <span className="gap-2 flex flex-col">
                 <span>
                   Select files for Code Interpreter (Excel, CSV, JSON, images, etc.).
@@ -237,6 +257,7 @@ export function CodeInterpreterFilePicker({
                   Files can not be larger than <b>512MB</b> each.
                 </span>
               </span>
+              )}
             </DialogDescription>
           </DialogHeader>
           <div className="h-[50vh] max-h-[1000px]">
