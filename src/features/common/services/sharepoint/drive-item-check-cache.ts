@@ -1,7 +1,8 @@
 import "server-only";
 
 /**
- * Per-user cache of the SharePoint metadata check of linked skills.
+ * Per-user cache of the SharePoint metadata check of a drive item (linked
+ * skills, linked sources of SharePoint files).
  *
  * Chat start and the first message are two requests; both check the same
  * files with the same user's token. The result of a check is kept for 60 s
@@ -22,7 +23,7 @@ import {
   getDriveItemVersion,
   isFileAccessDenied,
   type DriveItemVersion,
-} from "./sharepoint-skill-graph";
+} from "./graph-drive";
 
 export const ITEM_CHECK_TTL_MS = 60_000;
 export const ITEM_CHECK_MAX_ENTRIES = 500;
