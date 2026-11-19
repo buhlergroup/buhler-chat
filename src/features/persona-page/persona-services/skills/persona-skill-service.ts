@@ -42,7 +42,7 @@ import {
   packageFields,
   syncLinkedSkill,
 } from "./linked-skill-sync";
-import { rememberDriveItemVersion } from "./drive-item-check-cache";
+import { rememberDriveItemVersion } from "@/features/common/services/sharepoint/drive-item-check-cache";
 
 const notAllowed = <T,>(): ServerActionResponse<T> => ({
   status: "UNAUTHORIZED",

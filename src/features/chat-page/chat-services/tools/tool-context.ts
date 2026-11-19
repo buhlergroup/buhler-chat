@@ -4,6 +4,7 @@ import type { DefaultTools } from "@/features/chat-page/chat-services/models";
 import type { ExtensionModel } from "@/features/extensions-page/extension-services/models";
 import type { McpConnectionOptions } from "@/features/extensions-page/extension-services/mcp/mcp-client";
 import type { PersonaSkillModel } from "@/features/persona-page/persona-services/skills/skill-models";
+import type { PersonaFileSourceModel } from "@/features/persona-page/persona-services/sharepoint-files/sharepoint-file-models";
 
 /**
  * Context threaded through buildToolset and every tool execute closure.
@@ -64,4 +65,24 @@ export interface ToolContext {
    * interpreter container. load_skill tells the model how to unpack them.
    */
   skillsInCodeInterpreter?: string[];
+  /**
+   * True when the code interpreter runs in this turn (the effective toggle,
+   * after the provider check), not the thread's stored default.
+   */
+  codeInterpreterAvailable?: boolean;
+  /**
+   * SharePoint folders/files linked to the agent, for find_sharepoint_files
+   * and fetch_sharepoint_file. Registered only with codeInterpreterAvailable.
+   * Not passed on to sub-agents.
+   */
+  sharePointFiles?: {
+    sources: PersonaFileSourceModel[];
+    /** The chatting user's delegated Graph token. */
+    accessToken: string;
+    /**
+     * The code interpreter container of this turn. A getter: the route
+     * creates the container after the toolset is built.
+     */
+    getContainerId: () => string | undefined;
+  };
 }

@@ -68,6 +68,7 @@ import {
   buildSkillCatalogPrompt,
   resolveSkillCodeInterpreterFiles,
 } from "@/features/persona-page/persona-services/skills/skill-models";
+import { loadUsableFileSources } from "@/features/persona-page/persona-services/sharepoint-files/sharepoint-file-store";
 import { type UserPrompt } from "@/features/chat-page/chat-services/models";
 
 // Allow streaming responses to run for up to 10 minutes (600 seconds)
@@ -309,6 +310,14 @@ export async function POST(req: Request) {
     });
   }
 
+  // SharePoint files for the model (personas only): the folders/files the
+  // agent links. Only loaded when the code interpreter runs in this turn,
+  // because fetched files go into its container. What the user may read in
+  // them is decided by SharePoint at fetch time, with the user's token.
+  const fileSources = effectiveToolsSafe.codeInterpreter
+    ? await loadUsableFileSources(ctx.thread.personaId)
+    : undefined;
+
   // ── prompt prefix assembly (cache-stability critical) ──────────────────
   // The generative-UI block is process-constant, so it is handed to
   // buildSystemMessage as `trailingStaticBlock` instead of being concatenated
@@ -360,6 +369,16 @@ export async function POST(req: Request) {
     depth: 0,
     skills: agentSkills,
     skillsInCodeInterpreter,
+    codeInterpreterAvailable: effectiveToolsSafe.codeInterpreter,
+    ...(fileSources && {
+      sharePointFiles: {
+        sources: fileSources.sources,
+        accessToken: fileSources.accessToken,
+        // Read when the model calls the tool: the container is created
+        // (or replaced) further down, after the toolset.
+        getContainerId: () => ctx.thread.codeInterpreterContainerId,
+      },
+    }),
   });
 
   // Code-interpreter file IDs the user attached this turn. The chat-store

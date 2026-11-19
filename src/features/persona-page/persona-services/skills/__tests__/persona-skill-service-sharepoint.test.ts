@@ -75,7 +75,7 @@ import {
   FindPersonaSkills,
   LinkPersonaSkillFromSharePoint,
 } from "../persona-skill-service";
-import { clearDriveItemChecks } from "../drive-item-check-cache";
+import { clearDriveItemChecks } from "@/features/common/services/sharepoint/drive-item-check-cache";
 
 const goodZip = () =>
   buildZip([

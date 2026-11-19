@@ -8,6 +8,14 @@ vi.mock("@/features/persona-page/persona-services/skills/persona-skill-store", (
   loadUsableSkillsWithStatus: vi.fn(async () => ({ skills: [], unavailable: [] })),
   readSkillFile: vi.fn(),
 }));
+// SharePoint files for the model: none unless a test sets them.
+const mockLoadUsableFileSources = vi.fn(async (..._a: unknown[]): Promise<unknown> => undefined);
+vi.mock(
+  "@/features/persona-page/persona-services/sharepoint-files/sharepoint-file-store",
+  () => ({
+    loadUsableFileSources: (...a: unknown[]) => mockLoadUsableFileSources(...a),
+  }),
+);
 vi.mock("@/features/common/services/logger", () => ({
   logError: vi.fn(),
   logWarn: vi.fn(),
@@ -287,6 +295,44 @@ describe("/api/chat route (AI SDK v6)", () => {
       );
       // Persisted straight away — otherwise turn 2 would mint another one.
       expect(mockUpdateContainer).toHaveBeenCalledWith("t1", "cntr_precreated", "");
+    });
+
+    it("gives the SharePoint file tools the agent's sources and the container created after the toolset", async () => {
+      const source = { id: "src1", name: "Images", kind: "folder" };
+      mockLoadUsableFileSources.mockResolvedValueOnce({
+        sources: [source],
+        accessToken: "user-token",
+        userId: "user-hash",
+      });
+      mockLoadThreadContext.mockResolvedValue({
+        ...structuredClone(ciCtx),
+        thread: { ...ciCtx.thread, personaId: "agent-7" },
+      });
+      mockEnsureContainer.mockResolvedValue("cntr_precreated");
+
+      await POST(makeRequest({ message: "make slides", id: "t1", codeInterpreterEnabled: true }));
+
+      expect(mockLoadUsableFileSources).toHaveBeenCalledWith("agent-7");
+      const toolCtx = mockBuildToolset.mock.calls[0][0];
+      expect(toolCtx.codeInterpreterAvailable).toBe(true);
+      expect(toolCtx.sharePointFiles.sources).toEqual([source]);
+      expect(toolCtx.sharePointFiles.accessToken).toBe("user-token");
+      // Read lazily: the container did not exist yet when the toolset was built.
+      expect(toolCtx.sharePointFiles.getContainerId()).toBe("cntr_precreated");
+    });
+
+    it("loads no SharePoint sources when the code interpreter is off", async () => {
+      mockLoadThreadContext.mockResolvedValue({
+        ...structuredClone(ciCtx),
+        thread: { ...ciCtx.thread, personaId: "agent-7" },
+      });
+
+      await POST(makeRequest({ message: "hi", id: "t1", codeInterpreterEnabled: false }));
+
+      expect(mockLoadUsableFileSources).not.toHaveBeenCalled();
+      const toolCtx = mockBuildToolset.mock.calls[0][0];
+      expect(toolCtx.codeInterpreterAvailable).toBe(false);
+      expect(toolCtx.sharePointFiles).toBeUndefined();
     });
 
     it("revalidates the stored container each turn and writes nothing when it is unchanged", async () => {

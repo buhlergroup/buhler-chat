@@ -53,6 +53,7 @@ import {
   loadUsableSkills,
   uploadSkillArchivesForCodeInterpreter,
 } from "./skills/persona-skill-store";
+import { deleteFileSourcesForPersona } from "./sharepoint-files/sharepoint-file-store";
 import { getCodeInterpreterFileLimit } from "@/features/chat-page/chat-services/code-interpreter-constants";
 import { usableExtensionIdsForAgent } from "@/features/extensions-page/extension-services/extension-runtime";
 
@@ -228,6 +229,7 @@ export const DeletePersona = async (
         return documentsResponse;
       }
       await deleteSkillsForPersona(personaId);
+      await deleteFileSourcesForPersona(personaId);
 
       const { resource: deletedPersona } = await HistoryContainer()
         .item(personaId, personaResponse.response.userId)

@@ -94,7 +94,7 @@ import {
   uploadSkillArchivesForCodeInterpreter,
 } from "../persona-skill-store";
 import type { PersonaSkillModel } from "../skill-models";
-import { clearDriveItemChecks } from "../drive-item-check-cache";
+import { clearDriveItemChecks } from "@/features/common/services/sharepoint/drive-item-check-cache";
 
 const makeSkill = (over: Partial<PersonaSkillModel> = {}): PersonaSkillModel => ({
   id: "s1",

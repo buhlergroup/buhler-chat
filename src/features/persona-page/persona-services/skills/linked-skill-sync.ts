@@ -45,8 +45,8 @@ import {
   getDriveItemVersion,
   isFileAccessDenied,
   type DriveItemVersion,
-} from "./sharepoint-skill-graph";
-import { checkDriveItem, rememberDriveItemVersion } from "./drive-item-check-cache";
+} from "@/features/common/services/sharepoint/graph-drive";
+import { checkDriveItem, rememberDriveItemVersion } from "@/features/common/services/sharepoint/drive-item-check-cache";
 
 export interface LinkedSkillDeps {
   blobContainer: string;
