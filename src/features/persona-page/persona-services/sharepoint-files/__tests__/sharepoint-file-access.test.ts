@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import sharp from "sharp";
-import { FakeGraph } from "./fake-graph";
+import { FakeGraph, type FakeItem } from "./fake-graph";
 
 vi.mock("@/features/common/services/logger", () => ({
   logInfo: vi.fn(),
@@ -16,7 +16,7 @@ import {
   containerFileName,
 } from "../sharepoint-file-access";
 import type { PersonaFileSourceModel } from "../sharepoint-file-models";
-import type { SharePointFileLimits } from "../sharepoint-file-limits";
+import { readSharePointFileLimits, type SharePointFileLimits } from "../sharepoint-file-limits";
 
 const DRIVE = "b!driveA_123";
 const OTHER_DRIVE = "b!driveB_456";
@@ -292,11 +292,12 @@ describe("fetch_sharepoint_file — limits", () => {
     expect(upload).toHaveBeenCalledTimes(10);
   });
 
-  it("refuses a file whose size is above the limit before downloading", async () => {
-    graph.drives.get(DRIVE)!.get("P01")!.size = 60_000_000;
-    const res = await session().fetch({ name: "photo-01.jpg" });
+  it("refuses a non-image file whose size is above the limit before any download", async () => {
+    graph.drives.get(DRIVE)!.get("TXT1")!.size = 60_000_000;
+    const res = await session().fetch({ name: "notes.txt" });
     expect(res.error).toMatch(/larger than 50 MB/);
     expect(graph.count("/content")).toBe(0);
+    expect(upload).not.toHaveBeenCalled();
   });
 
   it("stops reading a download beyond the limit (size in the metadata was wrong)", async () => {
@@ -311,13 +312,15 @@ describe("fetch_sharepoint_file — limits", () => {
     expect(graph.pulledChunks).toBeLessThan(10);
   });
 
-  it("refuses PSD and unknown types before downloading", async () => {
+  it("refuses PSD without a SharePoint preview, and unknown types, without downloading them", async () => {
     const res = await session().fetch({ name: "design.psd" });
-    expect(res.error).toMatch(/\.psd/);
+    expect(res.error).toMatch(/no preview image of this Photoshop file \(\.psd\)/);
+    expect(graph.thumbnails("PSD1")).toBe(1);
+    expect(graph.originals("PSD1")).toBe(0);
     graph.add(DRIVE, { id: "EXE1", name: "tool.exe", parent: "FOLDER1" });
     const exe = await session().fetch({ name: "tool.exe" });
     expect(exe.error).toMatch(/\.exe are not supported/);
-    expect(graph.count("/content")).toBe(0);
+    expect(graph.count("/items/EXE1/")).toBe(0);
     expect(upload).not.toHaveBeenCalled();
   });
 
@@ -330,9 +333,17 @@ describe("fetch_sharepoint_file — limits", () => {
 });
 
 describe("fetch_sharepoint_file — images", () => {
-  it("converts TIFF to JPEG", async () => {
+  it("converts TIFF to JPEG when SharePoint has no preview", async () => {
     const res = await session().fetch({ name: "scan.tif" });
-    expect(res).toMatchObject({ path: "/mnt/data/scan.jpg", name: "scan.jpg", width: 64, height: 32 });
+    expect(res).toMatchObject({
+      path: "/mnt/data/scan.jpg",
+      name: "scan.jpg",
+      width: 64,
+      height: 32,
+      source: "sharepoint-original",
+    });
+    expect(graph.thumbnails("TIF1")).toBe(1);
+    expect(graph.originals("TIF1")).toBe(1);
     const out = upload.mock.calls[0][2] as Buffer;
     expect((await sharp(out).metadata()).format).toBe("jpeg");
   });
@@ -361,9 +372,12 @@ describe("fetch_sharepoint_file — images", () => {
     expect([meta.width, meta.height]).toEqual([853, 2560]);
   });
 
-  it("passes a small image through unchanged", async () => {
+  it("passes a small image through unchanged (no preview asked for)", async () => {
+    graph.drives.get(DRIVE)!.get("P01")!.thumbnail = "auto";
     const res = await session().fetch({ name: "photo-01.jpg" });
     expect(res).not.toHaveProperty("note");
+    expect(res).toMatchObject({ source: "sharepoint-original", width: 40, height: 20 });
+    expect(graph.thumbnails("P01")).toBe(0);
     const original = graph.drives.get(DRIVE)!.get("P01")!.content!;
     expect((upload.mock.calls[0][2] as Buffer).equals(original)).toBe(true);
   });
@@ -373,6 +387,166 @@ describe("fetch_sharepoint_file — images", () => {
     const res = await session().fetch({ id: "BMP1" });
     expect(res).toMatchObject({ name: "chart.jpg", width: 3, height: 2 });
     expect((await sharp(upload.mock.calls[0][2] as Buffer).metadata()).format).toBe("jpeg");
+  });
+});
+
+describe("fetch_sharepoint_file — SharePoint preview images", () => {
+  const MB = 1_000_000;
+  let bigJpeg: Buffer;
+
+  beforeEach(async () => {
+    bigJpeg = await sharp({ create: { width: 4000, height: 2000, channels: 3, background: "#808080" } })
+      .jpeg()
+      .toBuffer();
+  });
+
+  /** A JPEG whose metadata says it is 8 MB (above the 2 MB "small original" rule). */
+  const addPhoto = (over: Partial<FakeItem> = {}) =>
+    graph.add(DRIVE, {
+      id: "PHOTO8",
+      name: "harbour.JPG",
+      parent: "FOLDER1",
+      content: bigJpeg,
+      size: 8 * MB,
+      thumbnail: "auto",
+      ...over,
+    });
+
+  it("fetches an image as a c2560x2560 thumbnail with the user's token; name .jpg, sizes and pixels reported", async () => {
+    addPhoto();
+    const seen: { url: string; auth: string }[] = [];
+    vi.stubGlobal("fetch", async (input: string, init?: RequestInit) => {
+      seen.push({ url: String(input), auth: new Headers(init?.headers).get("authorization") ?? "" });
+      return graph.fetch(input);
+    });
+    const res = await session().fetch({ id: "PHOTO8" });
+    expect(res).toMatchObject({
+      path: "/mnt/data/harbour.jpg",
+      name: "harbour.jpg",
+      source: "sharepoint-thumbnail",
+      originalBytes: 8 * MB,
+      width: 2560,
+      height: 1280,
+    });
+    const delivered = upload.mock.calls[0][2] as Buffer;
+    expect((res as { bytes: number }).bytes).toBe(delivered.length);
+    expect((res as { note: string }).note).toMatch(/preview image of "harbour.JPG" \(8\.0 MB\)/);
+    const meta = await sharp(delivered).metadata();
+    expect([meta.format, meta.width, meta.height]).toEqual(["jpeg", 2560, 1280]);
+    const thumbCalls = seen.filter((c) => c.url.includes("/thumbnails/"));
+    expect(thumbCalls.map((c) => c.url)).toEqual([
+      `https://graph.microsoft.com/v1.0/drives/${DRIVE}/items/PHOTO8/thumbnails/0/c2560x2560/content`,
+    ]);
+    expect(new Set(seen.map((c) => c.auth))).toEqual(new Set(["Bearer user-token"]));
+    expect(graph.originals("PHOTO8")).toBe(0);
+  });
+
+  it("asks for the thumbnail size set with SHAREPOINT_FILES_IMAGE_MAX_PX", async () => {
+    addPhoto();
+    const limits = readSharePointFileLimits({ SHAREPOINT_FILES_IMAGE_MAX_PX: "1024" });
+    const res = await session([folderSource()], limits).fetch({ id: "PHOTO8" });
+    expect(graph.calls).toContain(
+      `https://graph.microsoft.com/v1.0/drives/${DRIVE}/items/PHOTO8/thumbnails/0/c1024x1024/content`,
+    );
+    expect(res).toMatchObject({ name: "harbour.jpg", width: 1024, height: 512, source: "sharepoint-thumbnail" });
+  });
+
+  it("fetches a TIFF far above the file limit through its thumbnail", async () => {
+    const tif = graph.drives.get(DRIVE)!.get("TIF1")!;
+    tif.size = 383 * MB;
+    tif.thumbnail = "auto";
+    const res = await session().fetch({ id: "TIF1" });
+    expect(res).toMatchObject({
+      name: "scan.jpg",
+      source: "sharepoint-thumbnail",
+      originalBytes: 383 * MB,
+      width: 64,
+      height: 32,
+    });
+    expect(graph.originals("TIF1")).toBe(0);
+    expect((await sharp(upload.mock.calls[0][2] as Buffer).metadata()).format).toBe("jpeg");
+  });
+
+  it("fetches HEIC and PSD through their thumbnail", async () => {
+    const jpg = await smallJpeg();
+    graph.drives.get(DRIVE)!.get("PSD1")!.thumbnail = jpg;
+    graph.add(DRIVE, { id: "HEIC1", name: "phone.heic", parent: "FOLDER1", size: 3 * MB, thumbnail: jpg });
+    expect(await session().fetch({ id: "PSD1" })).toMatchObject({
+      name: "design.jpg",
+      source: "sharepoint-thumbnail",
+      width: 40,
+      height: 20,
+    });
+    expect(await session().fetch({ id: "HEIC1" })).toMatchObject({ name: "phone.jpg", source: "sharepoint-thumbnail" });
+    expect(graph.originals("PSD1") + graph.originals("HEIC1")).toBe(0);
+  });
+
+  it.each([404, 400, 500])("thumbnail %i → falls back to the original", async (status) => {
+    addPhoto({ thumbnailStatus: status });
+    const res = await session().fetch({ id: "PHOTO8" });
+    expect(res).toMatchObject({ name: "harbour.JPG", source: "sharepoint-original", width: 2560, height: 1280 });
+    expect(graph.thumbnails("PHOTO8")).toBe(1);
+    expect(graph.originals("PHOTO8")).toBe(1);
+  });
+
+  it("thumbnail that is not an image → falls back to the original", async () => {
+    addPhoto({ thumbnail: Buffer.from("<html></html>"), thumbnailType: "text/html" });
+    const res = await session().fetch({ id: "PHOTO8" });
+    expect(res).toMatchObject({ source: "sharepoint-original" });
+    expect(graph.thumbnails("PHOTO8")).toBe(1);
+    expect(graph.originals("PHOTO8")).toBe(1);
+  });
+
+  it("thumbnail with image content-type but unreadable bytes → falls back to the original", async () => {
+    addPhoto({ thumbnail: Buffer.from("not really a jpeg") });
+    const res = await session().fetch({ id: "PHOTO8" });
+    expect(res).toMatchObject({ source: "sharepoint-original" });
+    expect(graph.thumbnails("PHOTO8")).toBe(1);
+    expect(graph.originals("PHOTO8")).toBe(1);
+  });
+
+  it("no thumbnail and the original above the file limit → refused without downloading it", async () => {
+    const tif = graph.drives.get(DRIVE)!.get("TIF1")!;
+    tif.size = 60 * MB;
+    const res = await session().fetch({ id: "TIF1" });
+    expect(res).toEqual({ error: "The file is larger than 50 MB and cannot be fetched.", name: "scan.tif" });
+    expect(graph.thumbnails("TIF1")).toBe(1);
+    expect(graph.originals("TIF1")).toBe(0);
+    expect(upload).not.toHaveBeenCalled();
+  });
+
+  it.each([401, 403])("thumbnail %i → not available for you, no fallback", async (status) => {
+    addPhoto({ thumbnailStatus: status });
+    const res = await session().fetch({ id: "PHOTO8" });
+    expect(res).toEqual({ error: NOT_AVAILABLE_MESSAGE, name: "harbour.JPG" });
+    expect(graph.originals("PHOTO8")).toBe(0);
+    expect(upload).not.toHaveBeenCalled();
+  });
+
+  it("stops reading a thumbnail beyond 20 MB, then falls back to the original", async () => {
+    addPhoto({ thumbnail: Buffer.alloc(30 * MB, 0xff), thumbnailChunkSize: MB });
+    const res = await session().fetch({ id: "PHOTO8" });
+    // Reading stopped right after 20 MB, not at the end of the 30 MB answer.
+    expect(graph.pulledChunks).toBeGreaterThanOrEqual(20);
+    expect(graph.pulledChunks).toBeLessThanOrEqual(22);
+    expect(res).toMatchObject({ source: "sharepoint-original" });
+    expect(graph.originals("PHOTO8")).toBe(1);
+  });
+
+  it("refuses a thumbnail that declares more than 20 MB before reading it", async () => {
+    addPhoto({ thumbnail: Buffer.alloc(21 * MB, 0xff) });
+    const res = await session().fetch({ id: "PHOTO8" });
+    expect(res).toMatchObject({ source: "sharepoint-original" });
+    expect(graph.thumbnails("PHOTO8")).toBe(1);
+    expect(graph.originals("PHOTO8")).toBe(1);
+  });
+
+  it("leaves non-image files on the original path (no thumbnail call)", async () => {
+    graph.add(DRIVE, { id: "XLSX1", name: "plan.xlsx", parent: "FOLDER1", content: Buffer.from("PK"), thumbnail: "auto" });
+    const res = await session().fetch({ id: "XLSX1" });
+    expect(res).toMatchObject({ name: "plan.xlsx", source: "sharepoint-original", bytes: 2 });
+    expect(graph.thumbnails("XLSX1")).toBe(0);
+    expect(graph.originals("XLSX1")).toBe(1);
   });
 });
 

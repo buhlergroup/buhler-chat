@@ -11,9 +11,15 @@ export interface SharePointFileLimits {
   maxSources: number;
   /** fetch_sharepoint_file downloads per chat request. */
   maxFetchesPerRequest: number;
-  /** Largest file the model may fetch; reading stops beyond it. */
+  /**
+   * Largest file the model may fetch; reading stops beyond it. Not for an
+   * image that comes as SharePoint's preview image (see imageMaxPx).
+   */
   maxFileBytes: number;
-  /** Longest image side after a fetch; larger images are scaled down. */
+  /**
+   * Longest image side after a fetch: the size of the SharePoint preview
+   * image that is asked for, and the limit an original image is scaled to.
+   */
   imageMaxPx: number;
 }
 
@@ -29,6 +35,14 @@ export const SHAREPOINT_FILE_RULES = {
   maxListedFiles: 5_000,
   /** JPEG quality of converted and resized images. */
   jpegQuality: 85,
+  /** Largest SharePoint preview image (thumbnail) read; reading stops beyond it. */
+  maxPreviewBytes: 20_000_000,
+  /**
+   * JPEG, PNG, GIF and WebP originals up to this size are downloaded as they
+   * are instead of as a preview: no JPEG re-encoding, PNG transparency, GIF
+   * animation and EXIF data are kept, and the download is small anyway.
+   */
+  maxOriginalImageBytes: 2_000_000,
 } as const;
 
 export const SHAREPOINT_FILE_LIMIT_DEFAULTS = {

@@ -62,8 +62,9 @@ export function fetchSharePointFileTool(
     description:
       "Download ONE file from the SharePoint folders linked to this agent into the code interpreter (/mnt/data). Returns the file's path in the code interpreter. " +
       "Use the exact file name from your instructions, a skill or an index, or the id from find_sharepoint_files. " +
-      `Fetch only the files the task really needs: at most ${limits.maxFetchesPerRequest} per message, each up to ${limits.maxFileBytes / 1_000_000} MB. ` +
-      `Images larger than ${limits.imageMaxPx} px are scaled down; TIFF and BMP become JPEG. Supported types: ${supportedExtensionsText()}. ` +
+      `Fetch only the files the task really needs: at most ${limits.maxFetchesPerRequest} per message. ` +
+      `Images come as SharePoint's preview image: a JPEG that fits ${limits.imageMaxPx}x${limits.imageMaxPx} px, also for very large originals (TIFF, HEIC and PSD too; the name ends in .jpg). ` +
+      `Other files, and images without a preview, may be up to ${limits.maxFileBytes / 1_000_000} MB. Supported types: ${supportedExtensionsText()}. ` +
       "If several files have the name, the candidates are returned: fetch one by id.",
     inputSchema: z.object({
       id: z.string().max(200).optional().describe("The file id from find_sharepoint_files."),

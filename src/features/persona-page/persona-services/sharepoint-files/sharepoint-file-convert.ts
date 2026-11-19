@@ -2,6 +2,8 @@ import "server-only";
 
 /**
  * Prepares a fetched SharePoint file for the code interpreter:
+ *   - a SharePoint preview image (thumbnail) gets the original's base name
+ *     with the extension of its own format ("photo.tif" -> "photo.jpg");
  *   - TIFF and BMP become JPEG (the code interpreter does not take them);
  *   - an image whose longer side is above `imageMaxPx` is scaled down
  *     (aspect ratio kept, EXIF orientation applied first, so the result
@@ -110,6 +112,7 @@ export async function prepareFileForCodeInterpreter(
   const rule = fileTypeRule(name);
   if (rule.kind === "refused") throw new FileConversionError(rule.message);
   if (rule.kind === "as-is") return { name, data };
+  if (rule.previewOnlyMessage) throw new FileConversionError(rule.previewOnlyMessage);
 
   const ext = fileExtension(name);
   const maxPx = options.imageMaxPx;
@@ -175,4 +178,37 @@ export async function prepareFileForCodeInterpreter(
       `The image could not be read (${error instanceof Error ? error.message : String(error)}).`,
     );
   }
+}
+
+/** Formats a SharePoint preview image may have, and their file extension. */
+const PREVIEW_EXTENSIONS = new Map<string, string>([
+  ["jpeg", "jpg"],
+  ["png", "png"],
+  ["webp", "webp"],
+  ["gif", "gif"],
+]);
+
+/**
+ * Prepares a SharePoint preview image (thumbnail) of `originalName`: the
+ * name keeps the original's base name with the extension of the preview's
+ * real format (read from its bytes, not from the content-type), and the
+ * pixel size is read with sharp. A preview above `imageMaxPx` (SharePoint
+ * should not send one) is scaled down like any image.
+ */
+export async function preparePreviewForCodeInterpreter(
+  originalName: string,
+  data: Buffer,
+  options: { imageMaxPx: number },
+): Promise<PreparedFile> {
+  let format: string | undefined;
+  try {
+    format = (await sharp(data, { limitInputPixels: MAX_INPUT_PIXELS }).metadata()).format;
+  } catch (error) {
+    throw new FileConversionError(
+      `The preview image could not be read (${error instanceof Error ? error.message : String(error)}).`,
+    );
+  }
+  const ext = format ? PREVIEW_EXTENSIONS.get(format) : undefined;
+  if (!ext) throw new FileConversionError(`The preview image has an unsupported format (${format}).`);
+  return prepareFileForCodeInterpreter(replaceExtension(originalName, ext), data, options);
 }

@@ -1,9 +1,12 @@
 /**
  * A small in-memory Microsoft Graph for the SharePoint files tests: drives
- * with folders and files, item metadata, /children (with paging) and
- * /content. Any other host or path answers 404 and is recorded, so tests can
- * assert which calls were made.
+ * with folders and files, item metadata, /children (with paging), /content
+ * and custom thumbnails (/thumbnails/0/c{N}x{N}/content). Any other host or
+ * path answers 404 and is recorded, so tests can assert which calls were
+ * made.
  */
+
+import sharp from "sharp";
 
 const GRAPH = "https://graph.microsoft.com/v1.0";
 
@@ -24,6 +27,18 @@ export interface FakeItem {
   reportedDriveId?: string;
   /** Stream /content in chunks of this size, without content-length. */
   chunkSize?: number;
+  /**
+   * The custom thumbnail: "auto" renders `content` with sharp as a JPEG that
+   * fits N x N (like SharePoint: aspect ratio kept, never enlarged); a Buffer
+   * is sent as it is. Undefined → 404 (no thumbnail).
+   */
+  thumbnail?: "auto" | Buffer;
+  /** Answer only the thumbnail with this status. */
+  thumbnailStatus?: number;
+  /** content-type of the thumbnail answer (default image/jpeg). */
+  thumbnailType?: string;
+  /** Stream the thumbnail in chunks of this size, without content-length. */
+  thumbnailChunkSize?: number;
 }
 
 export class FakeGraph {
@@ -56,12 +71,29 @@ export class FakeGraph {
     this.calls.push(url);
     if (!url.startsWith(`${GRAPH}/`)) return new Response("{}", { status: 404 });
     const u = new URL(url);
-    const m = u.pathname.match(/^\/v1\.0\/drives\/([^/]+)\/items\/([^/]+)(\/children|\/content)?$/);
+    const m = u.pathname.match(
+      /^\/v1\.0\/drives\/([^/]+)\/items\/([^/]+)(\/children|\/content|\/thumbnails\/0\/c(\d+)x(\d+)\/content)?$/,
+    );
     if (!m) return new Response("{}", { status: 404 });
-    const [, driveId, itemId, suffix] = m;
+    const [, driveId, itemId, suffix, thumbW, thumbH] = m;
     const item = this.drives.get(driveId)?.get(itemId);
     if (!item) return new Response("{}", { status: 404 });
     if (item.status) return new Response("{}", { status: item.status });
+
+    if (suffix?.startsWith("/thumbnails/")) {
+      if (item.thumbnailStatus) return new Response("{}", { status: item.thumbnailStatus });
+      if (!item.thumbnail) return new Response("{}", { status: 404 });
+      const thumb =
+        item.thumbnail === "auto"
+          ? await sharp(item.content!, { page: 0 })
+              .rotate()
+              .resize({ width: Number(thumbW), height: Number(thumbH), fit: "inside", withoutEnlargement: true })
+              .flatten({ background: "#ffffff" })
+              .jpeg()
+              .toBuffer()
+          : item.thumbnail;
+      return this.body(thumb, item.thumbnailChunkSize, item.thumbnailType ?? "image/jpeg");
+    }
 
     if (suffix === "/children") {
       const children = [...this.drives.get(driveId)!.values()].filter((i) => i.parent === itemId);
@@ -77,33 +109,46 @@ export class FakeGraph {
     }
     if (suffix === "/content") {
       if (item.contentStatus) return new Response("{}", { status: item.contentStatus });
-      const content = item.content ?? Buffer.alloc(0);
-      if (item.chunkSize) {
-        let offset = 0;
-        const size = item.chunkSize;
-        const stream = new ReadableStream<Uint8Array>({
-          pull: (controller) => {
-            if (offset >= content.length) {
-              controller.close();
-              return;
-            }
-            this.pulledChunks++;
-            controller.enqueue(new Uint8Array(content.subarray(offset, offset + size)));
-            offset += size;
-          },
-        });
-        return new Response(stream, { status: 200 });
-      }
-      return new Response(new Uint8Array(content), {
-        status: 200,
-        headers: { "content-length": String(content.length) },
-      });
+      return this.body(item.content ?? Buffer.alloc(0), item.chunkSize, "application/octet-stream");
     }
     return Response.json(this.meta(driveId, item));
   };
 
+  /** A 200 answer; streamed in chunks without content-length when chunkSize is set. */
+  private body(content: Buffer, chunkSize: number | undefined, contentType: string): Response {
+    if (chunkSize) {
+      let offset = 0;
+      const stream = new ReadableStream<Uint8Array>({
+        pull: (controller) => {
+          if (offset >= content.length) {
+            controller.close();
+            return;
+          }
+          this.pulledChunks++;
+          controller.enqueue(new Uint8Array(content.subarray(offset, offset + chunkSize)));
+          offset += chunkSize;
+        },
+      });
+      return new Response(stream, { status: 200, headers: { "content-type": contentType } });
+    }
+    return new Response(new Uint8Array(content), {
+      status: 200,
+      headers: { "content-length": String(content.length), "content-type": contentType },
+    });
+  }
+
   /** Number of recorded calls whose URL contains `part`. */
   count(part: string): number {
     return this.calls.filter((c) => c.includes(part)).length;
+  }
+
+  /** Downloads of the original of an item (/content, not the thumbnail). */
+  originals(itemId: string): number {
+    return this.count(`/items/${itemId}/content`);
+  }
+
+  /** Thumbnail calls for an item. */
+  thumbnails(itemId: string): number {
+    return this.count(`/items/${itemId}/thumbnails/`);
   }
 }

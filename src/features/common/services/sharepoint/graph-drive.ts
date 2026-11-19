@@ -143,15 +143,8 @@ export async function getDriveItemVersion(
   };
 }
 
-/** Downloads a drive item; stops reading after `maxBytes`. */
-export async function downloadDriveItem(
-  token: string,
-  driveId: string,
-  itemId: string,
-  maxBytes: number,
-  timeoutMs = GRAPH_DOWNLOAD_TIMEOUT_MS,
-): Promise<Buffer> {
-  const res = await graphFetch(itemUrl(driveId, itemId, "/content"), token, timeoutMs);
+/** Reads a response body; stops reading after `maxBytes`. */
+async function readBodyCapped(res: Response, maxBytes: number): Promise<Buffer> {
   const declared = Number(res.headers.get("content-length") ?? "");
   if (Number.isFinite(declared) && declared > maxBytes) {
     await res.body?.cancel().catch(() => {});
@@ -179,6 +172,53 @@ export async function downloadDriveItem(
   return Buffer.concat(chunks);
 }
 
+/** Downloads a drive item; stops reading after `maxBytes`. */
+export async function downloadDriveItem(
+  token: string,
+  driveId: string,
+  itemId: string,
+  maxBytes: number,
+  timeoutMs = GRAPH_DOWNLOAD_TIMEOUT_MS,
+): Promise<Buffer> {
+  const res = await graphFetch(itemUrl(driveId, itemId, "/content"), token, timeoutMs);
+  return readBodyCapped(res, maxBytes);
+}
+
+/** Largest side of a custom thumbnail that is asked for. */
+export const MAX_THUMBNAIL_PX = 16_384;
+
+/**
+ * Downloads a custom thumbnail of a drive item, scaled by SharePoint to fit
+ * `sizePx` x `sizePx` (aspect ratio kept; SharePoint does not enlarge).
+ * SharePoint renders it from the original, so the size of the original does
+ * not matter. Like `/content`, Graph answers with a redirect that fetch
+ * follows. An answer that is not an image (content-type) is refused with
+ * status 415 before its body is read. Stops reading after `maxBytes`.
+ */
+export async function downloadDriveItemThumbnail(
+  token: string,
+  driveId: string,
+  itemId: string,
+  sizePx: number,
+  maxBytes: number,
+  timeoutMs = GRAPH_DOWNLOAD_TIMEOUT_MS,
+): Promise<{ data: Buffer; contentType: string }> {
+  if (!Number.isInteger(sizePx) || sizePx < 1 || sizePx > MAX_THUMBNAIL_PX) {
+    throw new GraphFileError("Invalid thumbnail size.", 400);
+  }
+  const res = await graphFetch(
+    itemUrl(driveId, itemId, `/thumbnails/0/c${sizePx}x${sizePx}/content`),
+    token,
+    timeoutMs,
+  );
+  const contentType = (res.headers.get("content-type") ?? "").split(";")[0].trim().toLowerCase();
+  if (!contentType.startsWith("image/")) {
+    await res.body?.cancel().catch(() => {});
+    throw new GraphFileError("Graph returned no thumbnail image.", 415);
+  }
+  const data = await readBodyCapped(res, maxBytes);
+  return { data, contentType };
+}
 
 /** Graph's parentReference of a drive item (only the fields used here). */
 export interface DriveItemParent {
