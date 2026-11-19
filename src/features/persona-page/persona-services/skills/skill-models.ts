@@ -60,6 +60,65 @@ export const SkillFileEntrySchema = z.object({
 });
 export type SkillFileEntry = z.infer<typeof SkillFileEntrySchema>;
 
+// ---------------------------------------------------------------------------
+// Linked skills (SharePoint / OneDrive)
+// ---------------------------------------------------------------------------
+
+/**
+ * Graph drive ids ("b!..." for SharePoint and OneDrive for Business, hex for
+ * personal OneDrive) and item ids ("01ABC...", "ABC!123") only use these
+ * characters. Anything else (slash, dot, "?", "%") is refused before a Graph
+ * URL is built, so a value from the client cannot change the request path.
+ */
+export const GRAPH_DRIVE_ID_PATTERN = /^[A-Za-z0-9!_-]{1,256}$/;
+export const GRAPH_ITEM_ID_PATTERN = /^[A-Za-z0-9!_-]{1,128}$/;
+
+export const isGraphDriveId = (v: unknown): v is string =>
+  typeof v === "string" && GRAPH_DRIVE_ID_PATTERN.test(v);
+export const isGraphItemId = (v: unknown): v is string =>
+  typeof v === "string" && GRAPH_ITEM_ID_PATTERN.test(v);
+
+/** True for an absolute https URL (the editor renders it as a link). */
+export const isHttpsUrl = (v: unknown): v is string => {
+  if (typeof v !== "string" || v.length > 2048) return false;
+  try {
+    return new URL(v).protocol === "https:";
+  } catch {
+    return false;
+  }
+};
+
+/**
+ * Where a linked skill comes from, and the SharePoint version of the zip the
+ * stored copy (blobName) was made from. Chats compare `version` with the
+ * file's current cTag and fetch the file again when it changed.
+ */
+export const SharePointSkillSourceSchema = z.object({
+  kind: z.literal("sharepoint"),
+  driveId: z.string().regex(GRAPH_DRIVE_ID_PATTERN),
+  itemId: z.string().regex(GRAPH_ITEM_ID_PATTERN),
+  webUrl: z.string().refine(isHttpsUrl, "Must be an https URL"),
+  name: z.string().min(1).max(255),
+  /** cTag of the stored copy (eTag when Graph sends no cTag). */
+  version: z.string().min(1),
+  eTag: z.string().optional(),
+  lastModifiedDateTime: z.string(),
+  size: z.number().int().nonnegative(),
+  /**
+   * The last newer version that could not be used (invalid zip, too large,
+   * name taken). Chats keep the stored copy and do not fetch this version
+   * again; the editor shows the message to the owner.
+   */
+  syncError: z
+    .object({
+      version: z.string(),
+      message: z.string(),
+      at: z.string(),
+    })
+    .optional(),
+});
+export type SharePointSkillSource = z.infer<typeof SharePointSkillSourceSchema>;
+
 export const PersonaSkillModelSchema = z.object({
   id: z.string(),
   type: z.literal(PERSONA_SKILL_ATTRIBUTE),
@@ -83,6 +142,8 @@ export const PersonaSkillModelSchema = z.object({
    * blobName) clears it; a missing file is re-uploaded.
    */
   openAiFileId: z.string().optional(),
+  /** Set for a skill linked to a SharePoint file; absent for an uploaded zip. */
+  source: SharePointSkillSourceSchema.optional(),
   createdAt: z.coerce.date(),
   updatedAt: z.coerce.date(),
 });
@@ -97,6 +158,20 @@ export interface PersonaSkillSummary {
   zipBytes: number;
   fileCount: number;
   updatedAt: string;
+  /** Only for a skill linked to SharePoint. */
+  source?: {
+    kind: "sharepoint";
+    fileName: string;
+    webUrl: string;
+    lastModifiedDateTime: string;
+    /** Why the newest file is not in use (the last good version is). */
+    syncError?: string;
+  };
+  /**
+   * The viewer cannot read the linked SharePoint file: only `id` and `name`
+   * are filled, nothing from the stored copy.
+   */
+  noAccess?: true;
 }
 
 export const toSkillSummary = (s: PersonaSkillModel): PersonaSkillSummary => ({
@@ -107,6 +182,31 @@ export const toSkillSummary = (s: PersonaSkillModel): PersonaSkillSummary => ({
   zipBytes: s.zipBytes,
   fileCount: s.files.length,
   updatedAt: new Date(s.updatedAt).toISOString(),
+  ...(s.source
+    ? {
+        source: {
+          kind: "sharepoint" as const,
+          fileName: s.source.name,
+          webUrl: s.source.webUrl,
+          lastModifiedDateTime: s.source.lastModifiedDateTime,
+          ...(s.source.syncError ? { syncError: s.source.syncError.message } : {}),
+        },
+      }
+    : {}),
+});
+
+/** Summary for a viewer who cannot read the linked file: the name only. */
+export const toNoAccessSkillSummary = (
+  s: Pick<PersonaSkillModel, "id" | "name">,
+): PersonaSkillSummary => ({
+  id: s.id,
+  name: s.name,
+  description: "",
+  zipFileName: "",
+  zipBytes: 0,
+  fileCount: 0,
+  updatedAt: "",
+  noAccess: true,
 });
 
 // ---------------------------------------------------------------------------
@@ -131,18 +231,28 @@ export const skillArchiveFileName = (skillName: string): string =>
  */
 export function buildSkillCatalogPrompt(
   skills: ReadonlyArray<{ name: string; description: string }>,
+  unavailable: ReadonlyArray<string> = [],
 ): string {
-  if (skills.length === 0) return "";
+  if (skills.length === 0 && unavailable.length === 0) return "";
   const sorted = [...skills].sort((a, b) =>
     a.name < b.name ? -1 : a.name > b.name ? 1 : 0,
   );
   const lines = sorted.map((s) => `- ${s.name}: ${s.description.replace(/\s+/g, " ")}`);
-  return (
-    "\n\n## Skills\n" +
-    "You have these skills. When a task matches a skill, call `load_skill` with its name BEFORE you start, " +
-    "then follow its instructions. Load files of the skill with `load_skill` and `path`, or use them in the code interpreter as `load_skill` explains.\n" +
-    lines.join("\n")
-  );
+  const catalog =
+    sorted.length === 0
+      ? ""
+      : "You have these skills. When a task matches a skill, call `load_skill` with its name BEFORE you start, " +
+        "then follow its instructions. Load files of the skill with `load_skill` and `path`, or use them in the code interpreter as `load_skill` explains.\n" +
+        lines.join("\n");
+  // Names only: the user cannot open the SharePoint file, so nothing of its
+  // content (not even the description) goes into the prompt.
+  const missing =
+    unavailable.length === 0
+      ? ""
+      : (catalog ? "\n" : "") +
+        `These skills of the agent are not available in this chat, because the user has no access to their file in SharePoint: ${[...unavailable].sort().join(", ")}. ` +
+        "If a task needs one of them, tell the user in one short sentence and continue without it.";
+  return "\n\n## Skills\n" + catalog + missing;
 }
 
 /**

@@ -61,7 +61,7 @@ import { CHAT_DEFAULT_SYSTEM_PROMPT } from "@/features/theme/theme-config";
 import { resolveExtensionsForChat } from "@/features/extensions-page/extension-services/extension-runtime";
 import { logError, logInfo, logWarn } from "@/features/common/services/logger";
 import {
-  loadUsableSkills,
+  loadUsableSkillsWithStatus,
   refreshSkillOpenAiFiles,
 } from "@/features/persona-page/persona-services/skills/persona-skill-store";
 import {
@@ -279,7 +279,10 @@ export async function POST(req: Request) {
   // stays cacheable. The skill archives among this turn's code interpreter
   // files are mapped onto the CURRENT OpenAI file of each skill version (a
   // replaced skill's old file is deleted; a deleted skill's file is dropped).
-  const agentSkills = await loadUsableSkills(ctx.thread.personaId);
+  // Skills linked to SharePoint are checked here, once per request, with the
+  // user's token; one the user cannot read is left out and only named.
+  const { skills: agentSkills, unavailable: unavailableSkills } =
+    await loadUsableSkillsWithStatus(ctx.thread.personaId);
   const resolveSkillFiles = () =>
     ctx.thread.personaId
       ? resolveSkillCodeInterpreterFiles({
@@ -299,6 +302,12 @@ export async function POST(req: Request) {
       skillsInCodeInterpreter,
     });
   }
+  if (unavailableSkills.length > 0) {
+    logInfo("/api/chat agent skills not available to this user", {
+      threadId: ctx.thread.id,
+      skills: unavailableSkills,
+    });
+  }
 
   // ── prompt prefix assembly (cache-stability critical) ──────────────────
   // The generative-UI block is process-constant, so it is handed to
@@ -309,7 +318,8 @@ export async function POST(req: Request) {
     buildSystemMessage({
       staticSystemPrompt: CHAT_DEFAULT_SYSTEM_PROMPT,
       personaMessage:
-        (ctx.thread.personaMessage ?? "") + buildSkillCatalogPrompt(agentSkills),
+        (ctx.thread.personaMessage ?? "") +
+        buildSkillCatalogPrompt(agentSkills, unavailableSkills),
       documentHint: ctx.documentHint,
       trailingStaticBlock:
         // Generative UI: GPT-5.5 reliably declines a UI *tool* under tool_choice
