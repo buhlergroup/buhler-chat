@@ -92,6 +92,7 @@ import {
   uploadSkillArchivesForCodeInterpreter,
 } from "../persona-skill-store";
 import type { PersonaSkillModel } from "../skill-models";
+import { clearDriveItemChecks } from "../drive-item-check-cache";
 
 const makeSkill = (over: Partial<PersonaSkillModel> = {}): PersonaSkillModel => ({
   id: "s1",
@@ -122,6 +123,7 @@ beforeEach(() => {
   skillRows = [];
   conflictWith = undefined;
   currentUser = { isAdmin: false, token: "user-token" };
+  clearDriveItemChecks();
 });
 
 describe("skill container", () => {

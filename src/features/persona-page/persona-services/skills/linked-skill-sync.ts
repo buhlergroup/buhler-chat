@@ -46,6 +46,7 @@ import {
   isFileAccessDenied,
   type DriveItemVersion,
 } from "./sharepoint-skill-graph";
+import { checkDriveItem, rememberDriveItemVersion } from "./drive-item-check-cache";
 
 export interface LinkedSkillDeps {
   blobContainer: string;
@@ -241,30 +242,46 @@ export type LinkedSkillSyncResult =
   /** The row was deleted meanwhile. */
   | { status: "gone"; skill: PersonaSkillModel; message: string };
 
+export interface SyncOptions {
+  /** Check now: bypass the check cache and download a version that failed before. */
+  force?: boolean;
+  metadataTimeoutMs?: number;
+  /** Hashed id of the user whose token is used; key of the check cache. */
+  userId?: string;
+}
+
 /**
  * Brings one linked skill to the current SharePoint version, as far as the
  * current user can read it. `siblings` are the agent's other skills (name
- * clash check). `force` downloads a version that failed before (Check now).
- * Never throws.
+ * clash check). Never throws.
  */
 export async function syncLinkedSkill(
   skill: StoredSkill,
   token: string,
   siblings: ReadonlyArray<PersonaSkillModel>,
   deps: LinkedSkillDeps,
-  options: { force?: boolean; metadataTimeoutMs?: number } = {},
+  options: SyncOptions = {},
 ): Promise<LinkedSkillSyncResult> {
   const src = skill.source;
   if (!src) return { status: "current", skill };
+  const userId = options.userId ?? "";
+  const timeoutMs = options.metadataTimeoutMs ?? GRAPH_METADATA_TIMEOUT_MS;
 
   let meta: DriveItemVersion;
   try {
-    meta = await getDriveItemVersion(
-      token,
-      src.driveId,
-      src.itemId,
-      options.metadataTimeoutMs ?? GRAPH_METADATA_TIMEOUT_MS,
-    );
+    let check = await checkDriveItem(token, userId, src.driveId, src.itemId, {
+      bypassCache: options.force,
+      timeoutMs,
+    });
+    // A cached answer only settles "unchanged" (and "denied" above). A
+    // different cached version may be stale: ask Graph before downloading.
+    if (check.fromCache && check.meta.version !== src.version) {
+      check = await checkDriveItem(token, userId, src.driveId, src.itemId, {
+        bypassCache: true,
+        timeoutMs,
+      });
+    }
+    meta = check.meta;
   } catch (error) {
     if (isFileAccessDenied(error)) {
       logWarn("agent skills: user cannot read the linked SharePoint file, skill not used", {
@@ -330,7 +347,7 @@ export async function syncLinkedSkill(
       };
     }
 
-    return await storeNewVersion(skill, fetched, deps);
+    return await storeNewVersion(skill, fetched, deps, userId);
   } catch (error) {
     logError("agent skills: update from SharePoint failed, using the stored version", {
       skill: skill.name,
@@ -345,6 +362,7 @@ async function storeNewVersion(
   skill: StoredSkill,
   fetched: Extract<LinkedZipResult, { ok: true }>,
   deps: LinkedSkillDeps,
+  userId: string,
 ): Promise<LinkedSkillSyncResult> {
   const src = skill.source!;
   const blobName = deps.newBlobName(skill.personaId, skill.id);
@@ -404,6 +422,7 @@ async function storeNewVersion(
 
     if (base.blobName !== blobName) await DeleteBlob(deps.blobContainer, base.blobName);
     await deps.deleteOpenAiFile(base.openAiFileId);
+    rememberDriveItemVersion(src.driveId, src.itemId, fetched.meta, userId);
     logInfo("agent skills: new SharePoint version stored", {
       skill: next.name,
       personaId: skill.personaId,
@@ -438,12 +457,13 @@ export async function syncLinkedSkills(
   skills: ReadonlyArray<PersonaSkillModel>,
   token: string,
   deps: LinkedSkillDeps,
+  userId?: string,
 ): Promise<SyncedSkills> {
   const results = await Promise.all(
     skills.map(async (skill): Promise<LinkedSkillSyncResult> => {
       if (!skill.source) return { status: "current", skill };
       try {
-        return await syncLinkedSkill(skill, token, skills, deps);
+        return await syncLinkedSkill(skill, token, skills, deps, { userId });
       } catch (error) {
         logError("agent skills: linked skill check failed, skill not used", {
           skill: skill.name,
@@ -459,4 +479,23 @@ export async function syncLinkedSkills(
       .map((r) => r.skill),
     unavailable: results.filter((r) => r.status === "denied").map((r) => r.skill.name),
   };
+}
+
+/**
+ * Can this user read the file of a linked skill? Uses the same cached check
+ * as chats. Only a clear 401/403/404 says no; a timeout or 5xx says yes, as
+ * chats then use the stored copy too. Uploaded skills: always yes.
+ */
+export async function canReadLinkedSkill(
+  skill: PersonaSkillModel,
+  token: string,
+  userId: string,
+): Promise<boolean> {
+  if (!skill.source) return true;
+  try {
+    await checkDriveItem(token, userId, skill.source.driveId, skill.source.itemId);
+    return true;
+  } catch (error) {
+    return !isFileAccessDenied(error);
+  }
 }

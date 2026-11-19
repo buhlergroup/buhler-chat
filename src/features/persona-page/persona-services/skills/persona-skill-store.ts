@@ -163,7 +163,7 @@ export async function loadUsableSkillsWithStatus(
     }
     if (!skills.some((s) => s.source)) return { skills, unavailable: [] };
     const { token } = await getCurrentUser();
-    return await syncLinkedSkills(skills, token, linkedSkillDeps());
+    return await syncLinkedSkills(skills, token, linkedSkillDeps(), access.currentUserId);
   } catch (error) {
     logError("agent skills: failed to load skills", {
       personaId,

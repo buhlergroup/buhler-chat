@@ -214,12 +214,23 @@ export const PersonaSkills: FC<Props> = ({ personaId }) => {
                   <Puzzle size={16} className="mt-1 shrink-0" />
                   <div className="flex flex-col flex-1 min-w-0">
                     <span className="text-sm font-medium break-all">{skill.name}</span>
-                    <span className="text-xs text-muted-foreground line-clamp-2">
-                      {skill.description}
-                    </span>
-                    <span className="text-xs text-muted-foreground">
-                      {formatSize(skill.zipBytes)} · {skill.fileCount} files
-                    </span>
+                    {skill.noAccess ? (
+                      <span
+                        className="text-xs text-muted-foreground"
+                        data-testid="persona-skill-no-access"
+                      >
+                        You have no access to this file.
+                      </span>
+                    ) : (
+                      <>
+                        <span className="text-xs text-muted-foreground line-clamp-2">
+                          {skill.description}
+                        </span>
+                        <span className="text-xs text-muted-foreground">
+                          {formatSize(skill.zipBytes)} · {skill.fileCount} files
+                        </span>
+                      </>
+                    )}
                     {skill.source && (
                       <>
                         <span

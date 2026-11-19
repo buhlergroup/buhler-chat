@@ -167,6 +167,11 @@ export interface PersonaSkillSummary {
     /** Why the newest file is not in use (the last good version is). */
     syncError?: string;
   };
+  /**
+   * The viewer cannot read the linked SharePoint file: only `id` and `name`
+   * are filled, nothing from the stored copy.
+   */
+  noAccess?: true;
 }
 
 export const toSkillSummary = (s: PersonaSkillModel): PersonaSkillSummary => ({
@@ -188,6 +193,20 @@ export const toSkillSummary = (s: PersonaSkillModel): PersonaSkillSummary => ({
         },
       }
     : {}),
+});
+
+/** Summary for a viewer who cannot read the linked file: the name only. */
+export const toNoAccessSkillSummary = (
+  s: Pick<PersonaSkillModel, "id" | "name">,
+): PersonaSkillSummary => ({
+  id: s.id,
+  name: s.name,
+  description: "",
+  zipFileName: "",
+  zipBytes: 0,
+  fileCount: 0,
+  updatedAt: "",
+  noAccess: true,
 });
 
 // ---------------------------------------------------------------------------

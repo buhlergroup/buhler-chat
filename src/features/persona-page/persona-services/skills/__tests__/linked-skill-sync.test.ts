@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { buildZip, SKILL_MD } from "./zip-fixture";
 
 vi.mock("@/features/common/services/logger", () => ({
@@ -90,6 +90,11 @@ import {
   GRAPH_BASE_URL,
   getDriveItemVersion,
 } from "../sharepoint-skill-graph";
+import {
+  ITEM_CHECK_MAX_ENTRIES,
+  checkDriveItem,
+  clearDriveItemChecks,
+} from "../drive-item-check-cache";
 import type { PersonaSkillModel } from "../skill-models";
 
 const goodZip = (description = "Builds demo things v2.") =>
@@ -149,6 +154,7 @@ const uploadedSkill = (): Row => {
 const contentCalls = () => fetchMock.mock.calls.filter((c) => String(c[0]).includes("/content"));
 
 beforeEach(() => {
+  clearDriveItemChecks();
   rows = new Map();
   etagCounter = 0;
   blobCounter = 0;
@@ -369,5 +375,113 @@ describe("syncLinkedSkills for one chat request", () => {
     expect(res.skills).toHaveLength(1);
     expect(res.skills[0].openAiFileId).toBe("file-v1");
     expect(res.unavailable).toEqual([]);
+  });
+});
+
+describe("per-user check cache (60 s)", () => {
+  const metaCalls = () => fetchMock.mock.calls.filter((c) => !String(c[0]).includes("/content"));
+  const sync = (opts: { userId?: string; force?: boolean } = {}) =>
+    syncLinkedSkill(rows.get("s1") as Row, "user-token", [], deps, { userId: "user-a", ...opts });
+
+  let now = 1_000_000;
+  beforeEach(() => {
+    now = 1_000_000;
+    vi.spyOn(Date, "now").mockImplementation(() => now);
+  });
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it("second check within 60 s makes no Graph call", async () => {
+    expect((await sync()).status).toBe("current");
+    now += 59_000;
+    expect((await sync()).status).toBe("current");
+    expect(metaCalls()).toHaveLength(1);
+  });
+
+  it("after 60 s the file is checked again", async () => {
+    await sync();
+    now += 60_001;
+    await sync();
+    expect(metaCalls()).toHaveLength(2);
+  });
+
+  it("is per user: another user is checked with their own call", async () => {
+    await sync();
+    await sync({ userId: "user-b" });
+    expect(metaCalls()).toHaveLength(2);
+  });
+
+  it("caches a denial: still not used, no second call", async () => {
+    file.metaStatus = 403;
+    expect((await sync()).status).toBe("denied");
+    file.metaStatus = undefined;
+    expect((await sync()).status).toBe("denied");
+    expect(metaCalls()).toHaveLength(1);
+  });
+
+  it("does not cache transient errors", async () => {
+    file.metaStatus = 503;
+    expect((await sync()).status).toBe("kept");
+    file.metaStatus = undefined;
+    expect((await sync()).status).toBe("current");
+    expect(metaCalls()).toHaveLength(2);
+  });
+
+  it("Check now (force) bypasses the cache and refreshes it", async () => {
+    await sync();
+    file.metaStatus = 403;
+    expect((await sync({ force: true })).status).toBe("denied");
+    expect(metaCalls()).toHaveLength(2);
+    // The refreshed entry (denied) now answers the next chat.
+    file.metaStatus = undefined;
+    expect((await sync()).status).toBe("denied");
+    expect(metaCalls()).toHaveLength(2);
+  });
+
+  it("a stored new version updates the cached entry: the next chat needs no call", async () => {
+    file.cTag = "c2";
+    expect((await sync()).status).toBe("updated");
+    const callsAfterUpdate = metaCalls().length;
+    expect((await sync()).status).toBe("current");
+    expect(metaCalls()).toHaveLength(callsAfterUpdate);
+  });
+
+  it("a new version stored by one user updates the cached entries of other users", async () => {
+    await sync({ userId: "user-b" }); // user-b caches c1
+    file.cTag = "c2";
+    await sync({ force: true }); // user-a stores c2
+    expect(rows.get("s1")!.source).toMatchObject({ version: "c2" });
+    fetchMock.mockClear();
+    expect((await sync({ userId: "user-b" })).status).toBe("current");
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("a cached version that differs from the row is checked again, never downloaded from the cache", async () => {
+    await sync({ userId: "user-b" }); // user-b caches c1
+    // Another replica stored c2 (this process's cache did not see it).
+    rows.set("s1", { ...rows.get("s1")!, source: { ...linkedSkill().source!, version: "c2" } });
+    file.cTag = "c2";
+    fetchMock.mockClear();
+    expect((await sync({ userId: "user-b" })).status).toBe("current");
+    expect(metaCalls()).toHaveLength(1);
+    expect(contentCalls()).toHaveLength(0);
+  });
+
+  it("drops the least recently used entry above 500 entries", async () => {
+    for (let i = 0; i <= ITEM_CHECK_MAX_ENTRIES; i++) {
+      await checkDriveItem("t", "user-a", "b!d", `01ITEM${i}`);
+    }
+    fetchMock.mockClear();
+    await checkDriveItem("t", "user-a", "b!d", `01ITEM${ITEM_CHECK_MAX_ENTRIES}`);
+    expect(fetchMock).not.toHaveBeenCalled();
+    await checkDriveItem("t", "user-a", "b!d", "01ITEM0");
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("caches nothing without a user id", async () => {
+    await sync({ userId: "" });
+    await sync({ userId: "" });
+    expect(metaCalls()).toHaveLength(2);
   });
 });

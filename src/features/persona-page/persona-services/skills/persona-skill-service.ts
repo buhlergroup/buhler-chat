@@ -21,6 +21,7 @@ import {
   SKILL_LIMITS,
   isGraphDriveId,
   isGraphItemId,
+  toNoAccessSkillSummary,
   toSkillSummary,
   type PersonaSkillModel,
   type PersonaSkillSummary,
@@ -36,10 +37,12 @@ import {
 } from "./persona-skill-store";
 import {
   buildSharePointSource,
+  canReadLinkedSkill,
   fetchLinkedSkillZip,
   packageFields,
   syncLinkedSkill,
 } from "./linked-skill-sync";
+import { rememberDriveItemVersion } from "./drive-item-check-cache";
 
 const notAllowed = <T,>(): ServerActionResponse<T> => ({
   status: "UNAUTHORIZED",
@@ -53,7 +56,10 @@ const notFound = <T,>(): ServerActionResponse<T> => ({
 
 /**
  * Lists the skills of an agent for everyone who can open the agent, and
- * tells the editor whether the current user may change them.
+ * tells the editor whether the current user may change them. A viewer who
+ * is not owner or admin sees a linked skill whose SharePoint file they
+ * cannot read with its name only (checked with the viewer's token, through
+ * the same cached check as chats).
  */
 export async function FindPersonaSkills(
   personaId: string,
@@ -65,9 +71,22 @@ export async function FindPersonaSkills(
       return { status: "UNAUTHORIZED", errors: [{ message: "You do not have access to this agent." }] };
     }
     const skills = await querySkillsByPersonaId(personaId);
+    if (access.canEdit || !skills.some((s) => s.source)) {
+      return {
+        status: "OK",
+        response: { skills: skills.map(toSkillSummary), canEdit: access.canEdit },
+      };
+    }
+    const { token } = await getCurrentUser();
+    const readable = await Promise.all(
+      skills.map((s) => canReadLinkedSkill(s, token, access.currentUserId)),
+    );
     return {
       status: "OK",
-      response: { skills: skills.map(toSkillSummary), canEdit: access.canEdit },
+      response: {
+        skills: skills.map((s, i) => (readable[i] ? toSkillSummary(s) : toNoAccessSkillSummary(s))),
+        canEdit: false,
+      },
     };
   } catch (error) {
     logError("agent skills: list failed", {
@@ -281,6 +300,7 @@ export async function LinkPersonaSkillFromSharePoint(input: {
       return { status: "ERROR", errors: [{ message: "The skill could not be saved." }] };
     }
     await HistoryContainer().items.upsert<PersonaSkillModel>(model);
+    rememberDriveItemVersion(driveId, itemId, meta, access.currentUserId);
 
     logInfo("agent skills: SharePoint skill linked", {
       personaId,
@@ -323,7 +343,12 @@ export async function CheckPersonaSkillNow(
     }
 
     const { token } = await getCurrentUser();
-    const res = await syncLinkedSkill(skill, token, skills, linkedSkillDeps(), { force: true });
+    // force: bypasses the check cache (and refreshes it) and retries a
+    // version that failed before.
+    const res = await syncLinkedSkill(skill, token, skills, linkedSkillDeps(), {
+      force: true,
+      userId: access.currentUserId,
+    });
     switch (res.status) {
       case "current":
       case "updated":
