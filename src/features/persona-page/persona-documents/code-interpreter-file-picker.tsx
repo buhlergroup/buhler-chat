@@ -27,6 +27,8 @@ interface CodeInterpreterFilePickerProps {
   filters?: string[];
   /** One file instead of several (default: several). */
   single?: boolean;
+  /** What can be picked (picker v8 typesAndSources.mode); default files. */
+  mode?: "files" | "folders";
   title?: string;
   description?: ReactNode;
   /** Own trigger instead of the edit icon. */
@@ -39,6 +41,7 @@ export function CodeInterpreterFilePicker({
   onFilesSelected,
   filters: fileFilters,
   single = false,
+  mode = "files",
   title,
   description,
   trigger,
@@ -172,10 +175,8 @@ export function CodeInterpreterFilePicker({
           channelId: channelIdRef.current,
         },
         search: { enabled: true },
-        typesAndSources: {
-          mode: "files",
-          filters: filters,
-        },
+        typesAndSources:
+          mode === "folders" ? { mode: "folders" } : { mode: "files", filters: filters },
         selection: single
           ? { mode: "single" }
           : {

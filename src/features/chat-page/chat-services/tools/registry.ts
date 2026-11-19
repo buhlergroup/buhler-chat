@@ -10,6 +10,10 @@ import { searchSubAgentTool } from "./search-sub-agent";
 import { getCurrentTimeTool } from "./get-current-time";
 import { extensionTool } from "./extension-tool";
 import { loadSkillTool } from "./load-skill";
+import { fetchSharePointFileTool, findSharePointFilesTool } from "./sharepoint-files";
+import { SharePointFileSession } from "@/features/persona-page/persona-services/sharepoint-files/sharepoint-file-access";
+import { readSharePointFileLimits } from "@/features/persona-page/persona-services/sharepoint-files/sharepoint-file-limits";
+import { uploadFileToCodeInterpreterContainer } from "../code-interpreter-container";
 import type { ToolContext } from "./tool-context";
 import { compareByCodepoint } from "./stabilize-toolset";
 
@@ -106,6 +110,24 @@ export async function buildToolset(
   // Agent skills — only when the agent has skills the user may use.
   if ((ctx.skills?.length ?? 0) > 0) {
     entries.push(["load_skill", loadSkillTool(ctx)]);
+  }
+
+  // SharePoint files for the model — only when the agent links SharePoint
+  // folders/files AND the code interpreter runs in this turn (the files go
+  // into its container). One session per request: listing + fetch counter.
+  const sharePoint = ctx.sharePointFiles;
+  if (ctx.codeInterpreterAvailable && sharePoint && sharePoint.sources.length > 0) {
+    const limits = readSharePointFileLimits();
+    const session = new SharePointFileSession({
+      sources: sharePoint.sources,
+      accessToken: sharePoint.accessToken,
+      limits,
+      getContainerId: sharePoint.getContainerId,
+      uploadToContainer: uploadFileToCodeInterpreterContainer,
+      threadId: ctx.threadId,
+    });
+    entries.push(["find_sharepoint_files", findSharePointFilesTool(session)]);
+    entries.push(["fetch_sharepoint_file", fetchSharePointFileTool(session, limits)]);
   }
 
   // Sub-agent tools are always available (subject to the recursion
