@@ -16,6 +16,12 @@ import "server-only";
  *     from Graph, reaches the linked folder in the same drive.
  *   - 401/403/404 from SharePoint means "not available for you". There is no
  *     cached copy to fall back to.
+ *   - An image is fetched as SharePoint's preview image (a JPEG scaled to fit
+ *     imageMaxPx x imageMaxPx), so the size of the original does not matter.
+ *     Without a usable preview (404, 400, not an image, ...) the original is
+ *     downloaded within maxFileBytes; 401/403 on the preview means "not
+ *     available for you", with no fallback. Small JPEG/PNG/GIF/WebP
+ *     originals are downloaded as they are (no re-encoding).
  *   - Item ids are validated before they go into a Graph URL.
  */
 
@@ -24,15 +30,25 @@ import {
   FileTooLargeError,
   GraphFileError,
   downloadDriveItem,
+  downloadDriveItemThumbnail,
   getDriveItemInfo,
   isFileAccessDenied,
   listDriveItemChildren,
   type DriveItemInfo,
 } from "@/features/common/services/sharepoint/graph-drive";
 import { isGraphItemId } from "@/features/common/services/sharepoint/graph-ids";
-import { fileTypeRule, type PersonaFileSourceModel } from "./sharepoint-file-models";
+import {
+  fileExtension,
+  fileTypeRule,
+  type PersonaFileSourceModel,
+} from "./sharepoint-file-models";
 import { SHAREPOINT_FILE_RULES, type SharePointFileLimits } from "./sharepoint-file-limits";
-import { FileConversionError, prepareFileForCodeInterpreter } from "./sharepoint-file-convert";
+import {
+  FileConversionError,
+  prepareFileForCodeInterpreter,
+  preparePreviewForCodeInterpreter,
+  type PreparedFile,
+} from "./sharepoint-file-convert";
 
 export interface ListedFile {
   id: string;
@@ -384,12 +400,15 @@ export class SharePointFileSession {
 
     const rule = fileTypeRule(file.name);
     if (rule.kind === "refused") return { error: rule.message, name: file.name };
-    if (file.size > limits.maxFileBytes) {
-      return {
-        error: `The file is larger than ${limits.maxFileBytes / 1_000_000} MB and cannot be fetched.`,
-        name: file.name,
-      };
-    }
+    const image = rule.kind === "image" ? rule : undefined;
+    const tooLarge = {
+      error: `The file is larger than ${limits.maxFileBytes / 1_000_000} MB and cannot be fetched.`,
+      name: file.name,
+    };
+    // Images come as SharePoint's preview image, whatever the size of the
+    // original; only small originals the code interpreter takes are better.
+    const tryPreview = image !== undefined && !isSmallOriginalImage(file);
+    if (!tryPreview && file.size > limits.maxFileBytes) return tooLarge;
 
     const containerId = this.deps.getContainerId();
     if (!containerId) {
@@ -400,42 +419,65 @@ export class SharePointFileSession {
     }
 
     this.downloads++;
-    let data: Buffer;
-    try {
-      data = await downloadDriveItem(
-        this.deps.accessToken,
-        file.source.driveId,
-        file.id,
-        limits.maxFileBytes,
-      );
-    } catch (error) {
-      if (error instanceof FileTooLargeError) {
-        return {
-          error: `The file is larger than ${limits.maxFileBytes / 1_000_000} MB and cannot be fetched.`,
-          name: file.name,
-        };
+    let prepared: PreparedFile | undefined;
+    if (tryPreview) {
+      const preview = await this.fetchPreview(file);
+      if (preview === "denied") return { error: NOT_AVAILABLE_MESSAGE, name: file.name };
+      if (preview) {
+        prepared = preview;
+      } else {
+        // No preview: the original, within the file limit.
+        if (image?.previewOnlyMessage) return { error: image.previewOnlyMessage, name: file.name };
+        if (file.size > limits.maxFileBytes) return tooLarge;
       }
-      logWarn("fetch_sharepoint_file: download failed", {
-        threadId: this.deps.threadId,
-        status: error instanceof GraphFileError ? error.status : undefined,
-      });
-      return { error: graphProblem(error), name: file.name };
+    }
+    const fromPreview = prepared !== undefined;
+
+    if (!prepared) {
+      let data: Buffer;
+      try {
+        data = await downloadDriveItem(
+          this.deps.accessToken,
+          file.source.driveId,
+          file.id,
+          limits.maxFileBytes,
+        );
+      } catch (error) {
+        if (error instanceof FileTooLargeError) return tooLarge;
+        logWarn("fetch_sharepoint_file: download failed", {
+          threadId: this.deps.threadId,
+          status: error instanceof GraphFileError ? error.status : undefined,
+        });
+        return { error: graphProblem(error), name: file.name };
+      }
+
+      try {
+        prepared = await prepareFileForCodeInterpreter(containerFileName(file.name), data, {
+          imageMaxPx: limits.imageMaxPx,
+        });
+      } catch (error) {
+        if (error instanceof FileConversionError) return { error: error.message, name: file.name };
+        throw error;
+      }
     }
 
-    let prepared;
-    try {
-      prepared = await prepareFileForCodeInterpreter(containerFileName(file.name), data, {
-        imageMaxPx: limits.imageMaxPx,
-      });
-    } catch (error) {
-      if (error instanceof FileConversionError) return { error: error.message, name: file.name };
-      throw error;
-    }
+    const source = fromPreview ? "sharepoint-thumbnail" : "sharepoint-original";
+    const note = fromPreview
+      ? [
+          `SharePoint preview image of "${file.name}" (${formatMb(file.size)}), scaled to fit ` +
+            `${limits.imageMaxPx}x${limits.imageMaxPx} px; the original was not downloaded.`,
+          prepared.note,
+        ]
+          .filter(Boolean)
+          .join(" ")
+      : prepared.note;
 
     try {
       const { path } = await this.deps.uploadToContainer(containerId, prepared.name, prepared.data);
       logInfo("fetch_sharepoint_file: file in the code interpreter", {
         threadId: this.deps.threadId,
+        source,
+        originalBytes: file.size,
         bytes: prepared.data.length,
         converted: Boolean(prepared.note),
         fetches: this.downloads,
@@ -444,11 +486,13 @@ export class SharePointFileSession {
         path,
         name: prepared.name,
         sourcePath: file.relativePath,
+        source,
+        originalBytes: file.size,
         bytes: prepared.data.length,
         ...(prepared.width && prepared.height
           ? { width: prepared.width, height: prepared.height }
           : {}),
-        ...(prepared.note ? { note: prepared.note } : {}),
+        ...(note ? { note } : {}),
         fetchesLeft: limits.maxFetchesPerRequest - this.downloads,
       };
     } catch (error) {
@@ -459,7 +503,58 @@ export class SharePointFileSession {
       return { error: "The file could not be put into the code interpreter. Try again." };
     }
   }
+
+  /**
+   * SharePoint's preview image of an image file, scaled to fit imageMaxPx x
+   * imageMaxPx. "denied" (401/403) means the user may not read the file: no
+   * fallback. undefined means there is no usable preview (404, 400, not an
+   * image, too large, unreadable, no answer): the caller falls back to the
+   * original.
+   */
+  private async fetchPreview(file: ListedFile): Promise<PreparedFile | "denied" | undefined> {
+    const { limits } = this.deps;
+    let data: Buffer;
+    try {
+      ({ data } = await downloadDriveItemThumbnail(
+        this.deps.accessToken,
+        file.source.driveId,
+        file.id,
+        limits.imageMaxPx,
+        SHAREPOINT_FILE_RULES.maxPreviewBytes,
+      ));
+    } catch (error) {
+      if (error instanceof GraphFileError && (error.status === 401 || error.status === 403)) {
+        return "denied";
+      }
+      logInfo("fetch_sharepoint_file: no preview image, the original is used", {
+        threadId: this.deps.threadId,
+        status: error instanceof GraphFileError ? error.status : undefined,
+        previewTooLarge: error instanceof FileTooLargeError,
+      });
+      return undefined;
+    }
+    try {
+      return await preparePreviewForCodeInterpreter(containerFileName(file.name), data, {
+        imageMaxPx: limits.imageMaxPx,
+      });
+    } catch (error) {
+      if (!(error instanceof FileConversionError)) throw error;
+      logInfo("fetch_sharepoint_file: preview image not readable, the original is used", {
+        threadId: this.deps.threadId,
+      });
+      return undefined;
+    }
+  }
 }
+
+/** Originals the code interpreter takes as they are, small enough to download. */
+const SMALL_ORIGINAL_IMAGE_EXTENSIONS = new Set(["jpg", "jpeg", "png", "gif", "webp"]);
+
+const isSmallOriginalImage = (file: ListedFile): boolean =>
+  SMALL_ORIGINAL_IMAGE_EXTENSIONS.has(fileExtension(file.name)) &&
+  file.size <= SHAREPOINT_FILE_RULES.maxOriginalImageBytes;
+
+const formatMb = (bytes: number): string => `${(bytes / 1_000_000).toFixed(1)} MB`;
 
 function toListed(
   info: DriveItemInfo,

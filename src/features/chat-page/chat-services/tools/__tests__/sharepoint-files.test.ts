@@ -126,6 +126,8 @@ describe("SharePoint file tools in buildToolset", () => {
     expect(fetchDesc).toMatch(/exact file name/);
     expect(fetchDesc).toMatch(/Fetch only the files the task really needs/);
     expect(fetchDesc).toContain("at most 10 per message");
+    expect(fetchDesc).toContain("SharePoint's preview image: a JPEG that fits 2560x2560 px");
+    expect(fetchDesc).toContain("images without a preview, may be up to 50 MB");
     // Same sources → byte-identical descriptions (prompt-cache stability).
     const again = await buildToolset(baseCtx());
     expect((again.fetch_sharepoint_file as { description?: string }).description).toBe(fetchDesc);

@@ -59,7 +59,7 @@ beforeEach(() => {
     .add(DRIVE, { id: "ROOT", name: "root", folder: true })
     .add(DRIVE, { id: "FOLDER1", name: "Images", parent: "ROOT", folder: true })
     .add(DRIVE, { id: "FILE1", name: "photo-01.jpg", parent: "FOLDER1", content: Buffer.from("x") })
-    .add(DRIVE, { id: "PSD1", name: "layers.psd", parent: "FOLDER1", content: Buffer.from("x") })
+    .add(DRIVE, { id: "EXE1", name: "setup.exe", parent: "FOLDER1", content: Buffer.from("x") })
     .add(DRIVE, { id: "LOCKED", name: "Locked", parent: "ROOT", folder: true, status: 403 });
   vi.stubGlobal("fetch", vi.fn(graph.fetch));
   access = { canUse: true, canEdit: true };
@@ -127,8 +127,8 @@ describe("AddPersonaFileSource", () => {
   });
 
   it("refuses a file type the model cannot use", async () => {
-    const res = await AddPersonaFileSource({ personaId: "p1", driveId: DRIVE, itemId: "PSD1" });
-    expect(res.status === "ERROR" && res.errors[0].message).toMatch(/\.psd/);
+    const res = await AddPersonaFileSource({ personaId: "p1", driveId: DRIVE, itemId: "EXE1" });
+    expect(res.status === "ERROR" && res.errors[0].message).toMatch(/\.exe are not supported/);
     expect(upsert).not.toHaveBeenCalled();
   });
 });

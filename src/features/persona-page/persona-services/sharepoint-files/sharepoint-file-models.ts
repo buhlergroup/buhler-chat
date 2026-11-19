@@ -64,6 +64,12 @@ export const toFileSourceSummary = (s: PersonaFileSourceModel): PersonaFileSourc
 /** Image types the code interpreter does not take; converted to JPEG. */
 export const CONVERTED_TO_JPEG_EXTENSIONS = ["TIF", "TIFF", "BMP"] as const;
 
+/**
+ * Image types that only come as SharePoint's preview image (a JPEG): the
+ * server cannot decode them itself, so without a preview they are refused.
+ */
+export const PREVIEW_ONLY_EXTENSIONS = ["HEIC", "PSD"] as const;
+
 /** Lower-case extension without the dot ("" when there is none). */
 export const fileExtension = (name: string): string => {
   const dot = name.lastIndexOf(".");
@@ -72,15 +78,34 @@ export const fileExtension = (name: string): string => {
 
 export type FileTypeRule =
   | { kind: "as-is" }
-  | { kind: "image"; convertToJpeg: boolean }
+  | {
+      kind: "image";
+      /** The original must become JPEG (only used when there is no preview). */
+      convertToJpeg: boolean;
+      /** Set when only the SharePoint preview can be used: the refusal without one. */
+      previewOnlyMessage?: string;
+    }
   | { kind: "refused"; message: string };
 
 const RESIZABLE_IMAGES = new Set(["jpg", "jpeg", "png", "webp", "gif"]);
 
+const PREVIEW_ONLY_MESSAGES = new Map<string, string>([
+  [
+    "heic",
+    "SharePoint has no preview image of this HEIC file, and HEIC cannot be read directly. Use a JPEG or PNG version of the same image.",
+  ],
+  [
+    "psd",
+    "SharePoint has no preview image of this Photoshop file (.psd), and .psd cannot be read directly. Use a JPEG, PNG or TIFF export of the same image.",
+  ],
+]);
+
 /**
  * What happens to a file of this name: the code interpreter's own types
- * (ZIP included) go as they are, images may be resized, TIFF/BMP become
- * JPEG, everything else is refused with a message for the model.
+ * (ZIP included) go as they are; images come as SharePoint's preview image
+ * or, without one, are read and resized here (TIFF/BMP become JPEG; HEIC and
+ * PSD need the preview); everything else is refused with a message for the
+ * model.
  */
 export function fileTypeRule(name: string): FileTypeRule {
   const ext = fileExtension(name);
@@ -91,14 +116,9 @@ export function fileTypeRule(name: string): FileTypeRule {
     return { kind: "image", convertToJpeg: true };
   }
   if (RESIZABLE_IMAGES.has(ext)) return { kind: "image", convertToJpeg: false };
+  const previewOnlyMessage = PREVIEW_ONLY_MESSAGES.get(ext);
+  if (previewOnlyMessage) return { kind: "image", convertToJpeg: true, previewOnlyMessage };
   if (CODE_INTERPRETER_SUPPORTED_EXTENSIONS.includes(ext.toUpperCase())) return { kind: "as-is" };
-  if (ext === "psd") {
-    return {
-      kind: "refused",
-      message:
-        "Photoshop files (.psd) are not supported. Use a JPEG, PNG or TIFF export of the same image.",
-    };
-  }
   return {
     kind: "refused",
     message: `Files of type .${ext} are not supported. Supported: ${supportedExtensionsText()}.`,
@@ -109,12 +129,15 @@ export const supportedExtensionsText = (): string =>
   [
     ...CODE_INTERPRETER_SUPPORTED_EXTENSIONS,
     ...CONVERTED_TO_JPEG_EXTENSIONS,
+    ...PREVIEW_ONLY_EXTENSIONS,
   ]
     .map((e) => `.${e.toLowerCase()}`)
     .join(", ");
 
 /** File extensions for the SharePoint picker ("Add file"). */
 export const pickerFileFilters = (): string[] =>
-  [...CODE_INTERPRETER_SUPPORTED_EXTENSIONS, ...CONVERTED_TO_JPEG_EXTENSIONS].map(
-    (e) => `.${e.toLowerCase()}`,
-  );
+  [
+    ...CODE_INTERPRETER_SUPPORTED_EXTENSIONS,
+    ...CONVERTED_TO_JPEG_EXTENSIONS,
+    ...PREVIEW_ONLY_EXTENSIONS,
+  ].map((e) => `.${e.toLowerCase()}`);
