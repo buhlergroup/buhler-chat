@@ -6,7 +6,8 @@ import { SSEClientTransport } from "@modelcontextprotocol/sdk/client/sse.js";
 import { UnauthorizedError, type OAuthClientProvider } from "@modelcontextprotocol/sdk/client/auth.js";
 import type { McpToolInfo, McpTransport } from "../models";
 import { createGuardedFetch, type McpFetch } from "./mcp-fetch";
-import { McpOAuthRequiredError } from "./mcp-oauth";
+import { AI_NAME } from "@/features/theme/theme-config";
+import { McpOAuthRequiredError, mcpClientSlug } from "./mcp-oauth";
 
 /** Limits for one MCP exchange. */
 export const MCP_LIMITS = {
@@ -49,7 +50,7 @@ export interface McpSession {
 
 export type McpSessionFactory = (options: McpConnectionOptions) => Promise<McpSession>;
 
-const CLIENT_INFO = { name: "buhler-chat", version: "1.0.0" };
+const CLIENT_INFO = { name: mcpClientSlug(AI_NAME), version: "1.0.0" };
 
 function wrapClient(client: Client): McpSession {
   return {

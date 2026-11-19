@@ -1,6 +1,7 @@
 import "server-only";
 
 import { randomBytes, timingSafeEqual } from "node:crypto";
+import { AI_NAME } from "@/features/theme/theme-config";
 import type { OAuthClientProvider } from "@modelcontextprotocol/sdk/client/auth.js";
 import type {
   OAuthClientInformationMixed,
@@ -103,6 +104,16 @@ export const safeReturnPath = (value: unknown): string | undefined => {
  * Key Vault keeps deleted names reserved (soft delete), so these records are
  * overwritten with "null" instead of deleted while the extension exists.
  */
+/** Machine-readable client name derived from the app name: lowercase, non-alphanumerics become "-". */
+export function mcpClientSlug(name: string): string {
+  return name
+    .normalize("NFKD")
+    .replace(/[̀-ͯ]/g, "")
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "");
+}
+
 export class KeyVaultMcpOAuthProvider implements OAuthClientProvider {
   private readonly names: ReturnType<typeof mcpOAuthSecretNames>;
   private readonly userNames: ReturnType<typeof mcpOAuthUserSecretNames>;
@@ -121,7 +132,7 @@ export class KeyVaultMcpOAuthProvider implements OAuthClientProvider {
 
   get clientMetadata(): OAuthClientMetadata {
     return {
-      client_name: "Bühler Chat",
+      client_name: AI_NAME,
       redirect_uris: [this.options.redirectUrl],
       grant_types: ["authorization_code", "refresh_token"],
       response_types: ["code"],

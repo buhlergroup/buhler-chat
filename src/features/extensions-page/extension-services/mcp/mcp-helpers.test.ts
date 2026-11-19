@@ -10,9 +10,11 @@ import {
   KeyVaultMcpOAuthProvider,
   McpOAuthRequiredError,
   MCP_OAUTH_PENDING_TTL_MS,
+  mcpClientSlug,
   readPendingMcpOAuth,
   safeReturnPath,
 } from "./mcp-oauth";
+import { AI_NAME } from "@/features/theme/theme-config";
 import { MCP_EXTENSION_TAG, mcpOAuthUserSecretNames, type SecretStore } from "../extension-secrets";
 import { mcpHeaderErrors, McpSecretSchema } from "../models";
 
@@ -314,5 +316,22 @@ describe("MCP OAuth state and provider (per user)", () => {
     expect(safeReturnPath("/\\evil.example.com")).toBeUndefined();
     expect(safeReturnPath("https://evil.example.com")).toBeUndefined();
     expect(safeReturnPath(42)).toBeUndefined();
+  });
+});
+
+describe("MCP client identity", () => {
+  it("slugs a display name", () => {
+    expect(mcpClientSlug("Example Chat")).toBe("example-chat");
+    expect(mcpClientSlug("Café  Ünï -- Chat!")).toBe("cafe-uni-chat");
+  });
+
+  it("registers the OAuth client under the app name", () => {
+    const p = new KeyVaultMcpOAuthProvider({
+      store: {} as SecretStore,
+      extensionId: "e",
+      userId: "u",
+      redirectUrl: "https://app.example.com/cb",
+    } as never);
+    expect(p.clientMetadata.client_name).toBe(AI_NAME);
   });
 });
