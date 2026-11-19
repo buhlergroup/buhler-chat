@@ -117,6 +117,6 @@ describe("buildSkillCatalogPrompt", () => {
   });
 
   it("names the code interpreter archive after the skill", () => {
-    expect(skillArchiveFileName("buhler-brand-slides")).toBe("skill-buhler-brand-slides.zip");
+    expect(skillArchiveFileName("example-skill")).toBe("skill-example-skill.zip");
   });
 });
