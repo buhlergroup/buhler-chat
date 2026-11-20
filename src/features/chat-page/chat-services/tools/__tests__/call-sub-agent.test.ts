@@ -89,6 +89,7 @@ function makeCtx(overrides: Partial<ToolContext> = {}): ToolContext {
     personaDocumentIds: [],
     defaultTools: {},
     extensions: [],
+    subAgentIds: ["agent-1"],
     depth: 0,
     ...overrides,
   };
@@ -259,7 +260,7 @@ describe("callSubAgentTool – execute", () => {
       errors: [{ message: "not found" }],
     });
 
-    const t = callSubAgentTool(makeCtx());
+    const t = callSubAgentTool(makeCtx({ subAgentIds: ["nonexistent"] }));
     await expect(
       (t as any).execute(
         { agent_id: "nonexistent", task: "task" },
@@ -328,4 +329,40 @@ describe("callSubAgentTool — the sub-agent's own extensions", () => {
     expect(subCtx.extensions).toBe(resolved);
   });
 });
+});
+
+// Pinned: the model chooses agent_id, and tool output (for example from a
+// Remote MCP server) can steer it. Only the configured sub-agents may run,
+// because a sub-agent runs with its own extensions.
+describe("callSubAgentTool — only configured sub-agents", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockFindPersonaByID.mockResolvedValue({ status: "OK", response: { ...FAKE_PERSONA, id: "other-agent" } });
+    mockGenerateText.mockResolvedValue({ text: "ok", usage: {} });
+  });
+
+  it.each([
+    ["an id outside the list", ["agent-1"]],
+    ["an empty list", []],
+    ["no list", undefined],
+  ])("refuses an agent the user can open but that is not configured (%s)", async (_label, subAgentIds) => {
+    const t = callSubAgentTool(makeCtx({ subAgentIds: subAgentIds as string[] | undefined }));
+    await expect(
+      (t as any).execute({ agent_id: "other-agent", task: "task" }, { abortSignal: undefined })
+    ).rejects.toThrow(/is not a sub-agent of this chat/);
+
+    expect(mockFindPersonaByID).not.toHaveBeenCalled();
+    expect(mockResolveExtensions).not.toHaveBeenCalled();
+    expect(mockGenerateText).not.toHaveBeenCalled();
+  });
+
+  it("runs an agent from the configured list", async () => {
+    const t = callSubAgentTool(makeCtx({ subAgentIds: ["agent-1", "other-agent"] }));
+    const result = await (t as any).execute(
+      { agent_id: "other-agent", task: "task" },
+      { abortSignal: undefined }
+    );
+    expect(mockFindPersonaByID).toHaveBeenCalledWith("other-agent");
+    expect(result.response).toBe("ok");
+  });
 });

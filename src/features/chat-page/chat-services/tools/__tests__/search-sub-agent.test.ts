@@ -21,6 +21,7 @@ const CTX: ToolContext = {
   personaDocumentIds: [],
   defaultTools: {},
   extensions: [],
+  subAgentIds: ["p1", "p2", "p3"],
   depth: 0,
 };
 
@@ -32,9 +33,9 @@ function makePersonas() {
   ];
 }
 
-async function run(query: string) {
+async function run(query: string, ctx: ToolContext = CTX) {
   mockFindAll.mockResolvedValue({ status: "OK", response: makePersonas() });
-  const t = searchSubAgentTool(CTX);
+  const t = searchSubAgentTool(ctx);
   // The AI SDK's `Tool` shape exposes `execute`; calling it directly is the
   // intended test seam.
   const result = await (t as any).execute({ query }, { abortSignal: undefined });
@@ -73,5 +74,28 @@ describe("searchSubAgentTool", () => {
   it("trims whitespace before deciding list-all vs keyword", async () => {
     const r = await run("   ");
     expect(r.agents).toHaveLength(3);
+  });
+});
+
+// Pinned: search_sub_agent must not widen what call_sub_agent accepts. It
+// lists only the configured sub-agents the user can open.
+describe("searchSubAgentTool — only configured sub-agents", () => {
+  beforeEach(() => {
+    mockFindAll.mockReset();
+  });
+
+  it("lists only agents in subAgentIds", async () => {
+    const r = await run("*", { ...CTX, subAgentIds: ["p2"] });
+    expect(r.agents.map((a) => a.id)).toEqual(["p2"]);
+  });
+
+  it("ignores configured ids the user cannot open", async () => {
+    const r = await run("*", { ...CTX, subAgentIds: ["p3", "hidden"] });
+    expect(r.agents.map((a) => a.id)).toEqual(["p3"]);
+  });
+
+  it("lists nothing without configured sub-agents", async () => {
+    const r = await run("", { ...CTX, subAgentIds: undefined });
+    expect(r.agents).toEqual([]);
   });
 });

@@ -40,11 +40,9 @@ export interface ToolContext {
     personaId?: string;
   }>;
   /**
-   * IDs of sub-agents (child personas) this thread can invoke. When empty
-   * or undefined the sub-agent tools (`call_sub_agent`, `search_sub_agent`)
-   * are NOT registered — without this the AI SDK would register a real
-   * `execute()` that throws "agent not found" for any caller, racing the
-   * provider-executed inline result a fake provider may emit (#37).
+   * IDs of sub-agents (child personas) this thread can invoke: the only ids
+   * `call_sub_agent` accepts and `search_sub_agent` lists. When empty or
+   * undefined the sub-agent tools are NOT registered.
    */
   subAgentIds?: string[];
   /**
@@ -53,4 +51,14 @@ export interface ToolContext {
    * Max depth before tools are omitted: 2.
    */
   depth?: number;
+}
+
+/**
+ * The agent ids a context may delegate to: the sub-agents configured on the
+ * thread (or, one level down, on the calling agent). The model picks
+ * `agent_id`, and tool output can steer the model, so an id outside this set
+ * is refused even when the user could open that agent.
+ */
+export function allowedSubAgentIds(ctx: Pick<ToolContext, "subAgentIds">): ReadonlySet<string> {
+  return new Set((ctx.subAgentIds ?? []).filter((id) => typeof id === "string" && id.length > 0));
 }

@@ -2,7 +2,7 @@ import "server-only";
 
 import { z } from "zod";
 import { tool, generateText, isStepCount } from "ai";
-import { logInfo, logDebug, logError } from "@/features/common/services/logger";
+import { logInfo, logDebug, logError, logWarn } from "@/features/common/services/logger";
 import { FindPersonaByID } from "@/features/persona-page/persona-services/persona-service";
 import { MODEL_CONFIGS, DEFAULT_MODEL, type ChatModel } from "../models";
 import { resolveProvider } from "../models/provider-seam";
@@ -11,7 +11,7 @@ import { resolveReasoningEffort } from "../models/reasoning-effort";
 import { toolsetSignature } from "../models/prompt-cache-key";
 import { stabilizeToolset } from "./stabilize-toolset";
 import { computeTokenCostUsd } from "../chat-api/usage-data";
-import type { ToolContext } from "./tool-context";
+import { allowedSubAgentIds, type ToolContext } from "./tool-context";
 import { resolveExtensionsForChat } from "@/features/extensions-page/extension-services/extension-runtime";
 
 const MAX_SUB_AGENT_DEPTH = 2;
@@ -52,6 +52,20 @@ export function callSubAgentTool(ctx: ToolContext) {
         threadId: ctx.threadId,
         depth: ctx.depth ?? 0,
       });
+
+      // Only the configured sub-agents. FindPersonaByID below still checks
+      // that the user may open the agent.
+      if (!allowedSubAgentIds(ctx).has(args.agent_id)) {
+        logWarn("callSubAgentTool: agent is not a configured sub-agent", {
+          agentId: args.agent_id.slice(0, 64),
+          threadId: ctx.threadId,
+          depth: ctx.depth ?? 0,
+        });
+        throw new Error(
+          `Agent "${args.agent_id.slice(0, 64)}" is not a sub-agent of this chat. ` +
+            "Call only the sub-agents that search_sub_agent lists."
+        );
+      }
 
       // Resolve persona
       const personaResponse = await FindPersonaByID(args.agent_id);
