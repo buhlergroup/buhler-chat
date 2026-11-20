@@ -22,6 +22,11 @@ import { HistoryContainer } from "@/features/common/services/cosmos";
 import { SqlQuerySpec } from "@azure/cosmos";
 import { FindPersonaByID } from "./persona-service";
 import {
+  FindAccessiblePersonaDocument,
+  PersonaAccessCache,
+  ResolvePersonaDocumentIds,
+} from "./persona-document-access";
+import {
   DeleteSearchDocumentByPersonaDocumentId,
   IndexDocuments,
   PersonaDocumentExistsInIndex,
@@ -218,7 +223,8 @@ export const UpdateOrAddPersonaDocuments = async (
 
   // create or update documents in the database
   const addOrUpdateResponse = await AddOrUpdatePersonaDocuments(
-    sharePointFiles
+    sharePointFiles,
+    currentPersonaDocuments
   );
 
   if (addOrUpdateResponse.status !== "OK") {
@@ -272,21 +278,21 @@ export const UpdateOrAddPersonaDocuments = async (
 export const PersonaDocumentById = async (
   id: string
 ): Promise<ServerActionResponse<PersonaDocument>> => {
-  const querySpec: SqlQuerySpec = {
-    query: "SELECT * FROM root r WHERE r.id=@id",
-    parameters: [
-      {
-        name: "@id",
-        value: id,
-      },
-    ],
-  };
-  try {
-    const { resources } = await HistoryContainer()
-      .items.query<PersonaDocument>(querySpec)
-      .fetchAll();
+  return FindPersonaDocumentForCurrentUser(id);
+};
 
-    if (resources.length === 0) {
+const FindPersonaDocumentForCurrentUser = async (
+  id: string,
+  cache?: PersonaAccessCache
+): Promise<ServerActionResponse<PersonaDocument>> => {
+  try {
+    const document = await FindAccessiblePersonaDocument<PersonaDocument>(
+      id,
+      PERSONA_DOCUMENT_ATTRIBUTE,
+      cache
+    );
+
+    if (!document) {
       return {
         status: "NOT_FOUND",
         errors: [
@@ -299,7 +305,7 @@ export const PersonaDocumentById = async (
 
     return {
       status: "OK",
-      response: resources[0],
+      response: document,
     };
   } catch (error) {
     return {
@@ -375,10 +381,11 @@ export const AllowedPersonaDocumentIds = async (
   try {
     if (!personaDocumentIds || personaDocumentIds.length === 0) return [];
 
+    const cache: PersonaAccessCache = new Map();
     const personaDocumentsResponses = await Promise.all(
       personaDocumentIds.map(async (id) => {
         try {
-          return await PersonaDocumentById(id);
+          return await FindPersonaDocumentForCurrentUser(id, cache);
         } catch {
           return null;
         }
@@ -415,11 +422,20 @@ const CreateDocumentDetailBody = (
 };
 
 const AddOrUpdatePersonaDocuments = async (
-  sharePointFiles: SharePointFile[]
+  sharePointFiles: SharePointFile[],
+  currentPersonaDocuments: string[]
 ): Promise<ServerActionResponse<string[]>> => {
+  // Keep a client id only for a document of this persona in the caller's own
+  // partition; every other document gets a new id from the server.
+  const ids = await ResolvePersonaDocumentIds(
+    sharePointFiles.map((file) => file.id),
+    currentPersonaDocuments,
+    PERSONA_DOCUMENT_ATTRIBUTE,
+    uniqueId
+  );
   const personaDocuments: PersonaDocument[] = await Promise.all(
-    sharePointFiles.map(async (file) => ({
-      id: file.id || uniqueId(),
+    sharePointFiles.map(async (file, index) => ({
+      id: ids[index],
       userId: await userHashedId(),
       externalFile: {
         documentId: file.documentId,

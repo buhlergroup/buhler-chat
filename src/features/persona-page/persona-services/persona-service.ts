@@ -270,9 +270,11 @@ export const UpsertPersona = async (
     if (personaResponse.status === "OK") {
       const { response: persona } = personaResponse;
 
+      // The stored list, not the client's, says which documents the persona
+      // has now.
       const personaDocumentIdsResponse = await AddOrUpdatePersonaDocuments(
         sharePointFiles,
-        personaInput.personaDocumentIds || []
+        persona.personaDocumentIds || []
       );
 
       let personaDocumentIds: string[] = [];

@@ -17,7 +17,11 @@ import {
 } from "./models";
 import { uniqueId } from "@/features/common/util";
 import { HistoryContainer } from "@/features/common/services/cosmos";
-import { SqlQuerySpec } from "@azure/cosmos";
+import {
+  FindAccessiblePersonaDocument,
+  PersonaAccessCache,
+  ResolvePersonaDocumentIds,
+} from "./persona-document-access";
 import { logInfo, logError, logDebug } from "@/features/common/services/logger";
 import { ResponseType } from "@microsoft/microsoft-graph-client";
 import { getCodeInterpreterFileLimit } from "@/features/chat-page/chat-services/code-interpreter-constants";
@@ -28,21 +32,21 @@ import { getCodeInterpreterFileLimit } from "@/features/chat-page/chat-services/
 export const PersonaCIDocumentById = async (
   id: string
 ): Promise<ServerActionResponse<PersonaCIDocument>> => {
-  const querySpec: SqlQuerySpec = {
-    query: "SELECT * FROM root r WHERE r.id=@id",
-    parameters: [
-      {
-        name: "@id",
-        value: id,
-      },
-    ],
-  };
-  try {
-    const { resources } = await HistoryContainer()
-      .items.query<PersonaCIDocument>(querySpec)
-      .fetchAll();
+  return FindCIDocumentForCurrentUser(id);
+};
 
-    if (resources.length === 0) {
+const FindCIDocumentForCurrentUser = async (
+  id: string,
+  cache?: PersonaAccessCache
+): Promise<ServerActionResponse<PersonaCIDocument>> => {
+  try {
+    const document = await FindAccessiblePersonaDocument<PersonaCIDocument>(
+      id,
+      PERSONA_CI_DOCUMENT_ATTRIBUTE,
+      cache
+    );
+
+    if (!document) {
       return {
         status: "NOT_FOUND",
         errors: [{ message: "CI Document not found" }],
@@ -51,7 +55,7 @@ export const PersonaCIDocumentById = async (
 
     return {
       status: "OK",
-      response: resources[0],
+      response: document,
     };
   } catch (error) {
     return {
@@ -72,8 +76,9 @@ export const PersonaCIDocumentsByIds = async (
   }
 
   try {
+    const cache: PersonaAccessCache = new Map();
     const results = await Promise.all(
-      ids.map((id) => PersonaCIDocumentById(id))
+      ids.map((id) => FindCIDocumentForCurrentUser(id, cache))
     );
 
     const documents = results
@@ -149,11 +154,20 @@ const ValidatePersonaCIDocumentSchema = (
  */
 const AddOrUpdateCIDocuments = async (
   sharePointFiles: SharePointFile[],
-  fileNames: string[]
+  fileNames: string[],
+  currentCIDocuments: string[]
 ): Promise<ServerActionResponse<string[]>> => {
+  // Keep a client id only for a document of this persona in the caller's own
+  // partition; every other document gets a new id from the server.
+  const ids = await ResolvePersonaDocumentIds(
+    sharePointFiles.map((file) => file.id),
+    currentCIDocuments,
+    PERSONA_CI_DOCUMENT_ATTRIBUTE,
+    uniqueId
+  );
   const ciDocuments: PersonaCIDocument[] = await Promise.all(
     sharePointFiles.map(async (file, index) => ({
-      id: file.id || uniqueId(),
+      id: ids[index],
       userId: await userHashedId(),
       externalFile: {
         documentId: file.documentId,
@@ -223,7 +237,8 @@ export const UpdateOrAddPersonaCIDocuments = async (
   // Create or update documents in the database
   const addOrUpdateResponse = await AddOrUpdateCIDocuments(
     sharePointFiles,
-    fileNames
+    fileNames,
+    currentCIDocuments
   );
 
   if (addOrUpdateResponse.status !== "OK") {
