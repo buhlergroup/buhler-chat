@@ -13,6 +13,7 @@ import {
   NOT_AVAILABLE_MESSAGE,
   OUTSIDE_SOURCES_MESSAGE,
   SharePointFileSession,
+  TOO_MANY_LOOKUPS_MESSAGE,
   containerFileName,
 } from "../sharepoint-file-access";
 import type { PersonaFileSourceModel } from "../sharepoint-file-models";
@@ -329,6 +330,134 @@ describe("fetch_sharepoint_file — limits", () => {
     const res = await session().fetch({ name: "photo-01.jpg" });
     expect(res.error).toMatch(/not ready/);
     expect(graph.count("/content")).toBe(0);
+  });
+});
+
+describe("fetch_sharepoint_file — parallel calls of one step (pinned)", () => {
+  it("parallel calls take at most maxFetchesPerRequest slots: the slot is taken before the first await", async () => {
+    const s = session([folderSource()], { maxFetchesPerRequest: 3 });
+    const ids = ["P01", "P02", "LOGO1", "TXT1", "LOGO2", "TIF1"];
+    const results = await Promise.all(ids.map((id) => s.fetch({ id })));
+    const done = results.filter((r) => "path" in r);
+    const refused = results.filter((r) => /limit of 3/.test(String((r as { error?: string }).error)));
+    expect(done).toHaveLength(3);
+    expect(refused).toHaveLength(3);
+    expect(upload).toHaveBeenCalledTimes(3);
+    // Only the three accepted files were downloaded at all.
+    const downloaded = ids.filter((id) => graph.originals(id) + graph.thumbnails(id) > 0);
+    expect(downloaded).toEqual(["P01", "P02", "LOGO1"]);
+    expect(s.downloadCount).toBe(3);
+  });
+
+  it("downloads, conversions and uploads of one request run one at a time", async () => {
+    let inFlight = 0;
+    let maxInFlight = 0;
+    vi.stubGlobal("fetch", async (input: string) => {
+      if (String(input).endsWith("/content")) {
+        inFlight++;
+        maxInFlight = Math.max(maxInFlight, inFlight);
+      }
+      return graph.fetch(input);
+    });
+    upload = vi.fn(async (_c: string, name: string) => {
+      await new Promise((r) => setTimeout(r, 5));
+      inFlight--;
+      return { path: `/mnt/data/${name}` };
+    });
+    const s = session();
+    const results = await Promise.all(
+      ["P01", "P02", "LOGO1", "TXT1", "LOGO2"].map((id) => s.fetch({ id })),
+    );
+    expect(results.every((r) => "path" in r)).toBe(true);
+    expect(upload).toHaveBeenCalledTimes(5);
+    expect(maxInFlight).toBe(1);
+  });
+
+  it("a call that ends before any download gives its slot back", async () => {
+    const s = session([folderSource()], { maxFetchesPerRequest: 1 });
+    containerId = undefined;
+    expect((await s.fetch({ id: "P01" })).error).toMatch(/not ready/);
+    expect((await s.fetch({ name: "missing.jpg" })).error).toMatch(/No file named/);
+    expect(s.downloadCount).toBe(0);
+    containerId = "cntr_1";
+    expect(await s.fetch({ id: "P02" })).toHaveProperty("path");
+    expect((await s.fetch({ id: "P01" })).error).toMatch(/limit of 1/);
+  });
+
+  it("caps the Graph lookups for model-supplied ids per request", async () => {
+    const s = session();
+    for (let i = 0; i < 100; i++) {
+      expect(await s.fetch({ id: `UNKNOWN${i}` })).toEqual({ error: OUTSIDE_SOURCES_MESSAGE });
+    }
+    const before = graph.calls.length;
+    expect(await s.fetch({ id: "P02" })).toEqual({ error: TOO_MANY_LOOKUPS_MESSAGE });
+    expect(graph.calls.length).toBe(before);
+    // Files from the listing need no lookup.
+    expect(await s.fetch({ name: "photo-02.jpg" })).toHaveProperty("path");
+  });
+});
+
+describe("find_sharepoint_files — one budget and one deadline per listing (pinned)", () => {
+  const addFiles = (parent: string, prefix: string, n: number) => {
+    for (let i = 0; i < n; i++) {
+      graph.add(DRIVE, { id: `${prefix}${i}`, name: `${prefix.toLowerCase()}-${i}.txt`, parent, size: 1 });
+    }
+  };
+
+  it("shares the item budget across all sources and stops reading pages when it is used up", async () => {
+    graph.add(DRIVE, { id: "BIGA", name: "A", parent: "ROOT", folder: true });
+    graph.add(DRIVE, { id: "BIGB", name: "B", parent: "ROOT", folder: true });
+    addFiles("BIGA", "FA", 3000);
+    addFiles("BIGB", "FB", 3000);
+    const sources = [
+      folderSource({ id: "sa", itemId: "BIGA", name: "A" }),
+      folderSource({ id: "sb", itemId: "BIGB", name: "B" }),
+    ];
+    const s = session(sources);
+    const res = await s.find({});
+    // 6000 files in 30 pages of 200; the budget of 5000 items stops at 25
+    // pages (26 when both sources asked for a page just before it ran out).
+    expect(res.total).toBe(5000);
+    expect(graph.count("/children")).toBeLessThanOrEqual(26);
+    expect(res.listingIncomplete).toMatch(/incomplete.*more than 5000 files and folders/);
+    // A name that was not listed says the list is incomplete.
+    const miss = await s.fetch({ name: "fb-2999.txt" });
+    expect(miss.error).toMatch(/No file named.*incomplete/);
+  });
+
+  it("stops the folder walk when the budget is used up (later folders are never read)", async () => {
+    graph.add(DRIVE, { id: "TREE", name: "Tree", parent: "ROOT", folder: true });
+    for (let f = 0; f < 10; f++) graph.add(DRIVE, { id: `SUBF${f}`, name: `f${f}`, parent: "TREE", folder: true });
+    for (let f = 0; f < 10; f++) addFiles(`SUBF${f}`, `T${f}X`, 600);
+    const res = await session([folderSource({ itemId: "TREE", name: "Tree" })]).find({});
+    // 10 folder entries + 8 x 600 + 190 files = 5000 items.
+    expect(res.total).toBe(4990);
+    expect(graph.count("/items/SUBF8/children")).toBe(1);
+    expect(graph.count("/items/SUBF9/children")).toBe(0);
+    expect(res.listingIncomplete).toBeDefined();
+  });
+
+  it("stops the listing at the deadline and says so", async () => {
+    graph.add(DRIVE, { id: "SLOW", name: "Slow", parent: "ROOT", folder: true });
+    for (let f = 0; f < 10; f++) {
+      graph.add(DRIVE, { id: `SLOWF${f}`, name: `s${f}`, parent: "SLOW", folder: true });
+      addFiles(`SLOWF${f}`, `S${f}X`, 1);
+    }
+    let now = 1_000_000;
+    const clock = vi.spyOn(Date, "now").mockImplementation(() => now);
+    vi.stubGlobal("fetch", async (input: string) => {
+      if (String(input).includes("/children")) now += 6_000; // each folder takes 6 s
+      return graph.fetch(input);
+    });
+    try {
+      const res = await session([folderSource({ itemId: "SLOW", name: "Slow" })]).find({});
+      // Root at 6 s, s0 at 12 s, s1 at 18 s, s2 at 24 s: then the 20 s deadline ends it.
+      expect(graph.count("/children")).toBe(4);
+      expect(res.total).toBe(3);
+      expect(res.listingIncomplete).toMatch(/within 20 s/);
+    } finally {
+      clock.mockRestore();
+    }
   });
 });
 

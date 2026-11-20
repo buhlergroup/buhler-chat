@@ -286,28 +286,71 @@ export async function getDriveItemInfo(
 /** Most children read from one folder (all pages together). */
 export const MAX_CHILDREN_PER_FOLDER = 5_000;
 
+/** A listing does not need the web URL of each child: not asked for. */
+const CHILDREN_SELECT = "$select=id,name,size,lastModifiedDateTime,file,folder,parentReference";
+
+/**
+ * Items several listings may still read together (all sources of one
+ * request). Each item read takes one; at 0 the listing stops.
+ */
+export interface ListingBudget {
+  remaining: number;
+}
+
 /**
  * The children of a folder, all pages. A next page is only followed when its
  * URL is on the Graph base URL (no other host is ever called with the token).
+ * Stops (truncated) after `maxItems`, when the shared `budget` is used up, or
+ * at the `deadline` (epoch ms): each call to Graph gets at most the time that
+ * is left, and a call that runs into the deadline ends the listing with the
+ * items read so far instead of an error.
  */
 export async function listDriveItemChildren(
   token: string,
   driveId: string,
   folderId: string,
-  options: { timeoutMs?: number; maxItems?: number } = {},
+  options: {
+    timeoutMs?: number;
+    maxItems?: number;
+    budget?: ListingBudget;
+    deadline?: number;
+  } = {},
 ): Promise<{ items: DriveItemInfo[]; truncated: boolean }> {
   const maxItems = options.maxItems ?? MAX_CHILDREN_PER_FOLDER;
   const timeoutMs = options.timeoutMs ?? GRAPH_METADATA_TIMEOUT_MS;
+  const { budget, deadline } = options;
   const items: DriveItemInfo[] = [];
   let url: string | undefined =
-    `${itemUrl(driveId, folderId, "/children")}?${DRIVE_ITEM_SELECT}&$top=200`;
+    `${itemUrl(driveId, folderId, "/children")}?${CHILDREN_SELECT}&$top=200`;
   while (url) {
-    const res = await graphFetch(url, token, timeoutMs);
-    const body = (await res.json()) as { value?: unknown; "@odata.nextLink"?: unknown };
+    if (budget && budget.remaining <= 0) return { items, truncated: true };
+    const left = deadline === undefined ? timeoutMs : deadline - Date.now();
+    if (left <= 0) return { items, truncated: true };
+    const callTimeout = Math.min(timeoutMs, left);
+    let body: { value?: unknown; "@odata.nextLink"?: unknown };
+    try {
+      const res = await graphFetch(url, token, callTimeout);
+      body = (await res.json()) as typeof body;
+    } catch (error) {
+      // The deadline, not Graph, ended this call: the listing is incomplete.
+      const name = (error as { name?: string })?.name;
+      const timedOut =
+        (error instanceof GraphFileError && error.timedOut) ||
+        name === "TimeoutError" ||
+        name === "AbortError";
+      if (callTimeout < timeoutMs && timedOut) {
+        return { items, truncated: true };
+      }
+      throw error;
+    }
     for (const entry of Array.isArray(body.value) ? body.value : []) {
       const info = toDriveItemInfo(entry);
       if (!info) continue;
       if (items.length >= maxItems) return { items, truncated: true };
+      if (budget) {
+        if (budget.remaining <= 0) return { items, truncated: true };
+        budget.remaining--;
+      }
       items.push(info);
     }
     const next = body["@odata.nextLink"];

@@ -31,8 +31,19 @@ export const SHAREPOINT_FILE_RULES = {
   maxDepth: 3,
   /** Folders read per linked folder for one listing. */
   maxFoldersPerSource: 100,
-  /** Files kept from all linked sources for one listing. */
-  maxListedFiles: 5_000,
+  /**
+   * Files and folders read from Graph for one listing, all linked sources
+   * together; the listing stops there and says it is incomplete.
+   */
+  maxListedItems: 5_000,
+  /** One listing (all sources) stops after this time and says it is incomplete. */
+  listingDeadlineMs: 20_000,
+  /**
+   * Graph metadata calls per chat request to prove that a file id from the
+   * model is inside a source (item + parent chain). Ids from the listing
+   * need none.
+   */
+  maxLookupsPerRequest: 100,
   /** JPEG quality of converted and resized images. */
   jpegQuality: 85,
   /** Largest SharePoint preview image (thumbnail) read; reading stops beyond it. */
