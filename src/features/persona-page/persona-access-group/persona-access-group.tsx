@@ -1,5 +1,5 @@
 import { Label } from "@/features/ui/label";
-import { FC, useEffect, useState } from "react";
+import { FC, ReactNode, useEffect, useState } from "react";
 import { PersonaAccessGroupSelector } from "./persona-access-group-selector";
 import { AccessGroup, TrustLevel } from "../persona-services/models";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/features/ui/tooltip";
@@ -15,6 +15,8 @@ interface Props {
   initialIsPublished: boolean;
   /** Effective trust tier when the agent is already published, else null. */
   trustLevel: TrustLevel | null;
+  /** Shown while the agent is shared with a group or published. */
+  sharedNotice?: ReactNode;
 }
 
 export const PersonaAccessGroup: FC<Props> = (props) => {
@@ -121,6 +123,7 @@ export const PersonaAccessGroup: FC<Props> = (props) => {
         </Label>
         {props.trustLevel && <TrustBadge level={props.trustLevel} />}
       </div>
+      {(isPublished || !!selectedGroup) && props.sharedNotice}
     </div>
   );
 };

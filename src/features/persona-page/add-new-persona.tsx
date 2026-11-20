@@ -30,6 +30,10 @@ import {
 import { ExtensionDetail } from "../chat-page/chat-header/extension-detail";
 import { ExtensionModel } from "../extensions-page/extension-services/models";
 import {
+  FindMissingExtensionIds,
+  GetExtensionCredentialInfo,
+} from "../extensions-page/extension-services/extension-service";
+import {
   PersonaModel,
   DefaultTools,
   effectiveTrustLevel,
@@ -86,6 +90,50 @@ export const AddNewPersona: FC<Props> = (props) => {
     };
     fetchModels();
   }, []);
+
+  // Extensions this agent lists that their owner has deleted. The agent keeps
+  // working without their tools; the notice lets the editor clean the list.
+  const [missingExtensionIds, setMissingExtensionIds] = useState<string[]>([]);
+  const extensionIdsKey = (persona.extensionIds ?? []).join(",");
+  useEffect(() => {
+    const ids = extensionIdsKey ? extensionIdsKey.split(",") : [];
+    if (!isOpened || ids.length === 0) {
+      setMissingExtensionIds([]);
+      return;
+    }
+    let cancelled = false;
+    FindMissingExtensionIds(ids)
+      .then((response) => {
+        if (!cancelled && response.status === "OK") setMissingExtensionIds(response.response);
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, [isOpened, extensionIdsKey]);
+
+  // Selected extensions that send secret values their owner stored (API keys,
+  // headers). The server answers with booleans only. Shown as a notice while
+  // the agent is shared or published.
+  const [storedSecretCount, setStoredSecretCount] = useState(0);
+  useEffect(() => {
+    const ids = extensionIdsKey ? extensionIdsKey.split(",") : [];
+    if (!isOpened || ids.length === 0) {
+      setStoredSecretCount(0);
+      return;
+    }
+    let cancelled = false;
+    GetExtensionCredentialInfo(ids, persona.id || undefined)
+      .then((response) => {
+        if (!cancelled && response.status === "OK") {
+          setStoredSecretCount(response.response.filter((i) => i.usesStoredSecrets).length);
+        }
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, [isOpened, extensionIdsKey, persona.id]);
 
   const toggleSubAgent = (agentId: string) => {
     setSelectedSubAgentIds((prev) =>
@@ -269,6 +317,29 @@ export const AddNewPersona: FC<Props> = (props) => {
                     chatThreadId={persona.id}
                     parent="persona"
                   />
+                  {missingExtensionIds.length > 0 && (
+                    <div
+                      role="status"
+                      className="flex items-center justify-between gap-2 rounded-md border border-amber-500/40 bg-amber-500/10 p-2 text-xs"
+                    >
+                      <span>
+                        {missingExtensionIds.length === 1
+                          ? "1 extension was deleted by its owner. The agent works without its tools."
+                          : `${missingExtensionIds.length} extensions were deleted by their owners. The agent works without their tools.`}
+                      </span>
+                      <Button
+                        type="button"
+                        variant="outline"
+                        size="sm"
+                        onClick={() => {
+                          missingExtensionIds.forEach((id) => personaStore.removeExtension(id));
+                          setMissingExtensionIds([]);
+                        }}
+                      >
+                        Remove from list
+                      </Button>
+                    </div>
+                  )}
                 </div>
                 {availableSubAgents.length > 0 && (
                   <div className="grid gap-2">
@@ -305,6 +376,21 @@ export const AddNewPersona: FC<Props> = (props) => {
                   initialSelectedGroup={persona.accessGroup?.id || null}
                   initialIsPublished={persona.isPublished}
                   trustLevel={effectiveTrustLevel(persona)}
+                  sharedNotice={
+                    storedSecretCount > 0 ? (
+                      <div
+                        role="note"
+                        data-testid="shared-credentials-notice"
+                        className="rounded-md border border-amber-500/40 bg-amber-500/10 p-2 text-xs"
+                      >
+                        {storedSecretCount === 1
+                          ? "1 extension of this agent uses stored credentials, such as an API key. "
+                          : `${storedSecretCount} extensions of this agent use stored credentials, such as an API key. `}
+                        Everyone who uses this agent calls these extensions with these stored credentials and can use all
+                        their enabled tools.
+                      </div>
+                    ) : undefined
+                  }
                 />
                 <PersonaDocuments
                   initialPersonaDocumentIds={persona.personaDocumentIds || []}

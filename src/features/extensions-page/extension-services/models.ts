@@ -57,6 +57,175 @@ export const ExtensionFunctionSchema = z.object({
   isOpen: z.boolean(),
 });
 
+export type ExtensionKind = z.infer<typeof ExtensionKindSchema>;
+/** "http": the classic extension (functions + endpoints). "mcp": a remote MCP server. */
+export const ExtensionKindSchema = z.enum(["http", "mcp"]);
+
+export type McpTransport = z.infer<typeof McpTransportSchema>;
+/** "auto" tries Streamable HTTP first and falls back to the legacy SSE transport. */
+export const McpTransportSchema = z.enum(["auto", "streamable-http", "sse"]);
+
+export type McpSecretPlacement = z.infer<typeof McpSecretPlacementSchema>;
+/**
+ * How a stored value travels to the MCP server:
+ *   header: a header named `target` (default: `name`), value exactly as typed.
+ *           Every row the form adds is a header.
+ *   bearer: legacy. `Authorization: Bearer <value>`.
+ *   query:  legacy. A query parameter named `target` (default: `name`).
+ * Legacy records keep working at runtime; no data migration.
+ */
+export const McpSecretPlacementSchema = z.enum(["bearer", "header", "query"]);
+
+// HTTP header token characters (RFC 9110 / RFC 7230 tchar). Also used for query names.
+export const HTTP_TOKEN = /^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$/;
+
+const HEADER_NAME_RULE =
+  "Header names can use letters, digits and ! # $ % & ' * + - . ^ _ ` | ~";
+
+/** Headers the MCP transport or fetch set themselves, or that would break the connection. */
+export const RESERVED_MCP_HEADERS: ReadonlySet<string> = new Set([
+  "host",
+  "content-length",
+  "content-type",
+  "content-encoding",
+  "accept",
+  "accept-encoding",
+  "connection",
+  "keep-alive",
+  "transfer-encoding",
+  "te",
+  "trailer",
+  "upgrade",
+  "expect",
+  "mcp-session-id",
+  "mcp-protocol-version",
+  "last-event-id",
+  "cookie",
+]);
+
+/** The header or query parameter name a stored value is sent under. */
+export const mcpSecretTargetName = (secret: {
+  name: string;
+  placement: McpSecretPlacement;
+  target?: string;
+}): string =>
+  secret.placement === "bearer" ? "Authorization" : secret.target || secret.name;
+
+/**
+ * Header rules checked on save, with messages that name the header:
+ * a valid HTTP token, not one the transport sets, each name once
+ * (case-insensitive), and no Authorization header with OAuth sign-in.
+ * Never looks at values.
+ */
+export function mcpHeaderErrors(config: {
+  auth: "none" | "oauth";
+  secrets: ReadonlyArray<{ name: string; placement: McpSecretPlacement; target?: string }>;
+}): string[] {
+  const errors: string[] = [];
+  const seenHeaders = new Set<string>();
+  const seenQuery = new Set<string>();
+  for (const secret of config.secrets) {
+    const name = mcpSecretTargetName(secret).trim();
+    if (!name) {
+      errors.push("Enter a name for each header.");
+      continue;
+    }
+    if (!HTTP_TOKEN.test(name)) {
+      errors.push(`${HEADER_NAME_RULE}: "${name.slice(0, 64)}"`);
+      continue;
+    }
+    const key = name.toLowerCase();
+    if (secret.placement === "query") {
+      if (seenQuery.has(key)) errors.push(`Use each query parameter once: ${name}`);
+      seenQuery.add(key);
+      continue;
+    }
+    if (RESERVED_MCP_HEADERS.has(key)) {
+      errors.push(`The connection sets ${name} itself. Use another header name.`);
+    } else if (seenHeaders.has(key)) {
+      errors.push(`Use each header name once: ${name}`);
+    } else if (key === "authorization" && config.auth === "oauth") {
+      errors.push(
+        "OAuth sign-in sets the Authorization header. Remove the Authorization row or set sign-in to None."
+      );
+    }
+    seenHeaders.add(key);
+  }
+  return errors;
+}
+
+export type McpSecretModel = z.infer<typeof McpSecretSchema>;
+/**
+ * One header row (or a legacy bearer / query record). For header rows the
+ * form sets `name` and `target` to the header name.
+ */
+export const McpSecretSchema = z
+  .object({
+    id: z.string(),
+    name: z
+      .string()
+      .min(1, { message: "Enter a name for each header." })
+      .max(128, { message: "Header names can have up to 128 characters." })
+      .regex(HTTP_TOKEN, { message: HEADER_NAME_RULE }),
+    // In Cosmos this is always the Key Vault mask; the value lives in Key Vault.
+    value: z.string().min(1, { message: "Enter a value for each header." }),
+    placement: McpSecretPlacementSchema,
+    target: z
+      .union([
+        z.literal(""),
+        z.string().max(128).regex(HTTP_TOKEN, { message: HEADER_NAME_RULE }),
+      ])
+      .optional(),
+  })
+  .refine(
+    (s) =>
+      s.placement === "query" ||
+      !RESERVED_MCP_HEADERS.has(mcpSecretTargetName(s).toLowerCase()),
+    { message: "The connection sets this header itself. Use another header name." }
+  );
+
+export type McpToolInfo = z.infer<typeof McpToolInfoSchema>;
+export const McpToolInfoSchema = z.object({
+  name: z.string().min(1).max(256),
+  description: z.string().optional(),
+  inputSchema: z.record(z.string(), z.unknown()).optional(),
+});
+
+export type McpOAuthConfig = z.infer<typeof McpOAuthConfigSchema>;
+/** OAuth settings of the server. Sign-ins are per user and live in Key Vault, not here. */
+export const McpOAuthConfigSchema = z.object({
+  /** Pre-registered client id. Empty: the app registers itself (dynamic client registration). */
+  clientId: z.string().max(512).optional(),
+  /** Key Vault mask when a client secret is stored; empty when there is none. */
+  clientSecret: z.string().max(4096).optional(),
+  /** Space-separated scopes to request. Empty: the server's default. */
+  scopes: z.string().max(1024).optional(),
+});
+
+export type McpConfigModel = z.infer<typeof McpConfigSchema>;
+export const McpConfigSchema = z.object({
+  url: z
+    .string()
+    .min(1, { message: "Server URL cannot be empty" })
+    .max(2048, { message: "Server URL is too long" })
+    .refine((u) => {
+      try {
+        return new URL(u).protocol === "https:";
+      } catch {
+        return false;
+      }
+    }, "Server URL must be a valid https URL"),
+  transport: McpTransportSchema,
+  secrets: z.array(McpSecretSchema).max(20, { message: "Use up to 20 headers." }),
+  /** Tool names the model may use. Empty: all tools of the server. */
+  toolAllowList: z.array(z.string().min(1).max(256)).max(200),
+  /** Tools found on the server at the last discovery. Server-managed. */
+  tools: z.array(McpToolInfoSchema).max(200).optional(),
+  toolsDiscoveredAt: z.coerce.date().optional(),
+  auth: z.enum(["none", "oauth"]),
+  oauth: McpOAuthConfigSchema.optional(),
+});
+
 export const ExtensionModelSchema = z.object({
   id: z.string(),
   name: z
@@ -83,4 +252,12 @@ export const ExtensionModelSchema = z.object({
   createdAt: z.date(),
   functions: z.array(ExtensionFunctionSchema), // validation is done in the function schema
   type: z.literal(EXTENSION_ATTRIBUTE),
+  /** Missing on extensions saved before Remote MCP support: read as "http". */
+  kind: ExtensionKindSchema.optional(),
+  /** Set only when kind === "mcp". */
+  mcp: McpConfigSchema.optional(),
 });
+
+/** The kind of an extension; documents saved before the field existed are HTTP extensions. */
+export const extensionKind = (extension: { kind?: ExtensionKind }): ExtensionKind =>
+  extension.kind ?? "http";

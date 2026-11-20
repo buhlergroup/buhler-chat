@@ -2,6 +2,7 @@ import "server-only";
 
 import type { DefaultTools } from "@/features/chat-page/chat-services/models";
 import type { ExtensionModel } from "@/features/extensions-page/extension-services/models";
+import type { McpConnectionOptions } from "@/features/extensions-page/extension-services/mcp/mcp-client";
 
 /**
  * Context threaded through buildToolset and every tool execute closure.
@@ -25,14 +26,23 @@ export interface ToolContext {
    * model answers in the user's local time; falls back to server UTC.
    */
   clientDateTime?: string;
-  /** Extension records resolved at the callsite (headers already in secrets). */
-  extensions: Array<{ extension: ExtensionModel; headerSecrets: Record<string, string> }>;
   /**
-   * IDs of sub-agents (child personas) this thread can invoke. When empty
-   * or undefined the sub-agent tools (`call_sub_agent`, `search_sub_agent`)
-   * are NOT registered — without this the AI SDK would register a real
-   * `execute()` that throws "agent not found" for any caller, racing the
-   * provider-executed inline result a fake provider may emit (#37).
+   * Extension records resolved at the callsite (headers already in secrets).
+   * Only extensions that passed the access rule in extension-access.ts.
+   * `mcp` holds the connection (URL, secret headers, OAuth) of a Remote MCP
+   * extension; it carries secret values and must never be logged.
+   */
+  extensions: Array<{
+    extension: ExtensionModel;
+    headerSecrets: Record<string, string>;
+    mcp?: McpConnectionOptions;
+    /** Agent that granted access; carried into the per-user "Connect" action. */
+    personaId?: string;
+  }>;
+  /**
+   * IDs of the sub-agents (child personas) configured on this thread or
+   * agent. `call_sub_agent` can reach any agent the user can open, but only
+   * these run with their own extensions.
    */
   subAgentIds?: string[];
   /**
@@ -41,4 +51,14 @@ export interface ToolContext {
    * Max depth before tools are omitted: 2.
    */
   depth?: number;
+}
+
+/**
+ * The configured sub-agents of a context: those on the thread (or, one level
+ * down, on the calling agent). The model picks `agent_id`, and tool output
+ * can steer the model, so an agent outside this set runs without extensions
+ * even when the user can open it.
+ */
+export function allowedSubAgentIds(ctx: Pick<ToolContext, "subAgentIds">): ReadonlySet<string> {
+  return new Set((ctx.subAgentIds ?? []).filter((id) => typeof id === "string" && id.length > 0));
 }

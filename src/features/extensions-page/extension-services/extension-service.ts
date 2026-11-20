@@ -1,6 +1,10 @@
 "use server";
 import "server-only";
 
+// Every export of this file is a server action a browser can call: only
+// async functions, no re-exports, and no function that returns a secret
+// value (those live in extension-secrets.ts / extension-runtime.ts).
+
 import {
   getCurrentUser,
   userHashedId,
@@ -17,65 +21,139 @@ import {
   zodErrorsToServerActionErrors,
 } from "@/features/common/server-action-response";
 import { HistoryContainer } from "@/features/common/services/cosmos";
-import { AzureKeyVaultInstance } from "@/features/common/services/key-vault";
+import { logWarn } from "@/features/common/services/logger";
 import { uniqueId } from "@/features/common/util";
 import { AI_NAME, CHAT_DEFAULT_PERSONA } from "@/features/theme/theme-config";
 import { SqlQuerySpec } from "@azure/cosmos";
+import { keyVaultSecretStore, MCP_EXTENSION_TAG, type SecretStore } from "./extension-secrets";
+import {
+  extensionSecretNames,
+  planHeaders,
+  planMcpConfig,
+  type SecretPlan,
+} from "./extension-save";
+import { extensionCredentialInfo, type ExtensionCredentialInfo } from "./extension-credentials";
+import { findUsableExtension } from "./extension-runtime";
+import { discoverMcpTools } from "./mcp/mcp-discovery";
+import { hasMcpUserTokens } from "./mcp/mcp-oauth";
 import {
   EXTENSION_ATTRIBUTE,
   ExtensionModel,
   ExtensionModelSchema,
+  extensionKind,
+  mcpHeaderErrors,
 } from "./models";
 
-const KEY_VAULT_MASK = "**********";
+const queryById = async (id: string): Promise<ExtensionModel | undefined> => {
+  const querySpec: SqlQuerySpec = {
+    query: "SELECT * FROM root r WHERE r.type=@type AND r.id=@id",
+    parameters: [
+      { name: "@type", value: EXTENSION_ATTRIBUTE },
+      { name: "@id", value: id },
+    ],
+  };
+  const { resources } = await HistoryContainer()
+    .items.query<ExtensionModel>(querySpec)
+    .fetchAll();
+  return resources[0];
+};
 
+/**
+ * What a user who does not own an extension may see of it: name and
+ * description. No endpoints, function code, headers, MCP URL or secret
+ * names. Used where extensions of others reach the browser (a chat with a
+ * shared agent, published extensions for non-admins).
+ */
+const toPublicView = (extension: ExtensionModel): ExtensionModel => ({
+  id: extension.id,
+  name: extension.name,
+  description: extension.description,
+  executionSteps: "",
+  headers: [],
+  functions: [],
+  userId: extension.userId,
+  isPublished: extension.isPublished,
+  createdAt: extension.createdAt,
+  type: extension.type,
+  kind: extension.kind,
+});
+
+const notFound = (id: string): ServerActionResponse<never> => ({
+  status: "NOT_FOUND",
+  errors: [{ message: `Extension not found with id: ${id}` }],
+});
+
+/**
+ * One extension for its owner, an admin, or anyone when it is published.
+ * Everyone else gets NOT_FOUND (also when it exists), so ids cannot be
+ * probed for configuration.
+ */
 export const FindExtensionByID = async (
   id: string
 ): Promise<ServerActionResponse<ExtensionModel>> => {
   try {
-    const querySpec: SqlQuerySpec = {
-      query: "SELECT * FROM root r WHERE r.type=@type AND r.id=@id",
-      parameters: [
-        {
-          name: "@type",
-          value: EXTENSION_ATTRIBUTE,
-        },
-        {
-          name: "@id",
-          value: id,
-        },
-      ],
-    };
+    const extension = await queryById(id);
+    if (!extension) return notFound(id);
 
-    const { resources } = await HistoryContainer()
-      .items.query<ExtensionModel>(querySpec)
-      .fetchAll();
-
-    if (resources.length === 0) {
-      return {
-        status: "NOT_FOUND",
-        errors: [
-          {
-            message: `Extension not found with id: ${id}`,
-          },
-        ],
-      };
+    const [user, hashedId] = await Promise.all([getCurrentUser(), userHashedId()]);
+    if (extension.userId === hashedId || user.isAdmin) {
+      return { status: "OK", response: extension };
     }
-
-    return {
-      status: "OK",
-      response: resources[0]!,
-    };
+    if (extension.isPublished) {
+      return { status: "OK", response: toPublicView(extension) };
+    }
+    return notFound(id);
   } catch (error) {
     return {
       status: "ERROR",
-      errors: [
-        {
-          message: `Error finding Extension: ${error}`,
-        },
-      ],
+      errors: [{ message: `Error finding Extension: ${error}` }],
     };
   }
+};
+
+const applySecretPlan = async (plan: SecretPlan, store: SecretStore) => {
+  for (const write of plan.writes) {
+    await store.set(write.name, write.value);
+  }
+  for (const name of plan.deletes) {
+    await store.remove(name).catch((error) =>
+      logWarn("extension-service: secret delete failed", { name, error: String(error) })
+    );
+  }
+};
+
+const mergePlans = (...plans: SecretPlan[]): SecretPlan => ({
+  writes: plans.flatMap((p) => p.writes),
+  deletes: plans.flatMap((p) => p.deletes),
+  errors: plans.flatMap((p) => p.errors),
+});
+
+/**
+ * Best effort: read the tool list right after a save so the owner sees it
+ * and chats do not have to ask the server each turn. A failure (server
+ * down, OAuth not connected yet) keeps the save; the owner can retry with
+ * "Refresh tools".
+ */
+const discoverAfterSave = async (
+  extension: ExtensionModel,
+  store: SecretStore
+): Promise<ExtensionModel> => {
+  if (extensionKind(extension) !== "mcp" || !extension.mcp) return extension;
+  // OAuth servers: the stored list is the owner's, so it needs the owner's sign-in.
+  if (
+    extension.mcp.auth === "oauth" &&
+    !(await hasMcpUserTokens(store, extension.id, extension.mcp.url, extension.userId))
+  ) {
+    return extension;
+  }
+  const result = await discoverMcpTools(extension, store);
+  if (!result.ok) return extension;
+  const updated: ExtensionModel = {
+    ...extension,
+    mcp: { ...extension.mcp, tools: result.tools, toolsDiscoveredAt: new Date() },
+  };
+  const { resource } = await HistoryContainer().items.upsert<ExtensionModel>(updated);
+  return resource ?? updated;
 };
 
 export const CreateExtension = async (
@@ -83,18 +161,30 @@ export const CreateExtension = async (
 ): Promise<ServerActionResponse<ExtensionModel>> => {
   try {
     const user = await getCurrentUser();
+    const id = uniqueId();
+    const kind = extensionKind(inputModel);
 
     // ensure to reset the id's since they are generated on the client
-    inputModel.headers.map((h) => {
-      h.id = uniqueId();
-    });
+    const headerResult = planHeaders(
+      kind === "mcp" ? [] : inputModel.headers.map((h) => ({ ...h, id: "" })),
+      [],
+      uniqueId
+    );
+    // A mask on a new header has nothing to point at; keep the old
+    // behaviour (no value written) instead of failing the save.
+    headerResult.plan.errors = [];
 
     inputModel.functions.map((f) => {
       f.id = uniqueId();
     });
 
+    const mcpResult =
+      kind === "mcp" && inputModel.mcp
+        ? planMcpConfig(id, inputModel.mcp, undefined, uniqueId)
+        : undefined;
+
     const modelToSave: ExtensionModel = {
-      id: uniqueId(),
+      id,
       name: inputModel.name,
       executionSteps: inputModel.executionSteps,
       description: inputModel.description,
@@ -102,14 +192,22 @@ export const CreateExtension = async (
       userId: await userHashedId(),
       createdAt: new Date(),
       type: "EXTENSION",
-      functions: inputModel.functions,
-      headers: inputModel.headers,
+      functions: kind === "mcp" ? [] : inputModel.functions,
+      headers: headerResult.headers,
+      kind,
+      ...(mcpResult ? { mcp: mcpResult.config } : {}),
     };
+
+    const plan = mergePlans(headerResult.plan, mcpResult?.plan ?? mergePlans());
+    if (plan.errors.length > 0) {
+      return { status: "ERROR", errors: plan.errors.map((message) => ({ message })) };
+    }
 
     const validatedFields = validateSchema(modelToSave);
 
     if (validatedFields.status === "OK") {
-      await secureHeaderValues(modelToSave);
+      const store = keyVaultSecretStore();
+      await applySecretPlan(plan, store);
 
       const { resource } =
         await HistoryContainer().items.create<ExtensionModel>(modelToSave);
@@ -117,7 +215,7 @@ export const CreateExtension = async (
       if (resource) {
         return {
           status: "OK",
-          response: resource,
+          response: await discoverAfterSave(resource, store),
         };
       } else {
         return {
@@ -144,33 +242,22 @@ export const CreateExtension = async (
   }
 };
 
-const secureHeaderValues = async (extension: ExtensionModel) => {
-  const vault = AzureKeyVaultInstance();
-
-  const headers = extension.headers.map(async (h) => {
-    if (h.value !== KEY_VAULT_MASK) {
-      await vault.setSecret(h.id, h.value);
-      h.value = KEY_VAULT_MASK;
-    }
-
-    return h;
-  });
-
-  await Promise.all(headers);
-
-  return extension;
-};
-
+/**
+ * Edit, delete and the MCP sign-in are for the extension OWNER (and admins,
+ * who moderate published extensions). Access through a shared or published
+ * agent never passes this check: such users may use the tools in a chat,
+ * nothing more.
+ */
 export const EnsureExtensionOperation = async (
   id: string
 ): Promise<ServerActionResponse<ExtensionModel>> => {
-  const extensionResponse = await FindExtensionByID(id);
+  const extension = await queryById(id).catch(() => undefined);
   const currentUser = await getCurrentUser();
   const hashedId = await userHashedId();
 
-  if (extensionResponse.status === "OK") {
-    if (currentUser.isAdmin || extensionResponse.response.userId === hashedId) {
-      return extensionResponse;
+  if (extension) {
+    if (currentUser.isAdmin || extension.userId === hashedId) {
+      return { status: "OK", response: extension };
     }
   }
 
@@ -184,42 +271,6 @@ export const EnsureExtensionOperation = async (
   };
 };
 
-// This function must only be used to retrieve the value within the APIs and Server functions.
-// It should never be used to retrieve the value in the client.
-export const FindSecureHeaderValue = async (
-  headerId: string
-): Promise<ServerActionResponse<string>> => {
-  try {
-    const vault = AzureKeyVaultInstance();
-    const secret = await vault.getSecret(headerId);
-
-    if (secret.value) {
-      return {
-        status: "OK",
-        response: secret.value,
-      };
-    }
-
-    return {
-      status: "ERROR",
-      errors: [
-        {
-          message: `Error finding secret: ${secret.value}`,
-        },
-      ],
-    };
-  } catch (error) {
-    return {
-      status: "ERROR",
-      errors: [
-        {
-          message: `Error finding secret: ${error}`,
-        },
-      ],
-    };
-  }
-};
-
 export const DeleteExtension = async (
   id: string
 ): Promise<ServerActionResponse<ExtensionModel>> => {
@@ -227,10 +278,26 @@ export const DeleteExtension = async (
     const extensionResponse = await EnsureExtensionOperation(id);
 
     if (extensionResponse.status === "OK") {
-      const vault = AzureKeyVaultInstance();
-      extensionResponse.response.headers.map(async (h) => {
-        await vault.beginDeleteSecret(h.id);
-      });
+      const store = keyVaultSecretStore();
+      // Agents that still list this id keep working: the access rule skips
+      // ids that no longer exist, and the agent editor shows a notice.
+      await Promise.all(
+        extensionSecretNames(extensionResponse.response).map((name) =>
+          store.remove(name).catch(() => undefined)
+        )
+      );
+      // Per-user OAuth tokens and pending sign-ins of every user, found by
+      // their extension tag. Best effort: a failure (e.g. no "list"
+      // permission on the vault) must not block the delete; the records are
+      // useless without the extension and are logged for cleanup.
+      if (extensionResponse.response.kind === "mcp") {
+        await store.removeTagged(MCP_EXTENSION_TAG, id).catch((error) =>
+          logWarn("DeleteExtension: per-user MCP sign-ins not removed", {
+            extensionId: id,
+            error: String(error),
+          })
+        );
+      }
 
       const { resource } = await HistoryContainer()
         .item(id, extensionResponse.response.userId)
@@ -274,19 +341,25 @@ export const UpdateExtension = async (
     const user = await getCurrentUser();
 
     if (extensionResponse.status === "OK") {
+      const stored = extensionResponse.response;
+      // The kind is fixed at creation.
+      const kind = extensionKind(stored);
+
       inputModel.isPublished = user.isAdmin
         ? inputModel.isPublished
-        : extensionResponse.response.isPublished;
+        : stored.isPublished;
 
-      inputModel.userId = extensionResponse.response.userId;
+      inputModel.userId = stored.userId;
       inputModel.createdAt = new Date();
       inputModel.type = "EXTENSION";
+      inputModel.kind = kind;
 
-      inputModel.headers.map((h) => {
-        if (!h.id) {
-          h.id = uniqueId();
-        }
-      });
+      const headerResult = planHeaders(
+        kind === "mcp" ? [] : inputModel.headers,
+        stored.headers,
+        uniqueId
+      );
+      inputModel.headers = headerResult.headers;
 
       inputModel.functions.map((f) => {
         if (!f.id) {
@@ -294,11 +367,30 @@ export const UpdateExtension = async (
         }
       });
 
+      let mcpPlan: SecretPlan = mergePlans();
+      if (kind === "mcp") {
+        inputModel.functions = [];
+        if (!inputModel.mcp) {
+          return { status: "ERROR", errors: [{ message: "Server URL cannot be empty" }] };
+        }
+        const mcpResult = planMcpConfig(stored.id, inputModel.mcp, stored.mcp, uniqueId);
+        inputModel.mcp = mcpResult.config;
+        mcpPlan = mcpResult.plan;
+      } else {
+        delete inputModel.mcp;
+      }
+
+      const plan = mergePlans(headerResult.plan, mcpPlan);
+      if (plan.errors.length > 0) {
+        return { status: "ERROR", errors: plan.errors.map((message) => ({ message })) };
+      }
+
       // schema validation
       const validatedFields = validateSchema(inputModel);
 
       if (validatedFields.status === "OK") {
-        await secureHeaderValues(inputModel);
+        const store = keyVaultSecretStore();
+        await applySecretPlan(plan, store);
 
         const { resource } =
           await HistoryContainer().items.upsert<ExtensionModel>(inputModel);
@@ -306,7 +398,7 @@ export const UpdateExtension = async (
         if (resource) {
           return {
             status: "OK",
-            response: resource,
+            response: await discoverAfterSave(resource, store),
           };
         } else {
           return {
@@ -340,6 +432,7 @@ export const FindAllExtensionForCurrentUser = async (): Promise<
   ServerActionResponse<Array<ExtensionModel>>
 > => {
   try {
+    const hashedId = await userHashedId();
     const querySpec: SqlQuerySpec = {
       query:
         "SELECT * FROM root r WHERE r.type=@type AND (r.isPublished=@isPublished OR r.userId=@userId) ORDER BY r.createdAt DESC",
@@ -354,7 +447,7 @@ export const FindAllExtensionForCurrentUser = async (): Promise<
         },
         {
           name: "@userId",
-          value: await userHashedId(),
+          value: hashedId,
         },
       ],
     };
@@ -363,9 +456,15 @@ export const FindAllExtensionForCurrentUser = async (): Promise<
       .items.query<ExtensionModel>(querySpec)
       .fetchAll();
 
+    // Admins edit published extensions, so they get the full config (secret
+    // values are always masks). Other users only see what they need to pick
+    // an extension of someone else.
+    const user = await getCurrentUser();
     return {
       status: "OK",
-      response: resources,
+      response: user.isAdmin
+        ? resources
+        : resources.map((e) => (e.userId === hashedId ? e : toPublicView(e))),
     };
   } catch (error) {
     return {
@@ -379,10 +478,17 @@ export const FindAllExtensionForCurrentUser = async (): Promise<
   }
 };
 
+/**
+ * Extensions shown in a chat (header menu): the user's own, published ones,
+ * and the ids configured on the thread. This list is for DISPLAY only and
+ * extensions of other users come as a public view. Which tools a chat may
+ * use is decided per turn by resolveExtensionsForChat (extension-access.ts).
+ */
 export const FindAllExtensionForCurrentUserAndIds = async (extensionIds:string[]): Promise<
   ServerActionResponse<Array<ExtensionModel>>
 > => {
   try {
+    const hashedId = await userHashedId();
     const querySpec: SqlQuerySpec = {
       query:
         "SELECT * FROM root r WHERE r.type=@type AND (r.isPublished=@isPublished OR r.userId=@userId OR ARRAY_CONTAINS(@ids, r.id,false) ) ORDER BY r.createdAt DESC",
@@ -397,7 +503,7 @@ export const FindAllExtensionForCurrentUserAndIds = async (extensionIds:string[]
         },
         {
           name: "@userId",
-          value: await userHashedId(),
+          value: hashedId,
         },
         {
           name: "@ids",
@@ -412,7 +518,7 @@ export const FindAllExtensionForCurrentUserAndIds = async (extensionIds:string[]
 
     return {
       status: "OK",
-      response: resources,
+      response: resources.map((e) => (e.userId === hashedId ? e : toPublicView(e))),
     };
   } catch (error) {
     return {
@@ -423,6 +529,61 @@ export const FindAllExtensionForCurrentUserAndIds = async (extensionIds:string[]
         },
       ],
     };
+  }
+};
+
+/**
+ * Of the given extension ids, the ones that no longer exist (deleted by
+ * their owner). The agent editor uses this for its notice. Reveals only
+ * existence, no content.
+ */
+export const FindMissingExtensionIds = async (
+  extensionIds: string[]
+): Promise<ServerActionResponse<string[]>> => {
+  try {
+    const ids = [...new Set((extensionIds ?? []).filter((id) => typeof id === "string"))].slice(0, 100);
+    if (ids.length === 0) return { status: "OK", response: [] };
+    const querySpec: SqlQuerySpec = {
+      query: "SELECT VALUE r.id FROM root r WHERE r.type=@type AND ARRAY_CONTAINS(@ids, r.id)",
+      parameters: [
+        { name: "@type", value: EXTENSION_ATTRIBUTE },
+        { name: "@ids", value: ids },
+      ],
+    };
+    const { resources } = await HistoryContainer().items.query<string>(querySpec).fetchAll();
+    const existing = new Set(resources);
+    return { status: "OK", response: ids.filter((id) => !existing.has(id)) };
+  } catch (error) {
+    return {
+      status: "ERROR",
+      errors: [{ message: `Error finding Extension: ${error}` }],
+    };
+  }
+};
+
+/**
+ * For each extension id the current user may use (owner, published, or
+ * through `personaId`): does it send secret values its owner stored, and
+ * does the current user own it. Booleans only, for the notices in the agent
+ * editor and the chat; ids the user may not use are left out.
+ */
+export const GetExtensionCredentialInfo = async (
+  extensionIds: string[],
+  personaId?: string
+): Promise<ServerActionResponse<ExtensionCredentialInfo[]>> => {
+  try {
+    const ids = [...new Set((Array.isArray(extensionIds) ? extensionIds : []).filter((id) => typeof id === "string"))].slice(0, 50);
+    const agentId = typeof personaId === "string" && personaId ? personaId : undefined;
+    const userId = await userHashedId();
+    const result: ExtensionCredentialInfo[] = [];
+    for (const id of ids) {
+      const extension = await findUsableExtension({ extensionId: id, personaId: agentId, userId });
+      if (extension) result.push(extensionCredentialInfo(extension, userId));
+    }
+    return { status: "OK", response: result };
+  } catch (error) {
+    logWarn("GetExtensionCredentialInfo failed", { errorName: (error as { name?: string })?.name });
+    return { status: "ERROR", errors: [{ message: "Could not read the extension details." }] };
   }
 };
 
@@ -473,6 +634,14 @@ export const CreateChatWithExtension = async (
 };
 
 const validateSchema = (model: ExtensionModel): ServerActionResponse => {
+  // Header rules first: their messages name the header.
+  if (extensionKind(model) === "mcp" && model.mcp) {
+    const headerErrors = mcpHeaderErrors(model.mcp);
+    if (headerErrors.length > 0) {
+      return { status: "ERROR", errors: headerErrors.map((message) => ({ message })) };
+    }
+  }
+
   const validatedFields = ExtensionModelSchema.safeParse(model);
 
   if (!validatedFields.success) {
@@ -480,6 +649,13 @@ const validateSchema = (model: ExtensionModel): ServerActionResponse => {
       status: "ERROR",
       errors: zodErrorsToServerActionErrors(validatedFields.error.issues),
     };
+  }
+
+  if (extensionKind(model) === "mcp") {
+    if (!model.mcp) {
+      return { status: "ERROR", errors: [{ message: "Server URL cannot be empty" }] };
+    }
+    return { status: "OK", response: model };
   }
 
   return validateFunctionSchema(model);
@@ -492,7 +668,7 @@ const validateFunctionSchema = (
 
   for (let i = 0; i < model.functions.length; i++) {
     const f = model.functions[i];
-    
+
     // Validate function name from the dedicated field
     const name = f.functionName;
     const findName = functionNames.find((n) => n === name);

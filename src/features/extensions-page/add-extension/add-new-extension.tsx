@@ -25,6 +25,7 @@ import {
 import { AddFunction } from "./add-function";
 import { EndpointHeader } from "./endpoint-header";
 import { ErrorMessages } from "./error-messages";
+import { McpServerSection } from "./mcp-server";
 
 interface Props {}
 
@@ -61,16 +62,25 @@ export const AddExtension: FC<Props> = (props) => {
     >
       <SheetContent className="min-w-[680px] flex flex-col">
         <SheetHeader>
-          <SheetTitle>Extension</SheetTitle>
+          <SheetTitle>
+            {extension.kind === "mcp" ? "Remote MCP server" : "Extension"}
+          </SheetTitle>
         </SheetHeader>
-        <form action={formAction} className="flex-1 flex flex-col ">
+        <form
+          action={formAction}
+          className="flex-1 flex flex-col "
+          onChange={() => extensionStore.clearSaveNotice()}
+        >
           <ScrollArea
             className="h-full -mx-6 max-h-[calc(100vh-140px)]"
             type="always"
           >
             <div className="pb-6 px-6 flex gap-8 flex-col">
               <ErrorMessages />
-              <input type="hidden" name="id" defaultValue={extension.id} />
+              {/* Controlled: after the first save of an MCP extension the sheet
+                  stays open and the next save must update, not create. */}
+              <input type="hidden" name="id" value={extension.id} />
+              <input type="hidden" name="kind" value={extension.kind ?? "http"} />
               <div className="grid gap-2">
                 <Label>Name</Label>
                 <Input
@@ -100,8 +110,14 @@ export const AddExtension: FC<Props> = (props) => {
                   placeholder="Describe specialties and the steps to execute the extension"
                 />
               </div>
-              <EndpointHeader />
-              <AddFunction />
+              {extension.kind === "mcp" ? (
+                <McpServerSection />
+              ) : (
+                <>
+                  <EndpointHeader />
+                  <AddFunction />
+                </>
+              )}
             </div>
           </ScrollArea>
           <SheetFooter className="py-2 flex sm:justify-between flex-row">
@@ -115,11 +131,18 @@ export const AddExtension: FC<Props> = (props) => {
 };
 
 function Submit() {
-  const { isLoading } = useExtensionState();
+  const { isLoading, saveNotice } = useExtensionState();
   return (
-    <Button disabled={isLoading} className="gap-2">
-      <LoadingIndicator isLoading={isLoading} />
-      Save
-    </Button>
+    <div className="flex items-center gap-3">
+      {saveNotice && (
+        <span className="text-sm text-muted-foreground" role="status">
+          {saveNotice}
+        </span>
+      )}
+      <Button disabled={isLoading} className="gap-2">
+        <LoadingIndicator isLoading={isLoading} />
+        Save
+      </Button>
+    </div>
   );
 }

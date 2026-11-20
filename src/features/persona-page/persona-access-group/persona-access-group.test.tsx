@@ -181,3 +181,31 @@ describe("persona-page.unit.components.008 — PersonaAccessGroup", () => {
     ).toBeInTheDocument();
   });
 });
+
+// Pinned: the agent owner learns that sharing an agent shares the stored
+// credentials of its extensions, as soon as the agent is shared or published.
+describe("PersonaAccessGroup — shared notice", () => {
+  const notice = <div data-testid="shared-notice">stored credentials</div>;
+
+  it("hides the notice while only the owner can use the agent", () => {
+    render(<PersonaAccessGroup {...defaultProps} sharedNotice={notice} />);
+    expect(screen.queryByTestId("shared-notice")).not.toBeInTheDocument();
+  });
+
+  it("shows the notice when the owner turns on publishing", async () => {
+    render(<PersonaAccessGroup {...defaultProps} sharedNotice={notice} />);
+    await userEvent.click(screen.getByRole("switch"));
+    expect(screen.getByTestId("shared-notice")).toBeInTheDocument();
+  });
+
+  it("shows the notice when the owner selects a group", async () => {
+    render(<PersonaAccessGroup {...defaultProps} sharedNotice={notice} />);
+    await userEvent.click(screen.getByTestId("group-selector"));
+    expect(screen.getByTestId("shared-notice")).toBeInTheDocument();
+  });
+
+  it("shows the notice for an agent that is already published", () => {
+    render(<PersonaAccessGroup {...defaultProps} initialIsPublished sharedNotice={notice} />);
+    expect(screen.getByTestId("shared-notice")).toBeInTheDocument();
+  });
+});

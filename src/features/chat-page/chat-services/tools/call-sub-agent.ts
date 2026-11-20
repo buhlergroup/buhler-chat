@@ -11,7 +11,8 @@ import { resolveReasoningEffort } from "../models/reasoning-effort";
 import { toolsetSignature } from "../models/prompt-cache-key";
 import { stabilizeToolset } from "./stabilize-toolset";
 import { computeTokenCostUsd } from "../chat-api/usage-data";
-import type { ToolContext } from "./tool-context";
+import { allowedSubAgentIds, type ToolContext } from "./tool-context";
+import { resolveExtensionsForChat } from "@/features/extensions-page/extension-services/extension-runtime";
 
 const MAX_SUB_AGENT_DEPTH = 2;
 
@@ -52,6 +53,16 @@ export function callSubAgentTool(ctx: ToolContext) {
         depth: ctx.depth ?? 0,
       });
 
+      // Any agent the user can open may be called (FindPersonaByID checks
+      // access), but only a configured sub-agent runs with its extensions.
+      const configured = allowedSubAgentIds(ctx).has(args.agent_id);
+      if (!configured) {
+        logInfo("callSubAgentTool: agent is not a configured sub-agent, running without extensions", {
+          agentId: args.agent_id,
+          depth: ctx.depth ?? 0,
+        });
+      }
+
       // Resolve persona
       const personaResponse = await FindPersonaByID(args.agent_id);
       if (personaResponse.status !== "OK") {
@@ -91,11 +102,21 @@ export function callSubAgentTool(ctx: ToolContext) {
           threadDocumentIds: ctx.threadDocumentIds,
           personaDocumentIds: persona.personaDocumentIds ?? [],
           defaultTools: persona.defaultTools ?? {},
-          extensions: [], // Sub-agents don't inherit thread extensions
-          // A sub-agent's own sub-agents are read off the persona; the
-          // tool only registers when the persona declares them, matching
-          // the top-level behaviour.
-          subAgentIds: persona.subAgentIds,
+          // A sub-agent does not inherit the thread's extensions. A sub-agent
+          // configured on the caller (ctx.subAgentIds) gets its OWN
+          // extensions under the same access rule as a chat with that agent
+          // (extension-access.ts). Any other agent, reached through discovery
+          // (the model picks agent_id, and tool output can steer it), runs
+          // without extensions.
+          extensions: configured
+            ? await resolveExtensionsForChat({
+                extensionIds: persona.extensionIds ?? [],
+                personaId: persona.id,
+              })
+            : [],
+          // A configured sub-agent's own configured sub-agents may use their
+          // extensions too; below a discovered agent, none may.
+          subAgentIds: configured ? persona.subAgentIds : [],
           depth: currentDepth + 1,
         };
 

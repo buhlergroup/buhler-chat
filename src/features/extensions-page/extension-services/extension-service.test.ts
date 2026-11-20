@@ -38,6 +38,7 @@ vi.mock("@/features/auth-page/auth-api", () => ({ options: {}, authOptions: {} }
 const mockKvSetSecret = vi.fn();
 const mockKvGetSecret = vi.fn();
 const mockKvBeginDeleteSecret = vi.fn();
+const mockKvList = vi.fn((): Array<{ name: string; tags?: Record<string, string> }> => []);
 
 vi.mock("@azure/keyvault-secrets", () => ({
   SecretClient: vi.fn().mockImplementation(function () {
@@ -45,6 +46,10 @@ vi.mock("@azure/keyvault-secrets", () => ({
       setSecret: mockKvSetSecret,
       getSecret: mockKvGetSecret,
       beginDeleteSecret: mockKvBeginDeleteSecret,
+      listPropertiesOfSecrets: () =>
+        (async function* () {
+          yield* mockKvList();
+        })(),
     };
   }),
 }));
@@ -62,18 +67,25 @@ vi.mock("@/features/common/services/logger", () => ({
   logInfo: vi.fn(),
   logError: vi.fn(),
   logDebug: vi.fn(),
+  logWarn: vi.fn(),
+}));
+
+const mockDiscover = vi.fn();
+vi.mock("./mcp/mcp-discovery", () => ({
+  discoverMcpTools: (...a: unknown[]) => mockDiscover(...a),
 }));
 
 import {
+  FindMissingExtensionIds,
   CreateExtension,
   FindExtensionByID,
   EnsureExtensionOperation,
-  FindSecureHeaderValue,
   DeleteExtension,
   UpdateExtension,
   FindAllExtensionForCurrentUser,
   FindAllExtensionForCurrentUserAndIds,
   CreateChatWithExtension,
+  GetExtensionCredentialInfo,
 } from "./extension-service";
 
 import { saveChatThread as UpsertChatThread } from "@/features/chat-page/chat-services/chat-thread-write";
@@ -270,21 +282,19 @@ describe("extension-service.ts", () => {
     expect(result.status).toBe("UNAUTHORIZED");
   });
 
-  // 012 – FindSecureHeaderValue returns the secret value
-  it("012 FindSecureHeaderValue returns the secret value", async () => {
-    mockKvGetSecret.mockResolvedValueOnce({ name: "h1", value: "shh" });
-    const result = await FindSecureHeaderValue("h1");
-    expect(result.status).toBe("OK");
-    if (result.status === "OK") {
-      expect(result.response).toBe("shh");
-    }
+  // 012 – secret reads are no longer a server action (a browser could call it)
+  it("012 extension-service exports no secret reader", async () => {
+    const mod = await import("./extension-service");
+    expect("FindSecureHeaderValue" in mod).toBe(false);
   });
 
-  // 013 – FindSecureHeaderValue returns ERROR when KV value empty/undefined
-  it("013 FindSecureHeaderValue returns ERROR when KV value empty", async () => {
+  // 013 – readExtensionSecret (server-only module) returns the Key Vault value
+  it("013 readExtensionSecret returns the value, undefined when empty", async () => {
+    const { readExtensionSecret } = await import("./extension-secrets");
+    mockKvGetSecret.mockResolvedValueOnce({ name: "h1", value: "shh" });
+    expect(await readExtensionSecret("h1")).toBe("shh");
     mockKvGetSecret.mockResolvedValueOnce({ name: "h1", value: "" });
-    const result = await FindSecureHeaderValue("h1");
-    expect(result.status).toBe("ERROR");
+    expect(await readExtensionSecret("h1")).toBeUndefined();
   });
 
   // 014 – DeleteExtension deletes secrets and the doc
@@ -391,5 +401,238 @@ describe("extension-service.ts", () => {
     if (result.status === "ERROR") {
       expect(result.errors.length).toBeGreaterThan(0);
     }
+  });
+
+  // ── Remote MCP + sharing (edit / delete stay with the owner) ──────────────
+  describe("owner-only management", () => {
+    // A user who reaches the extension through a shared or published agent
+    // is just "not the owner" here: the service has no agent path at all.
+    it("020 a non-owner (e.g. user of a shared agent) cannot delete the extension or its secrets", async () => {
+      seedExtension({ id: "ext-shared", userId: "agent-owner-hash", headers: [{ id: "hdr-x", key: "k", value: "**********" }] });
+      const result = await DeleteExtension("ext-shared");
+      expect(result.status).toBe("UNAUTHORIZED");
+      expect(mockKvBeginDeleteSecret).not.toHaveBeenCalled();
+      expect(historyItems).toHaveLength(1);
+    });
+
+    it("021 a non-owner cannot update the extension", async () => {
+      const ext = seedExtension({ id: "ext-shared", userId: "agent-owner-hash" });
+      const result = await UpdateExtension({ ...ext, name: "taken over" });
+      expect(result.status).toBe("UNAUTHORIZED");
+      expect(historyContainer.items.upsert).not.toHaveBeenCalled();
+    });
+
+    it("022 a non-owner gets NOT_FOUND for a private extension by id (no config leak)", async () => {
+      seedExtension({ id: "ext-private", userId: "agent-owner-hash" });
+      expect((await FindExtensionByID("ext-private")).status).toBe("NOT_FOUND");
+    });
+
+    it("023 chat display list shows only name and description of extensions of others", async () => {
+      seedExtension({
+        id: "ext-agent",
+        userId: "agent-owner-hash",
+        kind: "mcp",
+        functions: [],
+        mcp: {
+          url: "https://mcp.example.com/mcp",
+          transport: "auto",
+          secrets: [{ id: "s1", name: "TOKEN", value: "**********", placement: "bearer" }],
+          toolAllowList: [],
+          auth: "none",
+        },
+      });
+      const result = await FindAllExtensionForCurrentUserAndIds(["ext-agent"]);
+      expect(result.status).toBe("OK");
+      if (result.status === "OK") {
+        const view = result.response[0];
+        expect(view.name).toBe("Seed Extension");
+        expect(view.mcp).toBeUndefined();
+        expect(view.headers).toEqual([]);
+        expect(view.functions).toEqual([]);
+      }
+    });
+
+    it("024 update refuses another extension's header id sent with the mask", async () => {
+      const ext = seedExtension({ id: "ext-own" });
+      const result = await UpdateExtension({
+        ...ext,
+        headers: [{ id: "victim-kv-id", key: "X-Steal", value: "**********" }],
+      });
+      expect(result.status).toBe("ERROR");
+      expect(mockKvSetSecret).not.toHaveBeenCalled();
+    });
+  });
+
+  describe("Remote MCP extensions", () => {
+    const mcpInput = () => ({
+      ...validExtensionInput(),
+      functions: [],
+      headers: [],
+      kind: "mcp" as const,
+      mcp: {
+        url: "https://mcp.example.com/mcp",
+        transport: "auto" as const,
+        secrets: [
+          {
+            id: "client",
+            name: "Authorization",
+            target: "Authorization",
+            value: "fake-test-value",
+            placement: "header" as "bearer" | "header" | "query",
+          },
+        ],
+        toolAllowList: [],
+        auth: "none" as "none" | "oauth",
+      },
+    });
+
+    it("030 create stores the secret in Key Vault, keeps the mask, and stores discovered tools", async () => {
+      mockDiscover.mockResolvedValueOnce({ ok: true, tools: [{ name: "get_price" }] });
+      const result = await CreateExtension(mcpInput());
+      expect(result.status).toBe("OK");
+      expect(mockKvSetSecret).toHaveBeenCalledWith(expect.any(String), "fake-test-value");
+      if (result.status === "OK") {
+        expect(result.response.mcp?.secrets[0].value).toBe("**********");
+        expect(result.response.mcp?.tools).toEqual([{ name: "get_price" }]);
+        expect(JSON.stringify(result.response)).not.toContain("fake-test-value");
+      }
+    });
+
+    it("031 create keeps the extension when discovery fails", async () => {
+      mockDiscover.mockResolvedValueOnce({ ok: false, error: "The MCP server request failed." });
+      const result = await CreateExtension(mcpInput());
+      expect(result.status).toBe("OK");
+      if (result.status === "OK") expect(result.response.mcp?.tools).toBeUndefined();
+    });
+
+    it("032 create refuses a non-https server URL", async () => {
+      const input = mcpInput();
+      input.mcp.url = "http://mcp.example.com/mcp";
+      const result = await CreateExtension(input);
+      expect(result.status).toBe("ERROR");
+      expect(mockKvSetSecret).not.toHaveBeenCalled();
+    });
+
+    it("033 delete removes MCP secrets, the client registration and every user's sign-in", async () => {
+      mockKvList.mockReturnValueOnce([
+        { name: "mcp-tok-userA", tags: { mcpExtension: "mcpdel" } },
+        { name: "mcp-tok-userB", tags: { mcpExtension: "mcpdel" } },
+        { name: "mcp-tok-other", tags: { mcpExtension: "another-ext" } },
+        { name: "plain-header" },
+      ]);
+      seedExtension({
+        id: "mcpdel",
+        kind: "mcp",
+        headers: [],
+        functions: [],
+        mcp: { ...mcpInput().mcp, secrets: [{ id: "s1", name: "T", value: "**********", placement: "bearer" }], auth: "oauth" },
+      });
+      await DeleteExtension("mcpdel");
+      const deleted = mockKvBeginDeleteSecret.mock.calls.map((c) => c[0]);
+      expect(deleted).toEqual(
+        expect.arrayContaining(["s1", "mcpdel-mcp-oauth-client", "mcp-tok-userA", "mcp-tok-userB"])
+      );
+      expect(deleted).not.toContain("mcp-tok-other");
+      expect(deleted).not.toContain("plain-header");
+    });
+
+    it("035 delete still succeeds when the per-user sign-ins cannot be listed (best effort)", async () => {
+      mockKvList.mockImplementationOnce(() => {
+        throw new Error("Forbidden: list");
+      });
+      seedExtension({
+        id: "mcpdel2",
+        kind: "mcp",
+        headers: [],
+        functions: [],
+        mcp: { ...mcpInput().mcp, secrets: [], auth: "oauth" },
+      });
+      const deleteSpy = vi.fn().mockResolvedValue({ resource: { id: "mcpdel2" } });
+      historyContainer.item.mockImplementationOnce(() => ({ read: vi.fn(), delete: deleteSpy }));
+      const result = await DeleteExtension("mcpdel2");
+      expect(result.status).toBe("OK");
+      expect(deleteSpy).toHaveBeenCalled();
+    });
+
+    it("036 create refuses duplicate header names (case-insensitive) and stores nothing", async () => {
+      const input = mcpInput();
+      input.mcp.secrets.push({ ...input.mcp.secrets[0], id: "c2", name: "authorization", target: "authorization" });
+      const result = await CreateExtension(input);
+      expect(result.status).toBe("ERROR");
+      if (result.status === "ERROR") {
+        expect(result.errors[0].message).toBe("Use each header name once: authorization");
+        expect(JSON.stringify(result.errors)).not.toContain("fake-test-value");
+      }
+      expect(mockKvSetSecret).not.toHaveBeenCalled();
+    });
+
+    it("037 create refuses a header the transport sets itself", async () => {
+      const input = mcpInput();
+      input.mcp.secrets[0] = { ...input.mcp.secrets[0], name: "Mcp-Session-Id", target: "Mcp-Session-Id" };
+      const result = await CreateExtension(input);
+      expect(result.status).toBe("ERROR");
+      expect(mockKvSetSecret).not.toHaveBeenCalled();
+    });
+
+    it("038 create refuses an Authorization header with OAuth sign-in", async () => {
+      const input = mcpInput();
+      input.mcp.auth = "oauth";
+      const result = await CreateExtension(input);
+      expect(result.status).toBe("ERROR");
+      if (result.status === "ERROR") {
+        expect(result.errors[0].message).toMatch(/OAuth sign-in sets the Authorization header/);
+      }
+      expect(mockKvSetSecret).not.toHaveBeenCalled();
+    });
+
+    it("039 create refuses a new legacy bearer row", async () => {
+      const input = mcpInput();
+      input.mcp.secrets[0] = { ...input.mcp.secrets[0], name: "MCP_TOKEN", target: "", placement: "bearer" };
+      const result = await CreateExtension(input);
+      expect(result.status).toBe("ERROR");
+      expect(mockKvSetSecret).not.toHaveBeenCalled();
+    });
+
+    it("034 FindMissingExtensionIds lists ids that no longer exist", async () => {
+      historyContainer.items.query.mockImplementationOnce((_q: any) => ({
+        fetchAll: async () => ({ resources: ["still-here"] }),
+      }));
+      const result = await FindMissingExtensionIds(["still-here", "deleted-one"]);
+      expect(result).toEqual({ status: "OK", response: ["deleted-one"] });
+    });
+  });
+});
+
+// Pinned: the browser learns only booleans about stored credentials, and
+// only for extensions the user may use.
+describe("GetExtensionCredentialInfo", () => {
+  it("answers with booleans for usable extensions and leaves out the others", async () => {
+    seedExtension({
+      id: "pubmcp",
+      userId: "other-user",
+      isPublished: true,
+      functions: [],
+      headers: [],
+      kind: "mcp",
+      mcp: {
+        url: "https://mcp.example.com/mcp",
+        transport: "auto",
+        secrets: [{ id: "kv-row-1", name: "X-Hidden-Key", target: "X-Hidden-Key", placement: "header", value: "**********" }],
+        toolAllowList: [],
+        auth: "none",
+      },
+    });
+    seedExtension({ id: "ownhttp" });
+    seedExtension({ id: "privother", userId: "other-user", isPublished: false });
+
+    const result = await GetExtensionCredentialInfo(["pubmcp", "ownhttp", "privother"]);
+    expect(result).toEqual({
+      status: "OK",
+      response: [
+        { id: "pubmcp", usesStoredSecrets: true, ownedByYou: false },
+        { id: "ownhttp", usesStoredSecrets: true, ownedByYou: true },
+      ],
+    });
+    expect(JSON.stringify(result)).not.toMatch(/X-Hidden-Key|kv-row-1|X-Api-Key|client-h-1/);
   });
 });
