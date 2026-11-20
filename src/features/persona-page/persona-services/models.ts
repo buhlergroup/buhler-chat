@@ -113,6 +113,10 @@ export const PersonaModelSchema = z.object({
     .refine(refineFromEmpty, "System message cannot be empty"),
   extensionIds: z.array(z.string()),
   isPublished: z.boolean(),
+  // "Anyone in the organization who has the link can use this agent" (see
+  // canOpenPersona). ON unless false: undefined (agents saved before the
+  // field existed) counts as on. Has no effect while a share group is set.
+  linkAccess: z.boolean().optional(),
   type: z.literal(PERSONA_ATTRIBUTE),
   createdAt: z.coerce.date(), // coerce: Cosmos round-trips dates as ISO strings
   updatedAt: z.coerce.date().optional(), // last modification (createdAt is no longer overwritten on update)

@@ -84,6 +84,7 @@ const seedPersona = (overrides: Record<string, any> = {}) => {
     type: "PERSONA",
     userId: "owner-hash",
     isPublished: false,
+    linkAccess: false,
     personaDocumentIds: ["doc-1", "doc-2"],
     ...overrides,
   });

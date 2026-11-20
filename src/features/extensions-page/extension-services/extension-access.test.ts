@@ -17,6 +17,8 @@ const agent = (overrides: Partial<AgentForAccess> = {}): AgentForAccess => ({
   id: "agent-1",
   userId: OWNER,
   isPublished: false,
+  // Private: link access turned off (undefined means on).
+  linkAccess: false,
   accessGroup: null,
   extensionIds: ["mcp-1"],
   ...overrides,
@@ -48,6 +50,17 @@ describe("canOpenAgent", () => {
 
   it("keeps a private agent of someone else closed", async () => {
     expect(await canOpenAgent(agent(), USER, member)).toBe(false);
+  });
+
+  it("opens a link agent (linkAccess undefined or true) for any user", async () => {
+    expect(await canOpenAgent(agent({ linkAccess: undefined }), USER, notMember)).toBe(true);
+    expect(await canOpenAgent(agent({ linkAccess: true }), USER, notMember)).toBe(true);
+  });
+
+  it("a share group wins over link access", async () => {
+    expect(
+      await canOpenAgent(agent({ linkAccess: true, accessGroup: { id: "group-1" } }), USER, notMember)
+    ).toBe(false);
   });
 });
 

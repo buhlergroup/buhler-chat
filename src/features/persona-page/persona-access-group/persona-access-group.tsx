@@ -3,7 +3,7 @@ import { FC, ReactNode, useEffect, useState } from "react";
 import { PersonaAccessGroupSelector } from "./persona-access-group-selector";
 import { AccessGroup, TrustLevel } from "../persona-services/models";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/features/ui/tooltip";
-import { Info, Trash } from "lucide-react";
+import { Check, Info, Link as LinkIcon, Trash } from "lucide-react";
 import { Button } from "@/features/ui/button";
 import { Switch } from "@/features/ui/switch";
 import { AccessGroupById } from "../persona-services/access-group-service";
@@ -15,13 +15,19 @@ interface Props {
   initialIsPublished: boolean;
   /** Effective trust tier when the agent is already published, else null. */
   trustLevel: TrustLevel | null;
-  /** Shown while the agent is shared with a group or published. */
+  /** Stored "Anyone with the link can use this agent" value; on unless false. */
+  initialLinkAccess?: boolean;
+  /** Id of the saved agent; empty for a new agent (no link to copy yet). */
+  personaId?: string;
+  /** Shown while the agent is shared with a group, by link, or published. */
   sharedNotice?: ReactNode;
 }
 
 export const PersonaAccessGroup: FC<Props> = (props) => {
   const [selectedGroup, setSelectedGroup] = useState<AccessGroup | null>();
   const [isPublished, setIsPublished] = useState(props.initialIsPublished);
+  const [linkAccess, setLinkAccess] = useState(props.initialLinkAccess !== false);
+  const [linkCopied, setLinkCopied] = useState(false);
   const [isLoading, setIsLoading] = useState(false);
 
   useEffect(() => {
@@ -49,7 +55,22 @@ export const PersonaAccessGroup: FC<Props> = (props) => {
   const accessSummary = () => {
     if (isPublished) return "Published — everyone can use this agent";
     if (selectedGroup) return selectedGroup.name;
+    if (linkAccess) return "Everyone with the link can use this agent";
     return "Only you can access this agent";
+  };
+
+  // Link access has no effect while the agent is published (everyone can use
+  // it) or shared with a group (only its members can use it). The stored
+  // value is kept, so the switch is disabled, not reset.
+  const linkAccessDisabled = isPublished || !!selectedGroup;
+
+  const copyAgentLink = async () => {
+    if (!props.personaId) return;
+    await navigator.clipboard.writeText(
+      `${window.location.origin}/agent/${props.personaId}/chat`
+    );
+    setLinkCopied(true);
+    setTimeout(() => setLinkCopied(false), 2000);
   };
 
   return (
@@ -123,7 +144,43 @@ export const PersonaAccessGroup: FC<Props> = (props) => {
         </Label>
         {props.trustLevel && <TrustBadge level={props.trustLevel} />}
       </div>
-      {(isPublished || !!selectedGroup) && props.sharedNotice}
+      <div className="flex items-center gap-2">
+        <Switch
+          id="linkAccess"
+          name="linkAccess"
+          checked={linkAccess}
+          onCheckedChange={setLinkAccess}
+          disabled={linkAccessDisabled}
+        />
+        {/* A disabled switch is not sent with the form: keep the stored value. */}
+        {linkAccessDisabled && linkAccess && (
+          <input type="hidden" name="linkAccess" value="on" />
+        )}
+        <Label
+          htmlFor="linkAccess"
+          className="text-muted-foreground font-normal"
+        >
+          Anyone with the link can use this agent
+        </Label>
+        {props.personaId && (
+          <Button
+            type="button"
+            variant="ghost"
+            size="sm"
+            className="h-7 gap-1 px-2 text-xs"
+            onClick={copyAgentLink}
+          >
+            {linkCopied ? <Check size={14} /> : <LinkIcon size={14} />}
+            {linkCopied ? "Copied" : "Copy link"}
+          </Button>
+        )}
+      </div>
+      {!isPublished && !!selectedGroup && (
+        <p className="text-xs text-muted-foreground">
+          A share group is set: only its members can use the agent.
+        </p>
+      )}
+      {(isPublished || !!selectedGroup || linkAccess) && props.sharedNotice}
     </div>
   );
 };

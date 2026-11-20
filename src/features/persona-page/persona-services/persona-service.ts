@@ -41,6 +41,7 @@ import {
   checkPersonaEdit,
   currentPersonaViewer,
   findPersonaDocument,
+  isListedForViewer,
 } from "./persona-access";
 import { RevalidateCache } from "@/features/common/navigation-helpers";
 import {
@@ -65,6 +66,7 @@ interface PersonaInput {
   description: string;
   personaMessage: string;
   isPublished: boolean;
+  linkAccess?: boolean;
   extensionIds: string[];
   accessGroup?: {
     id: string;
@@ -154,6 +156,8 @@ export const CreatePersona = async (
       isPublished: props.isPublished,
       trustLevel: props.isPublished ? "community" : undefined,
       publishedAt: props.isPublished ? new Date() : undefined,
+      // Link access is on by default (see canOpenPersona).
+      linkAccess: props.linkAccess !== false,
       userId,
       creatorName: (await getCurrentUser()).name,
       createdAt: new Date(),
@@ -328,6 +332,7 @@ export const UpsertPersona = async (
         // (EnsurePersonaOperation already restricts edits to owner/admin).
         isPublished: willPublish,
         trustLevel,
+        linkAccess: personaInput.linkAccess ?? persona.linkAccess,
         publishedAt:
           willPublish && !wasPublished
             ? new Date()
@@ -439,12 +444,13 @@ export const FindAllPersonaForCurrentUser = async (): Promise<
       .fetchAll();
 
     // The query is a pre-filter (it only knows the M365 groups of the user);
-    // canOpenPersona is the rule.
+    // canOpenPersona is the rule. Agents of other users that only link access
+    // opens are not listed (isListedForViewer).
     const viewer = await currentPersonaViewer();
     const personasWithAccess = (
       await Promise.all(
         resources.map(async (e) =>
-          (await canOpenPersona(viewer, e))
+          isListedForViewer(viewer, e) && (await canOpenPersona(viewer, e))
             ? withNormalizedSelectedModel(e)
             : null
         )

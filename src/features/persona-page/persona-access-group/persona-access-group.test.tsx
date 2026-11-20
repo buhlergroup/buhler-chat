@@ -47,6 +47,8 @@ const defaultProps = {
   initialSelectedGroup: null,
   initialIsPublished: false,
   trustLevel: null,
+  // A private agent: link access turned off by the owner.
+  initialLinkAccess: false as boolean | undefined,
 };
 
 describe("persona-page.unit.components.008 — PersonaAccessGroup", () => {
@@ -151,14 +153,14 @@ describe("persona-page.unit.components.008 — PersonaAccessGroup", () => {
       screen.getByDisplayValue("Published — everyone can use this agent")
     ).toBeInTheDocument();
     // Publish switch is on; group selector and trash are deactivated.
-    expect(screen.getByRole("switch")).toBeChecked();
+    expect(screen.getByRole("switch", { name: "Publish to the whole organization" })).toBeChecked();
     expect(screen.getByTestId("group-selector")).toBeDisabled();
     expect(screen.getByText("Community")).toBeInTheDocument();
   });
 
   it("toggling the publish switch updates summary and re-enables the selector", async () => {
     render(<PersonaAccessGroup {...defaultProps} />);
-    const publishSwitch = screen.getByRole("switch");
+    const publishSwitch = screen.getByRole("switch", { name: "Publish to the whole organization" });
     expect(publishSwitch).not.toBeChecked();
 
     await userEvent.click(publishSwitch);
@@ -194,7 +196,7 @@ describe("PersonaAccessGroup — shared notice", () => {
 
   it("shows the notice when the owner turns on publishing", async () => {
     render(<PersonaAccessGroup {...defaultProps} sharedNotice={notice} />);
-    await userEvent.click(screen.getByRole("switch"));
+    await userEvent.click(screen.getByRole("switch", { name: "Publish to the whole organization" }));
     expect(screen.getByTestId("shared-notice")).toBeInTheDocument();
   });
 
@@ -207,5 +209,82 @@ describe("PersonaAccessGroup — shared notice", () => {
   it("shows the notice for an agent that is already published", () => {
     render(<PersonaAccessGroup {...defaultProps} initialIsPublished sharedNotice={notice} />);
     expect(screen.getByTestId("shared-notice")).toBeInTheDocument();
+  });
+});
+
+// Pinned: "Anyone with the link can use this agent" (linkAccess). The switch is
+// sent with the form, has no effect (disabled) while the agent is published or
+// shared with a group, and keeps its stored value then.
+describe("PersonaAccessGroup — link access", () => {
+  const linkSwitch = () =>
+    screen.getByRole("switch", { name: "Anyone with the link can use this agent" });
+  const renderInForm = (props: Record<string, unknown> = {}) => {
+    const result = render(
+      <form data-testid="form">
+        <PersonaAccessGroup {...defaultProps} {...props} />
+      </form>
+    );
+    return { ...result, form: screen.getByTestId("form") as HTMLFormElement };
+  };
+
+  it("is on by default (new agent / field not stored) and sends linkAccess=on", () => {
+    const { form } = renderInForm({ initialLinkAccess: undefined });
+    expect(linkSwitch()).toBeChecked();
+    expect(new FormData(form).get("linkAccess")).toBe("on");
+    expect(
+      screen.getByDisplayValue("Everyone with the link can use this agent")
+    ).toBeInTheDocument();
+  });
+
+  it("turning it off sends no linkAccess (stored as false = only you)", async () => {
+    const { form } = renderInForm({ initialLinkAccess: undefined });
+    await userEvent.click(linkSwitch());
+    expect(linkSwitch()).not.toBeChecked();
+    expect(new FormData(form).get("linkAccess")).toBeNull();
+    expect(screen.getByDisplayValue("Only you can access this agent")).toBeInTheDocument();
+  });
+
+  it("shows a stored false as off", () => {
+    renderInForm({ initialLinkAccess: false });
+    expect(linkSwitch()).not.toBeChecked();
+  });
+
+  it("is disabled while published and keeps the stored value in the form", () => {
+    const { form } = renderInForm({ initialLinkAccess: true, initialIsPublished: true });
+    expect(linkSwitch()).toBeDisabled();
+    expect(new FormData(form).get("linkAccess")).toBe("on");
+  });
+
+  it("is disabled while a share group is set and says that the group wins", async () => {
+    renderInForm({ initialLinkAccess: undefined });
+    await userEvent.click(screen.getByTestId("group-selector"));
+    expect(linkSwitch()).toBeDisabled();
+    expect(
+      screen.getByText("A share group is set: only its members can use the agent.")
+    ).toBeInTheDocument();
+  });
+
+  it("shows the shared-credentials notice when link access is on", async () => {
+    const notice = <div data-testid="shared-notice">stored credentials</div>;
+    renderInForm({ sharedNotice: notice });
+    expect(screen.queryByTestId("shared-notice")).not.toBeInTheDocument();
+    await userEvent.click(linkSwitch());
+    expect(screen.getByTestId("shared-notice")).toBeInTheDocument();
+  });
+
+  it("copies the agent link of a saved agent", async () => {
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    Object.defineProperty(navigator, "clipboard", {
+      value: { writeText },
+      configurable: true,
+    });
+    renderInForm({ personaId: "abc123" });
+    await userEvent.click(screen.getByRole("button", { name: "Copy link" }));
+    expect(writeText).toHaveBeenCalledWith(`${window.location.origin}/agent/abc123/chat`);
+  });
+
+  it("has no copy-link button for a new (unsaved) agent", () => {
+    renderInForm({ personaId: "" });
+    expect(screen.queryByRole("button", { name: "Copy link" })).not.toBeInTheDocument();
   });
 });

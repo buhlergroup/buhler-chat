@@ -39,6 +39,7 @@ import {
   canOpenPersona,
   canContinuePersonaThread,
   currentPersonaViewer,
+  isListedForViewer,
 } from "./persona-access";
 import { AccessGroupById } from "./access-group-service";
 
@@ -46,6 +47,8 @@ const persona = (overrides: Record<string, any> = {}) => ({
   id: "p1",
   userId: OTHER_HASH,
   isPublished: false,
+  // Private: link access turned off (undefined means on, see the link tests).
+  linkAccess: false as boolean | undefined,
   accessGroup: undefined as { id: string; source: "SHAREPOINT" } | undefined,
   ...overrides,
 });
@@ -110,6 +113,53 @@ describe("canOpenPersona", () => {
   it("admin can open a private agent and a group agent without membership", async () => {
     expect(await canOpenPersona(admin, persona())).toBe(true);
     expect(await canOpenPersona(admin, persona({ accessGroup: group("g1") }))).toBe(true);
+  });
+});
+
+// Pinned: "Anyone with the link can use this agent" is on unless
+// linkAccess === false; a share group wins over it.
+describe("canOpenPersona — link access", () => {
+  it("undefined (agents saved before the field) opens for any signed-in user", async () => {
+    expect(await canOpenPersona(viewer, persona({ linkAccess: undefined }))).toBe(true);
+  });
+
+  it("true opens for any signed-in user", async () => {
+    expect(await canOpenPersona(viewer, persona({ linkAccess: true }))).toBe(true);
+  });
+
+  it("false keeps the agent private (owner and admin only)", async () => {
+    expect(await canOpenPersona(viewer, persona({ linkAccess: false }))).toBe(false);
+    expect(await canOpenPersona(viewer, persona({ linkAccess: false, userId: USER_HASH }))).toBe(true);
+    expect(await canOpenPersona(admin, persona({ linkAccess: false }))).toBe(true);
+  });
+
+  it("a share group wins: link access undefined or true does not open it for a non-member", async () => {
+    for (const linkAccess of [undefined, true]) {
+      const p = persona({ linkAccess, accessGroup: group("g1") });
+      memberOf = [];
+      expect(await canOpenPersona(viewer, p)).toBe(false);
+      memberOf = ["g1"];
+      expect(await canOpenPersona(viewer, p)).toBe(true);
+    }
+  });
+
+  it("published opens for everyone also when link access is false", async () => {
+    expect(await canOpenPersona(viewer, persona({ isPublished: true, linkAccess: false }))).toBe(true);
+  });
+
+  it("a thread with another user's link agent continues", async () => {
+    historyItems = [persona({ id: "p-link", linkAccess: undefined })];
+    expect(await canContinuePersonaThread("p-link")).toBe(true);
+  });
+});
+
+describe("isListedForViewer", () => {
+  it("lists own, published and group agents, never another user's link agent", () => {
+    expect(isListedForViewer(viewer, persona({ userId: USER_HASH }))).toBe(true);
+    expect(isListedForViewer(viewer, persona({ isPublished: true }))).toBe(true);
+    expect(isListedForViewer(viewer, persona({ accessGroup: group("g1") }))).toBe(true);
+    expect(isListedForViewer(viewer, persona({ linkAccess: undefined }))).toBe(false);
+    expect(isListedForViewer(viewer, persona({ linkAccess: true }))).toBe(false);
   });
 });
 
