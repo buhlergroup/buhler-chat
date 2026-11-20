@@ -21,6 +21,7 @@ export interface AgentForAccess {
   id: string;
   userId: string;
   isPublished?: boolean;
+  linkAccess?: boolean;
   accessGroup?: { id?: string } | null;
   extensionIds?: string[];
 }
@@ -48,7 +49,8 @@ export interface ExtensionAccessInput<E> {
  * (persona-access.ts) without its admin clause: the owner always; a
  * group-shared agent only for members of that group (also when it is
  * published, as in the agent list); any other agent only when it is
- * published to the whole organization. An admin may open any agent, but that
+ * published to the whole organization or open to everyone with the link
+ * (linkAccess, on unless false). An admin may open any agent, but that
  * does not give the admin the agent owner's private extensions (and their
  * secrets) in a chat.
  */
@@ -60,7 +62,7 @@ export async function canOpenAgent(
   if (agent.userId === userId) return true;
   const groupId = agent.accessGroup?.id;
   if (groupId) return isGroupMember(groupId);
-  return agent.isPublished === true;
+  return agent.isPublished === true || agent.linkAccess !== false;
 }
 
 /**
@@ -148,7 +150,7 @@ export async function findExtensionsByIdsUnchecked(ids: readonly string[]): Prom
 export async function findAgentUnchecked(id: string): Promise<AgentForAccess | null> {
   const querySpec: SqlQuerySpec = {
     query:
-      "SELECT r.id, r.userId, r.isPublished, r.accessGroup, r.extensionIds FROM root r WHERE r.type=@type AND r.id=@id",
+      "SELECT r.id, r.userId, r.isPublished, r.linkAccess, r.accessGroup, r.extensionIds FROM root r WHERE r.type=@type AND r.id=@id",
     parameters: [
       { name: "@type", value: PERSONA_ATTRIBUTE },
       { name: "@id", value: id },

@@ -116,6 +116,8 @@ const seedPersona = (overrides: Record<string, any> = {}) => {
     description: "desc",
     personaMessage: "msg",
     isPublished: false,
+    // Private unless a test says otherwise (undefined means link access on).
+    linkAccess: false,
     userId: USER_HASH,
     createdAt: new Date(),
     extensionIds: [],
@@ -275,6 +277,68 @@ describe("persona-service.ts", () => {
     const result = await FindPersonaByID("p-sub");
     expect(result.status).toBe("NOT_FOUND");
     expect(JSON.stringify(result)).not.toContain("secret");
+  });
+
+  // 006d – link access (on unless false): a non-owner opens a link agent by id
+  it("006d FindPersonaByID: link agent OK for a non-owner, linkAccess false NOT_FOUND", async () => {
+    await setSession(defaultSession);
+    seedPersona({ id: "p-link-legacy", userId: "other-hash", linkAccess: undefined });
+    expect((await FindPersonaByID("p-link-legacy")).status).toBe("OK");
+
+    historyItems.length = 0;
+    seedPersona({ id: "p-link", userId: "other-hash", linkAccess: true });
+    expect((await FindPersonaByID("p-link")).status).toBe("OK");
+
+    historyItems.length = 0;
+    seedPersona({ id: "p-nolink", userId: "other-hash", linkAccess: false });
+    expect((await FindPersonaByID("p-nolink")).status).toBe("NOT_FOUND");
+  });
+
+  // 006e – a share group wins over link access
+  it("006e FindPersonaByID: group agent with link access stays member-only", async () => {
+    await setSession(defaultSession);
+    seedPersona({
+      id: "p-grp-link",
+      userId: "other-hash",
+      linkAccess: undefined,
+      accessGroup: { id: "g1", source: "SHAREPOINT" },
+    });
+    vi.mocked(AccessGroupById).mockResolvedValueOnce({
+      status: "ERROR",
+      errors: [{ message: "no access" }],
+    });
+    expect((await FindPersonaByID("p-grp-link")).status).toBe("NOT_FOUND");
+  });
+
+  // 006f – link access opens an agent by link but never lists it for others
+  it("006f FindAllPersonaForCurrentUser does not list other users' link agents", async () => {
+    await setSession(defaultSession);
+    seedPersona({ id: "p-other-link", userId: "other-hash", linkAccess: true });
+    seedPersona({ id: "p-other-legacy", userId: "other-hash", linkAccess: undefined });
+    seedPersona({ id: "p-own-link", linkAccess: true });
+    const result = await FindAllPersonaForCurrentUser();
+    expect(result.status).toBe("OK");
+    if (result.status === "OK") {
+      expect(result.response.map((p: any) => p.id)).toEqual(["p-own-link"]);
+    }
+  });
+
+  // 006g – CreatePersona stores link access on unless the form turns it off;
+  // UpsertPersona stores the form value
+  it("006g CreatePersona/UpsertPersona store linkAccess", async () => {
+    await setSession(defaultSession);
+    const created = await CreatePersona(validPersonaInput(), []);
+    expect(created.status === "OK" && created.response.linkAccess).toBe(true);
+    const off = await CreatePersona({ ...validPersonaInput(), linkAccess: false }, []);
+    expect(off.status === "OK" && off.response.linkAccess).toBe(false);
+
+    seedPersona({ id: "p-up", linkAccess: undefined });
+    const updated = await UpsertPersona(
+      { ...(historyItems[0] as any), ...validPersonaInput(), linkAccess: false },
+      []
+    );
+    expect(updated.status).toBe("OK");
+    if (updated.status === "OK") expect(updated.response.linkAccess).toBe(false);
   });
 
   // 007 – FindAllPersonaForCurrentUser SQL includes published OR ownerId OR group membership
