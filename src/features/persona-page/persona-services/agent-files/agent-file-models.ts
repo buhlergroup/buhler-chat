@@ -43,6 +43,13 @@ export const AGENT_FILE_USE_TEXT: Record<AgentFileUse, { label: string; help: st
   },
 };
 
+/** Help of the Skill use for a skill uploaded as a zip (no SharePoint file). */
+export const UPLOADED_SKILL_HELP = "Skill instructions from an uploaded zip. Upload the zip again to change it.";
+
+/** The help of a use for this item: an uploaded skill has its own text. */
+export const helpOfUse = (use: AgentFileUse, item: { uploadedSkill?: boolean }): string =>
+  use === "skill" && item.uploadedSkill ? UPLOADED_SKILL_HELP : AGENT_FILE_USE_TEXT[use].help;
+
 /** The row behind an item. The id is the row id of that kind. */
 export const AGENT_FILE_REF_KINDS = ["document", "ci-document", "skill", "file-source"] as const;
 export type AgentFileRefKind = (typeof AGENT_FILE_REF_KINDS)[number];

@@ -358,4 +358,25 @@ describe("PersonaFiles", () => {
     await waitFor(() => expect(actions.RemoveAgentFile).toHaveBeenCalledWith("p1", { kind: "skill", id: "s-link" }));
     expect(screen.queryByTestId("persona-files-confirm-remove")).not.toBeInTheDocument();
   });
+  it("an uploaded skill has its own help text; a linked skill keeps the SharePoint text", async () => {
+    actions.ListAgentFiles.mockResolvedValue(
+      editorList([
+        item({ ref: { kind: "skill", id: "s-up" }, name: "notes.zip", use: "skill", allowedUses: ["skill"], uploadedSkill: true, webUrl: undefined }),
+        item({ ref: { kind: "skill", id: "s-link" }, name: "brand.zip", use: "skill", allowedUses: ["skill", "code"], linkedSkill: true }),
+      ]),
+    );
+    render(<PersonaFiles personaId="p1" />);
+    const buttons = await screen.findAllByTestId("persona-file-use");
+    const uploaded = buttons.find((b) => b.getAttribute("aria-label")?.startsWith("notes.zip"))!;
+    const linked = buttons.find((b) => b.getAttribute("aria-label")?.startsWith("brand.zip"))!;
+    expect(uploaded).toHaveAttribute(
+      "title",
+      "Skill instructions from an uploaded zip. Upload the zip again to change it.",
+    );
+    expect(linked).toHaveAttribute("title", "Skill instructions. Uses the latest file from SharePoint.");
+    await userEvent.click(uploaded);
+    const menu = await screen.findByRole("menu");
+    expect(menu).toHaveTextContent("Skill instructions from an uploaded zip. Upload the zip again to change it.");
+    expect(menu).not.toHaveTextContent("Uses the latest file from SharePoint");
+  });
 });

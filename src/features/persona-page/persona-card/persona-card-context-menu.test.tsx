@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { render, screen, waitFor } from "@testing-library/react";
+import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 
 const { mockDeletePersona } = vi.hoisted(() => ({
@@ -8,6 +8,15 @@ const { mockDeletePersona } = vi.hoisted(() => ({
 
 vi.mock("../persona-services/persona-service", () => ({
   DeletePersona: mockDeletePersona,
+}));
+
+const { mockUnpublishAgent } = vi.hoisted(() => ({
+  mockUnpublishAgent: vi.fn().mockResolvedValue({ status: "OK" }),
+}));
+
+vi.mock("../persona-services/agent-trust-service", () => ({
+  SetAgentTrustLevel: vi.fn().mockResolvedValue({ status: "OK" }),
+  UnpublishAgent: mockUnpublishAgent,
 }));
 
 const { mockUpdatePersona } = vi.hoisted(() => ({
@@ -77,12 +86,30 @@ describe("persona-page.unit.components.004 — PersonaCardContextMenu", () => {
     expect(mockUpdatePersona).toHaveBeenCalledWith(persona);
   });
 
-  // ── Delete: confirmed ─────────────────────────────────────────────────────
+  // -- Delete: the app's dialog, not window.confirm --------------------------
 
-  it("calls DeletePersona and RevalidateCache when user confirms deletion", async () => {
-    vi.stubGlobal("confirm", vi.fn().mockReturnValue(true));
+  const askDelete = async () => {
+    const confirmSpy = vi.fn();
+    vi.stubGlobal("confirm", confirmSpy);
     await openMenu();
     await userEvent.click(screen.getByText(/delete/i));
+    const dialog = await screen.findByTestId("persona-card-confirm");
+    return { dialog, confirmSpy };
+  };
+
+  it("asks in the app's dialog with the agent name, never with window.confirm", async () => {
+    const { dialog, confirmSpy } = await askDelete();
+    expect(dialog).toHaveTextContent(
+      'Delete the agent "TestPersona"? Its files, skills and folder links are removed from the agent. Chats that already used it stay.',
+    );
+    expect(confirmSpy).not.toHaveBeenCalled();
+    expect(mockDeletePersona).not.toHaveBeenCalled();
+    vi.unstubAllGlobals();
+  });
+
+  it("Delete in the dialog calls DeletePersona and RevalidateCache", async () => {
+    const { dialog } = await askDelete();
+    await userEvent.click(within(dialog).getByRole("button", { name: "Delete" }));
     await waitFor(() => {
       expect(mockDeletePersona).toHaveBeenCalledWith("p1");
     });
@@ -91,39 +118,41 @@ describe("persona-page.unit.components.004 — PersonaCardContextMenu", () => {
     vi.unstubAllGlobals();
   });
 
-  it("shows confirmation dialog with persona name", async () => {
-    const confirmSpy = vi.fn().mockReturnValue(false);
-    vi.stubGlobal("confirm", confirmSpy);
-    await openMenu();
-    await userEvent.click(screen.getByText(/delete/i));
-    await waitFor(() => {
-      expect(confirmSpy).toHaveBeenCalledWith(
-        expect.stringContaining("TestPersona")
-      );
-    });
-    vi.unstubAllGlobals();
-  });
-
-  // ── Delete: cancelled ─────────────────────────────────────────────────────
-
-  it("does NOT call DeletePersona when user cancels the confirmation dialog", async () => {
-    vi.stubGlobal("confirm", vi.fn().mockReturnValue(false));
-    await openMenu();
-    await userEvent.click(screen.getByText(/delete/i));
-    await waitFor(() => {
-      expect(mockDeletePersona).not.toHaveBeenCalled();
-    });
+  it("Cancel keeps the agent: no DeletePersona, no RevalidateCache", async () => {
+    const { dialog } = await askDelete();
+    await userEvent.click(within(dialog).getByRole("button", { name: "Cancel" }));
+    await waitFor(() => expect(screen.queryByTestId("persona-card-confirm")).not.toBeInTheDocument());
+    expect(mockDeletePersona).not.toHaveBeenCalled();
     expect(mockRevalidateCache).not.toHaveBeenCalled();
     vi.unstubAllGlobals();
   });
 
-  it("does NOT call RevalidateCache when DeletePersona is skipped (cancel)", async () => {
-    vi.stubGlobal("confirm", vi.fn().mockReturnValue(false));
-    await openMenu();
-    await userEvent.click(screen.getByText(/delete/i));
-    await waitFor(() => {
-      expect(mockRevalidateCache).not.toHaveBeenCalled();
-    });
+  const askUnpublish = async () => {
+    const confirmSpy = vi.fn();
+    vi.stubGlobal("confirm", confirmSpy);
+    render(
+      <PersonaCardContextMenu persona={{ ...persona, isPublished: true }} showOwnerActions={false} isVerifier />,
+    );
+    await userEvent.click(screen.getByRole("button"));
+    await userEvent.click(screen.getByText("Unpublish agent"));
+    const dialog = await screen.findByTestId("persona-card-confirm");
+    return { dialog, confirmSpy };
+  };
+
+  it("Unpublish (governance) asks in the app's dialog; Cancel keeps it published", async () => {
+    const { dialog, confirmSpy } = await askUnpublish();
+    expect(dialog).toHaveTextContent('Unpublish the agent "TestPersona" for the whole organization?');
+    await userEvent.click(within(dialog).getByRole("button", { name: "Cancel" }));
+    await waitFor(() => expect(screen.queryByTestId("persona-card-confirm")).not.toBeInTheDocument());
+    expect(mockUnpublishAgent).not.toHaveBeenCalled();
+    expect(confirmSpy).not.toHaveBeenCalled();
+    vi.unstubAllGlobals();
+  });
+
+  it("Unpublish in the dialog calls UnpublishAgent", async () => {
+    const { dialog } = await askUnpublish();
+    await userEvent.click(within(dialog).getByRole("button", { name: "Unpublish" }));
+    await waitFor(() => expect(mockUnpublishAgent).toHaveBeenCalledWith("p1"));
     vi.unstubAllGlobals();
   });
 });

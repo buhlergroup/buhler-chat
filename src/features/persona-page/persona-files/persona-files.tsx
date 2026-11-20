@@ -31,6 +31,7 @@ import {
   AGENT_FILE_USE_TEXT,
   MAX_ITEMS_PER_ADD,
   isAgentFileUse,
+  helpOfUse,
   type AgentFileItem,
   type AgentFilesList,
 } from "../persona-services/agent-files/agent-file-models";
@@ -480,7 +481,7 @@ const FileRow: FC<{
             variant="outline"
             size="sm"
             className="gap-1 shrink-0"
-            title={text.help}
+            title={helpOfUse(item.use, item)}
             aria-label={`${item.name}: ${text.label}. Change the use or remove.`}
             disabled={busy !== null}
             data-testid="persona-file-use"
@@ -496,7 +497,7 @@ const FileRow: FC<{
               <DropdownMenuRadioItem key={use} value={use}>
                 <span className="flex flex-col">
                   <span>{AGENT_FILE_USE_TEXT[use].label}</span>
-                  <span className="text-xs text-muted-foreground">{AGENT_FILE_USE_TEXT[use].help}</span>
+                  <span className="text-xs text-muted-foreground">{helpOfUse(use, item)}</span>
                 </span>
               </DropdownMenuRadioItem>
             ))}
