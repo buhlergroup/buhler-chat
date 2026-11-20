@@ -221,18 +221,60 @@ describe("persona-service.ts", () => {
     expect(result.status).toBe("NOT_FOUND");
   });
 
-  // 006 – FindPersonaByID returns UNAUTHORIZED when accessGroup denies
-  it("006 FindPersonaByID returns UNAUTHORIZED when accessGroup denies", async () => {
-    seedPersona({ id: "p-ag", accessGroup: { id: "g1", source: "SHAREPOINT" } });
+  // 006 – FindPersonaByID hides a group agent from a non-member (NOT_FOUND, not forbidden)
+  it("006 FindPersonaByID returns NOT_FOUND when accessGroup denies", async () => {
+    seedPersona({ id: "p-ag", userId: "other-hash", accessGroup: { id: "g1", source: "SHAREPOINT" } });
     vi.mocked(AccessGroupById).mockResolvedValueOnce({
       status: "ERROR",
       errors: [{ message: "no access" }],
     });
     const result = await FindPersonaByID("p-ag");
-    expect(result.status).toBe("UNAUTHORIZED");
-    if (result.status === "UNAUTHORIZED") {
-      expect(result.errors[0].message).toMatch(/access/i);
+    expect(result.status).toBe("NOT_FOUND");
+  });
+
+  // 006a – the reported issue: another user's private agent with no group
+  it("006a FindPersonaByID returns NOT_FOUND for another user's private agent with no group", async () => {
+    await setSession(defaultSession);
+    seedPersona({ id: "p-private", userId: "other-hash", isPublished: false });
+    const result = await FindPersonaByID("p-private");
+    expect(result.status).toBe("NOT_FOUND");
+    if (result.status === "NOT_FOUND") {
+      // Same text as a missing id, so the answer does not reveal the agent.
+      expect(result.errors[0].message).toBe("Persona not found");
     }
+    expect(AccessGroupById).not.toHaveBeenCalled();
+  });
+
+  // 006b – owner, published, group member and admin can open by id
+  it("006b FindPersonaByID returns OK for owner, published, group member and admin", async () => {
+    await setSession(defaultSession);
+    seedPersona({ id: "p-own" });
+    expect((await FindPersonaByID("p-own")).status).toBe("OK");
+
+    historyItems.length = 0;
+    seedPersona({ id: "p-pub", userId: "other-hash", isPublished: true });
+    expect((await FindPersonaByID("p-pub")).status).toBe("OK");
+
+    historyItems.length = 0;
+    seedPersona({ id: "p-grp", userId: "other-hash", accessGroup: { id: "g1", source: "SHAREPOINT" } });
+    expect((await FindPersonaByID("p-grp")).status).toBe("OK");
+    expect(AccessGroupById).toHaveBeenCalledWith("g1");
+
+    historyItems.length = 0;
+    await setSession(adminSession);
+    seedPersona({ id: "p-adm", userId: "other-hash", isPublished: false });
+    expect((await FindPersonaByID("p-adm")).status).toBe("OK");
+    await setSession(defaultSession);
+  });
+
+  // 006c – call_sub_agent resolves its target through FindPersonaByID, so a
+  // model asked to call another user's private agent gets NOT_FOUND
+  it("006c sub-agent lookup of another user's private agent is NOT_FOUND", async () => {
+    await setSession(defaultSession);
+    seedPersona({ id: "p-sub", userId: "other-hash", isPublished: false, personaMessage: "secret" });
+    const result = await FindPersonaByID("p-sub");
+    expect(result.status).toBe("NOT_FOUND");
+    expect(JSON.stringify(result)).not.toContain("secret");
   });
 
   // 007 – FindAllPersonaForCurrentUser SQL includes published OR ownerId OR group membership
@@ -270,7 +312,7 @@ describe("persona-service.ts", () => {
       description: "d",
       personaMessage: "m",
       isPublished: true,
-      userId: USER_HASH,
+      userId: "other-hash",
       createdAt: new Date(),
       extensionIds: [],
       type: "PERSONA",
@@ -288,6 +330,25 @@ describe("persona-service.ts", () => {
     expect(result.status).toBe("OK");
     if (result.status === "OK") {
       expect(result.response.find((p: any) => p.id === "p-denied")).toBeUndefined();
+    }
+  });
+
+  // 008a – the list applies the same rule: a private agent of another user
+  // that the pre-filter query returns is dropped; the owner's own agent with a
+  // group the owner is not in is kept.
+  it("008a FindAllPersonaForCurrentUser applies canOpenPersona to every row", async () => {
+    await setSession(defaultSession);
+    seedPersona({ id: "p-other-private", userId: "other-hash", isPublished: false });
+    seedPersona({ id: "p-own-group", accessGroup: { id: "g-x", source: "SHAREPOINT" } });
+    vi.mocked(AccessGroupById).mockResolvedValue({
+      status: "ERROR",
+      errors: [{ message: "no access" }],
+    });
+
+    const result = await FindAllPersonaForCurrentUser();
+    expect(result.status).toBe("OK");
+    if (result.status === "OK") {
+      expect(result.response.map((p: any) => p.id)).toEqual(["p-own-group"]);
     }
   });
 
@@ -394,15 +455,25 @@ describe("persona-service.ts", () => {
     }
   });
 
-  // 013 – CreatePersonaChat returns UNAUTHORIZED when user lacks access group
-  it("013 CreatePersonaChat returns UNAUTHORIZED when user lacks access group", async () => {
-    seedPersona({ id: "p-chat-ag", accessGroup: { id: "g1", source: "SHAREPOINT" } });
+  // 013 – CreatePersonaChat returns NOT_FOUND when user lacks access group
+  it("013 CreatePersonaChat returns NOT_FOUND when user lacks access group", async () => {
+    seedPersona({ id: "p-chat-ag", userId: "other-hash", accessGroup: { id: "g1", source: "SHAREPOINT" } });
     vi.mocked(AccessGroupById).mockResolvedValue({
       status: "ERROR",
       errors: [{ message: "no access" }],
     });
     const result = await CreatePersonaChat("p-chat-ag");
-    expect(result.status).toBe("UNAUTHORIZED");
+    expect(result.status).toBe("NOT_FOUND");
+    expect(UpsertChatThread).not.toHaveBeenCalled();
+  });
+
+  // 013a – CreatePersonaChat refuses another user's private agent with no group
+  it("013a CreatePersonaChat refuses another user's private agent with no group", async () => {
+    await setSession(defaultSession);
+    seedPersona({ id: "p-chat-private", userId: "other-hash", isPublished: false });
+    const result = await CreatePersonaChat("p-chat-private");
+    expect(result.status).toBe("NOT_FOUND");
+    expect(UpsertChatThread).not.toHaveBeenCalled();
   });
 
   // 014 – CreatePersonaChat uploads SharePoint CI docs and attaches files

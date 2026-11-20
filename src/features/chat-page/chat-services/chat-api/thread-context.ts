@@ -36,6 +36,7 @@ import { CreateChatMessage } from "../chat-message-service";
 import { FindAllChatDocuments } from "../chat-document-service";
 import { FindAllChatMessagesForCurrentUser } from "../chat-message-service";
 import { EnsureChatThreadOperation } from "../chat-thread-service";
+import { canContinuePersonaThread } from "@/features/persona-page/persona-services/persona-access";
 import { uiMessagesFromChatMessages } from "./message-adapter";
 import { compareByCodepoint } from "../tools/stabilize-toolset";
 import { getBase64ImageReference } from "../chat-image-persistence-service";
@@ -609,6 +610,10 @@ export interface ThreadContext {
 // loadThreadContext
 // ---------------------------------------------------------------------------
 
+/** Response text of /api/chat when a 403 from loadThreadContext refuses a turn. */
+export const AGENT_NOT_AVAILABLE_MESSAGE =
+  "This agent is no longer available to you. The conversation stays readable, but you cannot send new messages to the agent.";
+
 /**
  * Resolves all context required before a streaming request is dispatched.
  *
@@ -616,6 +621,8 @@ export interface ThreadContext {
  * starts, mirroring the behaviour in chat-api-response.ts line 135-143.
  *
  * Throws with { status: 401 } attached if the thread authorisation check fails.
+ * Throws with { status: 403 } attached if the thread was started from an agent
+ * that the user can no longer open (persona-access.ts).
  */
 const userMessageIdGenerator = createIdGenerator({ prefix: "user", size: 16 });
 const turnIdGenerator = createIdGenerator({ prefix: "turn", size: 16 });
@@ -633,6 +640,15 @@ export async function loadThreadContext(
     throw err;
   }
   const thread = threadResponse.response;
+
+  // 1b. A thread started from an agent continues only while the user can
+  // still open that agent (persona-access.ts). The thread stays readable;
+  // only a new turn is refused, before anything is written.
+  if (!(await canContinuePersonaThread(thread.personaId))) {
+    throw Object.assign(new Error(AGENT_NOT_AVAILABLE_MESSAGE), {
+      status: 403,
+    });
+  }
 
   // 2. Current user (needed for message authorship)
   const currentUser = await getCurrentUser();

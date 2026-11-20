@@ -35,7 +35,12 @@ import {
   DownloadSharePointFile 
 } from "./persona-ci-documents-service";
 import { UploadFileForCodeInterpreter } from "@/features/chat-page/chat-services/code-interpreter-service";
-import { AccessGroupById, UserAccessGroups } from "./access-group-service";
+import { UserAccessGroups } from "./access-group-service";
+import {
+  canOpenPersona,
+  currentPersonaViewer,
+  findPersonaDocument,
+} from "./persona-access";
 import { RevalidateCache } from "@/features/common/navigation-helpers";
 import {
   DeleteAgentStats,
@@ -59,56 +64,34 @@ interface PersonaInput {
   defaultTools?: DefaultTools;
 }
 
+// Same answer for "does not exist" and "you may not open it", so an id does
+// not reveal that a private agent exists (see persona-access.ts).
+const personaNotFound = (): ServerActionResponse<PersonaModel> => ({
+  status: "NOT_FOUND",
+  errors: [
+    {
+      message: "Persona not found",
+    },
+  ],
+});
+
 export const FindPersonaByID = async (
   id: string
 ): Promise<ServerActionResponse<PersonaModel>> => {
   try {
-    const querySpec: SqlQuerySpec = {
-      query: "SELECT * FROM root r WHERE r.type=@type AND r.id=@id",
-      parameters: [
-        {
-          name: "@type",
-          value: PERSONA_ATTRIBUTE,
-        },
-        {
-          name: "@id",
-          value: id,
-        },
-      ],
-    };
+    const persona = await findPersonaDocument(id);
 
-    const { resources } = await HistoryContainer()
-      .items.query<PersonaModel>(querySpec)
-      .fetchAll();
-
-    if (resources.length === 0) {
-      return {
-        status: "NOT_FOUND",
-        errors: [
-          {
-            message: "Persona not found",
-          },
-        ],
-      };
+    if (!persona) {
+      return personaNotFound();
     }
 
-    if (resources[0].accessGroup && resources[0].accessGroup.id != "") {
-      const access = await CheckPersonaAccess(resources[0].accessGroup.id);
-      if (!access) {
-        return {
-          status: "UNAUTHORIZED",
-          errors: [
-            {
-              message: `You don't have access to this persona`,
-            },
-          ],
-        };
-      }
+    if (!(await canOpenPersona(await currentPersonaViewer(), persona))) {
+      return personaNotFound();
     }
 
     return {
       status: "OK",
-      response: withNormalizedSelectedModel(resources[0]),
+      response: withNormalizedSelectedModel(persona),
     };
   } catch (error) {
     return {
@@ -415,17 +398,16 @@ export const FindAllPersonaForCurrentUser = async (): Promise<
       .items.query<PersonaModel>(querySpec)
       .fetchAll();
 
+    // The query is a pre-filter (it only knows the M365 groups of the user);
+    // canOpenPersona is the rule.
+    const viewer = await currentPersonaViewer();
     const personasWithAccess = (
       await Promise.all(
-        resources.map(async (e) => {
-          if (e.accessGroup && e.accessGroup.id != "") {
-            const access = await CheckPersonaAccess(e.accessGroup.id);
-            if (!access) {
-              return null;
-            }
-          }
-          return withNormalizedSelectedModel(e);
-        })
+        resources.map(async (e) =>
+          (await canOpenPersona(viewer, e))
+            ? withNormalizedSelectedModel(e)
+            : null
+        )
       )
     ).filter((e) => e !== null);
 
@@ -448,26 +430,12 @@ export const FindAllPersonaForCurrentUser = async (): Promise<
 export const CreatePersonaChat = async (
   personaId: string
 ): Promise<ServerActionResponse<ChatThreadModel>> => {
+  // FindPersonaByID applies canOpenPersona: a denied agent is NOT_FOUND.
   const personaResponse = await FindPersonaByID(personaId);
   const user = await getCurrentUser();
 
   if (personaResponse.status === "OK") {
     const persona = personaResponse.response;
-
-    // check if user has access to the persona
-    if (persona.accessGroup && persona.accessGroup.id != "") {
-      const access = await CheckPersonaAccess(persona.accessGroup.id);
-      if (!access) {
-        return {
-          status: "UNAUTHORIZED",
-          errors: [
-            {
-              message: `You don't have access to this persona`,
-            },
-          ],
-        };
-      }
-    }
 
     // Download and upload Code Interpreter documents from SharePoint
     let attachedFiles: AttachedFileModel[] = [];
@@ -585,14 +553,4 @@ const ValidateSchema = (model: PersonaModel): ServerActionResponse => {
     status: "OK",
     response: model,
   };
-};
-
-const CheckPersonaAccess = async (groupId: string): Promise<boolean> => {
-  const accessGroupResponse = await AccessGroupById(groupId);
-
-  if (accessGroupResponse.status === "OK") {
-    return true;
-  }
-
-  return false;
 };

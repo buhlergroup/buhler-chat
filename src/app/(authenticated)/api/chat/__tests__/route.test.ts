@@ -29,6 +29,7 @@ vi.mock("@/features/chat-page/chat-services/chat-api/thread-context", () => ({
   // context unchanged would hide a regression in the placement correction.
   applyDocumentHintPlacement: (...a: unknown[]) =>
     mockApplyDocumentHintPlacement(...a),
+  AGENT_NOT_AVAILABLE_MESSAGE: "agent not available (test)",
 }));
 vi.mock("@/features/chat-page/chat-services/chat-api/model-selection", () => ({
   resolveModelAndLimits: (...a: unknown[]) => mockResolveModelAndLimits(...a),
@@ -855,6 +856,16 @@ describe("/api/chat route (AI SDK v6)", () => {
     const req = makeRequest({ message: "hi", id: "t1" });
     const res = await POST(req);
     expect(res.status).toBe(401);
+    expect(mockPersistAssistant).not.toHaveBeenCalled();
+  });
+
+  it("returns 403 with a readable text when the thread's agent can no longer be opened", async () => {
+    const err = Object.assign(new Error("agent not available (test)"), { status: 403 });
+    mockLoadThreadContext.mockRejectedValue(err);
+    const req = makeRequest({ message: "hi", id: "t1" });
+    const res = await POST(req);
+    expect(res.status).toBe(403);
+    expect(await res.text()).toBe("agent not available (test)");
     expect(mockPersistAssistant).not.toHaveBeenCalled();
   });
 

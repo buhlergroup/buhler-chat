@@ -29,6 +29,13 @@ vi.mock("../../chat-thread-service", () => ({
   UpdateChatThreadUsage: (...a: unknown[]) => mockUpdateThreadUsage(...a),
 }));
 
+// ── Agent access (persona-access.ts) ─────────────────────────────────────────
+const mockCanContinuePersonaThread = vi.fn(async (_personaId?: string) => true);
+vi.mock("@/features/persona-page/persona-services/persona-access", () => ({
+  canContinuePersonaThread: (personaId?: string) =>
+    mockCanContinuePersonaThread(personaId),
+}));
+
 // ── Message service ───────────────────────────────────────────────────────────
 const mockFindHistory = vi.fn();
 const mockCreateMessage = vi.fn(async () => ({ status: "OK" }));
@@ -95,7 +102,11 @@ vi.mock("../../utils", () => ({
   mapOpenAIChatMessages: vi.fn(async () => []),
 }));
 
-import { loadThreadContext, applyDocumentHintPlacement } from "../thread-context";
+import {
+  loadThreadContext,
+  applyDocumentHintPlacement,
+  AGENT_NOT_AVAILABLE_MESSAGE,
+} from "../thread-context";
 import { MESSAGE_ATTRIBUTE } from "../../models";
 import type { ChatThreadModel, UserPrompt } from "../../models";
 import { SUMMARY_REPLAY_PREFIX } from "../history-summary";
@@ -259,6 +270,37 @@ describe("loadThreadContext — CreateChatMessage is called once for the new use
     // turnId is now stamped on the user row (architect2 SEV-2 B7+B8).
     expect(typeof arg.turnId).toBe("string");
     expect(arg.turnId as string).toMatch(/^turn-/);
+  });
+});
+
+describe("loadThreadContext — thread started from an agent", () => {
+  it("refuses a new turn with 403 before writing anything when the agent can no longer be opened", async () => {
+    const thread = { ...makeThread(), personaId: "agent-private" } as ChatThreadModel;
+    mockEnsureThread.mockResolvedValue({ status: "OK", response: thread });
+    mockFindHistory.mockResolvedValue({ status: "OK", response: [] });
+    mockCreateMessage.mockClear();
+    mockFindHistory.mockClear();
+    mockCanContinuePersonaThread.mockResolvedValueOnce(false);
+
+    await expect(loadThreadContext(makeUserPrompt())).rejects.toMatchObject({
+      status: 403,
+      message: AGENT_NOT_AVAILABLE_MESSAGE,
+    });
+    expect(mockCanContinuePersonaThread).toHaveBeenCalledWith("agent-private");
+    expect(mockCreateMessage).not.toHaveBeenCalled();
+    expect(mockFindHistory).not.toHaveBeenCalled();
+  });
+
+  it("continues when the agent can still be opened (negative)", async () => {
+    const thread = { ...makeThread(), personaId: "agent-ok" } as ChatThreadModel;
+    mockEnsureThread.mockResolvedValue({ status: "OK", response: thread });
+    mockFindHistory.mockResolvedValue({ status: "OK", response: [] });
+    mockCreateMessage.mockClear();
+
+    await loadThreadContext(makeUserPrompt());
+
+    expect(mockCanContinuePersonaThread).toHaveBeenCalledWith("agent-ok");
+    expect(mockCreateMessage).toHaveBeenCalledTimes(1);
   });
 });
 
