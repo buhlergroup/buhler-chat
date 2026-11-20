@@ -8,6 +8,8 @@ const USER_HASH = hashEmail(defaultSession!.user.email);
 // ── Cosmos mock (direct module mock, bypasses singleton) ─────────────────────
 let historyItems: any[] = [];
 
+const itemReplace = vi.fn(async (doc: any, _options?: any) => ({ resource: { ...doc } }));
+
 const historyContainer = {
   items: {
     create: vi.fn(async (doc: any) => ({ resource: { ...doc } })),
@@ -17,6 +19,7 @@ const historyContainer = {
     })),
   },
   item: vi.fn((id: string, _pk?: string) => ({
+    replace: itemReplace,
     read: vi.fn(async () => ({ resource: historyItems.find((i: any) => i.id === id) })),
     delete: vi.fn(async () => {
       const idx = historyItems.findIndex((i: any) => i.id === id);
@@ -62,6 +65,11 @@ vi.mock("@/features/chat-page/chat-services/code-interpreter-file-access", () =>
   createChatThreadWithServerFiles: vi.fn(async (payload: any) => ({ ...payload })),
 }));
 
+// ── agent files: does the agent need the code interpreter ────────────────────
+vi.mock("@/features/persona-page/persona-services/agent-files/agent-file-requirements", () => ({
+  agentFilesNeedCodeInterpreter: vi.fn(async () => false),
+}));
+
 // ── access-group-service mock ────────────────────────────────────────────────
 vi.mock("@/features/persona-page/persona-services/access-group-service", () => ({
   AccessGroupById: vi.fn(async () => ({ status: "OK", response: { id: "g1", name: "G", description: "" } })),
@@ -99,6 +107,7 @@ import {
 import { UploadFileForCodeInterpreter } from "@/features/chat-page/chat-services/code-interpreter-service";
 import { createChatThreadWithServerFiles } from "@/features/chat-page/chat-services/code-interpreter-file-access";
 import { AccessGroupById, UserAccessGroups } from "./access-group-service";
+import { agentFilesNeedCodeInterpreter } from "./agent-files/agent-file-requirements";
 
 // ── helpers ──────────────────────────────────────────────────────────────────
 const validPersonaInput = () => ({
@@ -153,6 +162,8 @@ beforeEach(() => {
   }));
   historyContainer.items.create.mockImplementation(async (doc: any) => ({ resource: { ...doc } }));
   historyContainer.items.upsert.mockImplementation(async (doc: any) => ({ resource: { ...doc } }));
+  itemReplace.mockImplementation(async (doc: any) => ({ resource: { ...doc } }));
+  vi.mocked(agentFilesNeedCodeInterpreter).mockResolvedValue(false);
   historyContainer.items.query.mockImplementation((_q: any) => ({
     fetchAll: async () => ({ resources: historyItems }),
   }));
@@ -164,7 +175,7 @@ describe("persona-service.ts", () => {
   // 001 – CreatePersona lets any user publish; fresh publish starts as community
   it("001 CreatePersona lets any user publish as community", async () => {
     await setSession(defaultSession);
-    const result = await CreatePersona({ ...validPersonaInput(), isPublished: true }, []);
+    const result = await CreatePersona({ ...validPersonaInput(), isPublished: true });
     expect(result.status).toBe("OK");
     if (result.status === "OK") {
       expect(result.response.isPublished).toBe(true);
@@ -180,7 +191,7 @@ describe("persona-service.ts", () => {
   // 002 – CreatePersona without publish stores no trust metadata
   it("002 CreatePersona unpublished has no trustLevel/publishedAt", async () => {
     await setSession(defaultSession);
-    const result = await CreatePersona(validPersonaInput(), []);
+    const result = await CreatePersona(validPersonaInput());
     expect(result.status).toBe("OK");
     if (result.status === "OK") {
       expect(result.response.isPublished).toBe(false);
@@ -193,26 +204,25 @@ describe("persona-service.ts", () => {
   it("003 CreatePersona returns ERROR with Zod messages on invalid input", async () => {
     await setSession(defaultSession);
     const result = await CreatePersona(
-      { name: "", description: "", personaMessage: "", isPublished: false, extensionIds: [] },
-      []
-    );
+      { name: "", description: "", personaMessage: "", isPublished: false, extensionIds: [] });
     expect(result.status).toBe("ERROR");
     if (result.status === "ERROR") {
       expect(result.errors.length).toBeGreaterThan(0);
     }
   });
 
-  // 004 – CreatePersona propagates persona-documents ERROR
-  it("004 CreatePersona propagates persona-documents ERROR", async () => {
-    vi.mocked(UpdateOrAddPersonaDocuments).mockResolvedValueOnce({
-      status: "ERROR",
-      errors: [{ message: "sp fail" }],
-    });
-    const result = await CreatePersona(validPersonaInput(), []);
-    expect(result.status).toBe("ERROR");
-    if (result.status === "ERROR") {
-      expect(result.errors[0].message).toBe("sp fail");
-    }
+  // 004 – CreatePersona starts without files, whatever the client sends
+  it("004 CreatePersona starts with empty file lists", async () => {
+    const result = await CreatePersona({
+      ...validPersonaInput(),
+      personaDocumentIds: ["client-doc"],
+      codeInterpreterDocumentIds: ["client-ci"],
+    } as any);
+    expect(result.status).toBe("OK");
+    const saved = historyContainer.items.create.mock.calls[0][0];
+    expect(saved.personaDocumentIds).toEqual([]);
+    expect(saved.codeInterpreterDocumentIds).toEqual([]);
+    expect(UpdateOrAddPersonaDocuments).not.toHaveBeenCalled();
   });
 
   // 005 – FindPersonaByID returns NOT_FOUND when no rows
@@ -371,12 +381,72 @@ describe("persona-service.ts", () => {
     }
   });
 
-  // 009c – UpsertPersona removes only documents of the stored persona
-  it("009c UpsertPersona computes removals from the stored document ids, not from the input", async () => {
+  // 009c – the form save keeps the stored file lists (decision: only the
+  // file actions change them)
+  it("009c UpsertPersona keeps the stored file ids and ignores the client's", async () => {
     await setSession(defaultSession);
-    const p = seedPersona({ id: "p-docs", personaDocumentIds: ["own-doc"] });
-    await UpsertPersona({ ...p, personaDocumentIds: ["foreign-doc"] }, []);
-    expect(UpdateOrAddPersonaDocuments).toHaveBeenCalledWith([], ["own-doc"]);
+    const p = seedPersona({
+      id: "p-docs",
+      personaDocumentIds: ["own-doc"],
+      codeInterpreterDocumentIds: ["own-ci"],
+    });
+    const result = await UpsertPersona({
+      ...p,
+      personaDocumentIds: [],
+      codeInterpreterDocumentIds: ["foreign-ci"],
+    });
+    expect(result.status).toBe("OK");
+    const saved = itemReplace.mock.calls[0][0];
+    expect(saved.personaDocumentIds).toEqual(["own-doc"]);
+    expect(saved.codeInterpreterDocumentIds).toEqual(["own-ci"]);
+    expect(UpdateOrAddPersonaDocuments).not.toHaveBeenCalled();
+  });
+
+  it("009d UpsertPersona writes with the etag and, on a conflict, re-reads so a file added meanwhile stays", async () => {
+    await setSession(defaultSession);
+    const p = seedPersona({ id: "p-race", personaDocumentIds: ["doc-1"], _etag: "v1" });
+    // A file action adds doc-2 between the read and the write of the save.
+    itemReplace.mockImplementationOnce(async () => {
+      const row = historyItems.find((i: any) => i.id === "p-race");
+      row.personaDocumentIds = ["doc-1", "doc-2"];
+      row._etag = "v2";
+      throw Object.assign(new Error("precondition failed"), { code: 412 });
+    });
+    const result = await UpsertPersona({ ...p, name: "Renamed", personaDocumentIds: ["doc-1"] });
+    expect(result.status).toBe("OK");
+    expect(itemReplace).toHaveBeenCalledTimes(2);
+    expect(itemReplace.mock.calls[0][1]).toEqual({
+      accessCondition: { type: "IfMatch", condition: "v1" },
+    });
+    expect(itemReplace.mock.calls[1][1]).toEqual({
+      accessCondition: { type: "IfMatch", condition: "v2" },
+    });
+    const saved = itemReplace.mock.calls[1][0];
+    expect(saved.name).toBe("Renamed");
+    expect(saved.personaDocumentIds).toEqual(["doc-1", "doc-2"]);
+  });
+
+  it("009e UpsertPersona keeps the code interpreter on while the agent has files that need it", async () => {
+    await setSession(defaultSession);
+    const p = seedPersona({ id: "p-ci", codeInterpreterDocumentIds: ["ci-1"] });
+    vi.mocked(agentFilesNeedCodeInterpreter).mockResolvedValueOnce(true);
+    const result = await UpsertPersona({
+      ...p,
+      defaultTools: { webSearch: true, codeInterpreter: false },
+    });
+    expect(result.status).toBe("OK");
+    expect(itemReplace.mock.calls[0][0].defaultTools).toEqual({
+      webSearch: true,
+      codeInterpreter: true,
+    });
+  });
+
+  it("009f UpsertPersona keeps the client's choice when no file needs the code interpreter", async () => {
+    await setSession(defaultSession);
+    const p = seedPersona({ id: "p-noci" });
+    const result = await UpsertPersona({ ...p, defaultTools: { codeInterpreter: false } });
+    expect(result.status).toBe("OK");
+    expect(itemReplace.mock.calls[0][0].defaultTools).toEqual({ codeInterpreter: false });
   });
 
   // 010 – EnsurePersonaOperation returns OK for admin
@@ -403,7 +473,7 @@ describe("persona-service.ts", () => {
     await setSession(defaultSession);
     const p = seedPersona({ id: "p-upsert", isPublished: false });
 
-    const result = await UpsertPersona({ ...p, isPublished: true }, []);
+    const result = await UpsertPersona({ ...p, isPublished: true });
     expect(result.status).toBe("OK");
     if (result.status === "OK") {
       expect(result.response.isPublished).toBe(true);
@@ -421,7 +491,7 @@ describe("persona-service.ts", () => {
       publishedAt: new Date("2026-01-01"),
     });
 
-    const result = await UpsertPersona({ ...p, isPublished: false }, []);
+    const result = await UpsertPersona({ ...p, isPublished: false });
     expect(result.status).toBe("OK");
     if (result.status === "OK") {
       expect(result.response.isPublished).toBe(false);
@@ -436,7 +506,7 @@ describe("persona-service.ts", () => {
     // Legacy: published via the old admin-only gate, before trustLevel existed.
     const p = seedPersona({ id: "p-legacy", isPublished: true });
 
-    const result = await UpsertPersona({ ...p, isPublished: true }, []);
+    const result = await UpsertPersona({ ...p, isPublished: true });
     expect(result.status).toBe("OK");
     if (result.status === "OK") {
       expect(result.response.trustLevel).toBe("verified");
@@ -451,7 +521,7 @@ describe("persona-service.ts", () => {
       trustLevel: "verified",
     });
 
-    const result = await UpsertPersona({ ...p, name: "Renamed" }, []);
+    const result = await UpsertPersona({ ...p, name: "Renamed" });
     expect(result.status).toBe("OK");
     if (result.status === "OK") {
       expect(result.response.trustLevel).toBe("verified");
@@ -463,7 +533,7 @@ describe("persona-service.ts", () => {
     const created = new Date("2025-03-03T12:00:00Z");
     const p = seedPersona({ id: "p-times", createdAt: created.toISOString() });
 
-    const result = await UpsertPersona({ ...p, createdAt: created }, []);
+    const result = await UpsertPersona({ ...p, createdAt: created });
     expect(result.status).toBe("OK");
     if (result.status === "OK") {
       expect(result.response.createdAt).toEqual(created);
@@ -566,12 +636,10 @@ describe("persona-service.ts", () => {
     );
 
     const result = await UpsertPersona(
-      { ...p, extensionIds: ["e-foreign-old", "e-foreign-new", "e-own", "e-published"] },
-      []
-    );
+      { ...p, extensionIds: ["e-foreign-old", "e-foreign-new", "e-own", "e-published"] });
 
     expect(result.status).toBe("OK");
-    const saved = historyContainer.items.upsert.mock.calls[0][0];
+    const saved = itemReplace.mock.calls[0][0];
     expect(saved.extensionIds).toEqual(["e-foreign-old", "e-own", "e-published"]);
   });
 
@@ -584,9 +652,7 @@ describe("persona-service.ts", () => {
     );
 
     const result = await CreatePersona(
-      { ...validPersonaInput(), extensionIds: ["e-foreign", "e-own"] },
-      []
-    );
+      { ...validPersonaInput(), extensionIds: ["e-foreign", "e-own"] });
 
     expect(result.status).toBe("OK");
     const saved = historyContainer.items.create.mock.calls[0][0];
@@ -653,9 +719,9 @@ describe("persona-service.ts", () => {
   it("017 UpsertPersona ERROR when Cosmos throws", async () => {
     await setSession(defaultSession);
     const p = seedPersona({ id: "p-upsert-err" });
-    historyContainer.items.upsert.mockRejectedValueOnce(new Error("cosmos boom"));
+    itemReplace.mockRejectedValueOnce(new Error("cosmos boom"));
 
-    const result = await UpsertPersona(p, []);
+    const result = await UpsertPersona(p);
     expect(result.status).toBe("ERROR");
   });
 
@@ -664,7 +730,7 @@ describe("persona-service.ts", () => {
     await setSession(defaultSession);
     const p = seedPersona({ id: "p-upsert-val" });
 
-    const result = await UpsertPersona({ ...p, name: "", description: "" }, []);
+    const result = await UpsertPersona({ ...p, name: "", description: "" });
     expect(result.status).toBe("ERROR");
     if (result.status === "ERROR") {
       expect(result.errors.length).toBeGreaterThan(0);

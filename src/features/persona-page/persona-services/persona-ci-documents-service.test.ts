@@ -49,7 +49,6 @@ vi.mock("@/features/common/services/microsoft-graph-client", () => ({
 }));
 
 import {
-  PersonaCIDocumentById,
   PersonaCIDocumentsByIds,
   DeletePersonaCIDocumentById,
   DeletePersonaCIDocumentsByPersonaId,
@@ -91,22 +90,22 @@ beforeEach(() => {
 });
 
 describe("persona-ci-documents-service.ts", () => {
-  // 001 – PersonaCIDocumentById OK when doc exists
-  it("001 PersonaCIDocumentById returns OK when doc exists", async () => {
+  // 001 – PersonaCIDocumentsByIds OK when doc exists
+  it("001 PersonaCIDocumentsByIds returns the doc when it exists", async () => {
     const doc = makeCIDoc("ci-1");
     historyItems.push(doc);
 
-    const result = await PersonaCIDocumentById("ci-1");
+    const result = await PersonaCIDocumentsByIds(["ci-1"]);
     expect(result.status).toBe("OK");
     if (result.status === "OK") {
-      expect(result.response.id).toBe("ci-1");
+      expect(result.response.map((d) => d.id)).toEqual(["ci-1"]);
     }
   });
 
-  // 002 – PersonaCIDocumentById NOT_FOUND when missing
-  it("002 PersonaCIDocumentById returns NOT_FOUND when missing", async () => {
-    const result = await PersonaCIDocumentById("missing");
-    expect(result.status).toBe("NOT_FOUND");
+  // 002 – PersonaCIDocumentsByIds without a missing doc
+  it("002 PersonaCIDocumentsByIds leaves out a missing doc", async () => {
+    const result = await PersonaCIDocumentsByIds(["missing"]);
+    expect(result.status === "OK" && result.response).toEqual([]);
   });
 
   // 003 – PersonaCIDocumentsByIds returns filtered list

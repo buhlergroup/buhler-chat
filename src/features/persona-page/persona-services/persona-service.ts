@@ -20,16 +20,12 @@ import { SqlQuerySpec } from "@azure/cosmos";
 import {
   AccessGroup,
   DefaultTools,
-  DocumentMetadata,
   PERSONA_ATTRIBUTE,
   PersonaModel,
   PersonaModelSchema,
   SharePointFile,
 } from "./models";
-import {
-  DeletePersonaDocumentsByPersonaId,
-  UpdateOrAddPersonaDocuments as AddOrUpdatePersonaDocuments,
-} from "./persona-documents-service";
+import { DeletePersonaDocumentsByPersonaId } from "./persona-documents-service";
 import { 
   PersonaCIDocumentsByIds, 
   DownloadSharePointFile 
@@ -54,6 +50,7 @@ import {
   uploadSkillArchivesForCodeInterpreter,
 } from "./skills/persona-skill-store";
 import { deleteFileSourcesForPersona } from "./sharepoint-files/sharepoint-file-store";
+import { agentFilesNeedCodeInterpreter } from "./agent-files/agent-file-requirements";
 import { getCodeInterpreterFileLimit } from "@/features/chat-page/chat-services/code-interpreter-constants";
 import {
   extensionIdsForAgentSave,
@@ -70,7 +67,6 @@ interface PersonaInput {
     id: string;
     source: "SHAREPOINT";
   };
-  codeInterpreterDocumentIds?: string[];
   selectedModel?: string;
   subAgentIds?: string[];
   defaultTools?: DefaultTools;
@@ -118,22 +114,10 @@ export const FindPersonaByID = async (
 };
 
 export const CreatePersona = async (
-  props: PersonaInput,
-  sharePointFiles: DocumentMetadata[]
+  props: PersonaInput
 ): Promise<ServerActionResponse<PersonaModel>> => {
   try {
     // TODO: check if the user is part of the access group
-
-    const personaDocumentIds = await AddOrUpdatePersonaDocuments(
-      sharePointFiles,
-      []
-    );
-    if (personaDocumentIds.status !== "OK") {
-      return {
-        status: "ERROR",
-        errors: personaDocumentIds.errors,
-      };
-    }
 
     // A new agent has no stored extension ids: only published extensions and
     // the user's own are stored (extensionIdsForAgentSave).
@@ -160,9 +144,11 @@ export const CreatePersona = async (
       updatedAt: new Date(),
       extensionIds,
       type: "PERSONA",
-      personaDocumentIds: personaDocumentIds.response,
+      // A new agent has no files; the Files section adds them after the
+      // first save (agent-file-service).
+      personaDocumentIds: [],
       accessGroup: props.accessGroup,
-      codeInterpreterDocumentIds: props.codeInterpreterDocumentIds || [],
+      codeInterpreterDocumentIds: [],
       selectedModel: props.selectedModel,
       subAgentIds: props.subAgentIds || [],
       defaultTools: props.defaultTools,
@@ -269,31 +255,27 @@ export const DeletePersona = async (
   }
 };
 
+/**
+ * Saves the form of the agent editor. The file lists (personaDocumentIds,
+ * codeInterpreterDocumentIds) are NOT part of the form: they stay as stored
+ * and only the agent file actions change them (agent-file-store). The write
+ * is etag-checked, so a file added a moment before the save is never
+ * dropped: on a conflict the row is read again and the form applied anew.
+ */
 export const UpsertPersona = async (
-  personaInput: PersonaModel,
-  sharePointFiles: DocumentMetadata[]
+  personaInput: PersonaModel
 ): Promise<ServerActionResponse<PersonaModel>> => {
   try {
-    const personaResponse = await EnsurePersonaOperation(personaInput.id);
+    for (let attempt = 0; ; attempt++) {
+      const personaResponse = await EnsurePersonaOperation(personaInput.id);
 
-    // TODO: check if the user is part of the access group
+      // TODO: check if the user is part of the access group
 
-    if (personaResponse.status === "OK") {
-      const { response: persona } = personaResponse;
-
-      // The documents to remove are computed from the STORED list, not from
-      // the ids the client sends, so a save can only remove documents of
-      // this agent.
-      const personaDocumentIdsResponse = await AddOrUpdatePersonaDocuments(
-        sharePointFiles,
-        persona.personaDocumentIds || []
-      );
-
-      let personaDocumentIds: string[] = [];
-
-      if (personaDocumentIdsResponse.status == "OK") {
-        personaDocumentIds = personaDocumentIdsResponse.response;
+      if (personaResponse.status !== "OK") {
+        return personaResponse;
       }
+
+      const persona = personaResponse.response as PersonaModel & { _etag?: string };
 
       const wasPublished = persona.isPublished;
       const willPublish = personaInput.isPublished;
@@ -319,6 +301,13 @@ export const UpsertPersona = async (
         agentId: persona.id,
       });
 
+      // Code, skill and On-demand files need the code interpreter: while the
+      // agent has one, the default tool stays on (the editor shows it locked).
+      const defaultTools: DefaultTools =
+        (await agentFilesNeedCodeInterpreter(persona))
+          ? { ...(personaInput.defaultTools ?? {}), codeInterpreter: true }
+          : personaInput.defaultTools;
+
       const modelToUpdate: PersonaModel = {
         ...persona,
         name: personaInput.name,
@@ -340,11 +329,12 @@ export const UpsertPersona = async (
         updatedAt: new Date(),
         extensionIds,
         accessGroup: personaInput.accessGroup,
-        personaDocumentIds: personaDocumentIds,
-        codeInterpreterDocumentIds: personaInput.codeInterpreterDocumentIds || [],
+        // The stored file lists, never the client's (see above).
+        personaDocumentIds: persona.personaDocumentIds || [],
+        codeInterpreterDocumentIds: persona.codeInterpreterDocumentIds || [],
         selectedModel: personaInput.selectedModel,
         subAgentIds: personaInput.subAgentIds || [],
-        defaultTools: personaInput.defaultTools,
+        defaultTools,
       };
 
       const validationResponse = ValidateSchema(modelToUpdate);
@@ -352,43 +342,41 @@ export const UpsertPersona = async (
         return validationResponse;
       }
 
-      const { resource } = await HistoryContainer().items.upsert<PersonaModel>(
-        modelToUpdate
-      );
+      try {
+        const { resource } = await HistoryContainer()
+          .item(persona.id, persona.userId)
+          .replace<PersonaModel>(
+            modelToUpdate,
+            persona._etag
+              ? { accessCondition: { type: "IfMatch", condition: persona._etag } }
+              : undefined
+          );
 
-      // the check is here so that we are sure that a [] is saved for the personaDocumentIds
-      if (personaDocumentIdsResponse.status !== "OK") {
-        RevalidateCache({
-          page: "persona",
-        });
-        RevalidateCache({
-          page: "agent",
-        });
+        if (resource) {
+          return {
+            status: "OK",
+            response: resource,
+          };
+        }
 
         return {
           status: "ERROR",
-          errors: personaDocumentIdsResponse.errors,
+          errors: [
+            {
+              message: "Error updating persona",
+            },
+          ],
         };
+      } catch (error) {
+        const code =
+          (error as { code?: number })?.code ??
+          (error as { statusCode?: number })?.statusCode;
+        // 412: the row changed since it was read (a file was added or
+        // removed). Read it again and apply the form once more.
+        if (code === 412 && attempt < 4) continue;
+        throw error;
       }
-
-      if (resource) {
-        return {
-          status: "OK",
-          response: resource,
-        };
-      }
-
-      return {
-        status: "ERROR",
-        errors: [
-          {
-            message: "Error updating persona",
-          },
-        ],
-      };
     }
-
-    return personaResponse;
   } catch (error) {
     return {
       status: "ERROR",

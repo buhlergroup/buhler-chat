@@ -27,15 +27,6 @@ import { ResponseType } from "@microsoft/microsoft-graph-client";
 import { getCodeInterpreterFileLimit } from "@/features/chat-page/chat-services/code-interpreter-constants";
 import { checkPersonaEdit } from "./persona-access";
 
-/**
- * Get a Code Interpreter persona document by ID
- */
-export const PersonaCIDocumentById = async (
-  id: string
-): Promise<ServerActionResponse<PersonaCIDocument>> => {
-  return FindCIDocumentForCurrentUser(id);
-};
-
 const FindCIDocumentForCurrentUser = async (
   id: string,
   cache?: PersonaAccessCache
