@@ -133,6 +133,8 @@ describe("persona-ci-documents-service.ts", () => {
     const result = await DeletePersonaCIDocumentById("ci-del");
     expect(result.status).toBe("OK");
     expect(deleteSpy).toHaveBeenCalledTimes(1);
+    // The delete runs in the caller's own partition, so only own docs go.
+    expect(historyContainer.item).toHaveBeenCalledWith("ci-del", USER_HASH);
   });
 
   // 005 – DeletePersonaCIDocumentById ERROR on Cosmos throw
@@ -147,9 +149,15 @@ describe("persona-ci-documents-service.ts", () => {
   });
 
   // 006 – DeletePersonaCIDocumentsByPersonaId deletes every owned CI doc
-  it("006 DeletePersonaCIDocumentsByPersonaId deletes 3 docs", async () => {
+  it("006 DeletePersonaCIDocumentsByPersonaId deletes 3 docs (owner, allowed)", async () => {
     const ids = ["ci-1", "ci-2", "ci-3"];
-    ids.forEach((id) => historyItems.push(makeCIDoc(id)));
+    historyItems.push({
+      id: "persona-1",
+      type: "PERSONA",
+      userId: USER_HASH,
+      isPublished: false,
+      codeInterpreterDocumentIds: ids,
+    });
 
     const deleteSpy = vi.fn().mockResolvedValue({ resource: undefined });
     historyContainer.item.mockImplementation((_id: string) => ({
@@ -160,6 +168,43 @@ describe("persona-ci-documents-service.ts", () => {
     const result = await DeletePersonaCIDocumentsByPersonaId("persona-1", ids);
     expect(result.status).toBe("OK");
     expect(deleteSpy).toHaveBeenCalledTimes(3);
+  });
+
+  it("006b DeletePersonaCIDocumentsByPersonaId: a user who can only use a published agent is not allowed (denied)", async () => {
+    historyItems.push({
+      id: "persona-pub",
+      type: "PERSONA",
+      userId: "other-hash",
+      isPublished: true,
+      codeInterpreterDocumentIds: ["ci-x"],
+    });
+    const deleteSpy = vi.fn().mockResolvedValue({ resource: undefined });
+    historyContainer.item.mockImplementation(() => ({ read: vi.fn(), delete: deleteSpy }));
+
+    const result = await DeletePersonaCIDocumentsByPersonaId("persona-pub", ["ci-x"]);
+    expect(result.status).toBe("UNAUTHORIZED");
+    if (result.status === "UNAUTHORIZED") {
+      expect(result.errors[0].message).toMatch(/not allowed/);
+    }
+    expect(deleteSpy).not.toHaveBeenCalled();
+  });
+
+  it("006c DeletePersonaCIDocumentsByPersonaId deletes only ids the persona references", async () => {
+    historyItems.push({
+      id: "persona-2",
+      type: "PERSONA",
+      userId: USER_HASH,
+      isPublished: false,
+      codeInterpreterDocumentIds: ["ci-own"],
+    });
+    const deleteSpy = vi.fn().mockResolvedValue({ resource: undefined });
+    historyContainer.item.mockImplementation(() => ({ read: vi.fn(), delete: deleteSpy }));
+
+    const result = await DeletePersonaCIDocumentsByPersonaId("persona-2", ["ci-own", "ci-foreign"]);
+    expect(result.status).toBe("OK");
+    expect(deleteSpy).toHaveBeenCalledTimes(1);
+    expect(historyContainer.item).toHaveBeenCalledWith("ci-own", USER_HASH);
+    expect(historyContainer.item).not.toHaveBeenCalledWith("ci-foreign", expect.anything());
   });
 
   // 007 – UpdateOrAddPersonaCIDocuments upserts each doc

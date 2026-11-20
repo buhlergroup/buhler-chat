@@ -21,6 +21,7 @@ import { SqlQuerySpec } from "@azure/cosmos";
 import { logInfo, logError, logDebug } from "@/features/common/services/logger";
 import { ResponseType } from "@microsoft/microsoft-graph-client";
 import { getCodeInterpreterFileLimit } from "@/features/chat-page/chat-services/code-interpreter-constants";
+import { checkPersonaEdit } from "./persona-access";
 
 /**
  * Get a Code Interpreter persona document by ID
@@ -90,13 +91,17 @@ export const PersonaCIDocumentsByIds = async (
 };
 
 /**
- * Delete a Code Interpreter persona document by ID
+ * Delete a Code Interpreter persona document by ID.
+ *
+ * The delete runs in the caller's partition (/userId), so a user can delete
+ * only CI documents that the user created. An id of another user's document
+ * is not found there and the delete fails.
  */
 export const DeletePersonaCIDocumentById = async (
   id: string
 ): Promise<ServerActionResponse<boolean>> => {
   try {
-    await HistoryContainer().item(id, id).delete();
+    await HistoryContainer().item(id, await userHashedId()).delete();
     return { status: "OK", response: true };
   } catch (error) {
     return {
@@ -107,15 +112,24 @@ export const DeletePersonaCIDocumentById = async (
 };
 
 /**
- * Delete all Code Interpreter persona documents for a persona
+ * Delete Code Interpreter persona documents of a persona. Needs edit rights
+ * on the persona (owner or admin, the rule of EnsurePersonaOperation), and
+ * only ids that the persona references are deleted.
  */
 export const DeletePersonaCIDocumentsByPersonaId = async (
   personaId: string,
   ciDocumentIds: string[]
 ): Promise<ServerActionResponse<boolean>> => {
   try {
+    const persona = await checkPersonaEdit(personaId);
+    if (persona.status !== "OK") {
+      return persona;
+    }
+    const ownIds = new Set(persona.response.codeInterpreterDocumentIds || []);
     await Promise.all(
-      ciDocumentIds.map((id) => DeletePersonaCIDocumentById(id))
+      ciDocumentIds
+        .filter((id) => ownIds.has(id))
+        .map((id) => DeletePersonaCIDocumentById(id))
     );
     return { status: "OK", response: true };
   } catch (error) {

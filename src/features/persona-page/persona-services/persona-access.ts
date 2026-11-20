@@ -31,6 +31,7 @@ import "server-only";
  */
 
 import { getCurrentUser, userHashedId } from "@/features/auth-page/helpers";
+import { ServerActionResponse } from "@/features/common/server-action-response";
 import { HistoryContainer } from "@/features/common/services/cosmos";
 import { SqlQuerySpec } from "@azure/cosmos";
 import { AccessGroupById } from "./access-group-service";
@@ -78,6 +79,45 @@ export const canOpenPersona = async (
   if (groupId) return isGroupMember(groupId);
 
   return persona.isPublished === true;
+};
+
+/**
+ * Who may CHANGE an agent and its documents: the owner or an admin. Being
+ * able to open (use) a shared or published agent does not give edit rights.
+ */
+export const canEditPersona = (
+  viewer: PersonaViewer,
+  persona: Pick<PersonaAccessFields, "userId">
+): boolean => viewer.isAdmin || persona.userId === viewer.userId;
+
+export const PERSONA_EDIT_NOT_ALLOWED =
+  "You are not allowed to change this agent. Only its owner or an admin can change it.";
+
+/**
+ * The edit check for every mutating persona action:
+ *   - OK with the stored persona when the user may edit it,
+ *   - UNAUTHORIZED ("not allowed") when the user can open it but not edit it,
+ *   - NOT_FOUND when it does not exist or the user cannot open it, so the
+ *     answer does not tell that a private agent exists.
+ */
+export const checkPersonaEdit = async (
+  personaId: string,
+  isGroupMember: (groupId: string) => Promise<boolean> = isAccessGroupMember
+): Promise<ServerActionResponse<PersonaModel>> => {
+  const persona = await findPersonaDocument(personaId);
+  if (persona) {
+    const viewer = await currentPersonaViewer();
+    if (canEditPersona(viewer, persona)) {
+      return { status: "OK", response: persona };
+    }
+    if (await canOpenPersona(viewer, persona, isGroupMember)) {
+      return {
+        status: "UNAUTHORIZED",
+        errors: [{ message: PERSONA_EDIT_NOT_ALLOWED }],
+      };
+    }
+  }
+  return { status: "NOT_FOUND", errors: [{ message: "Persona not found" }] };
 };
 
 /**

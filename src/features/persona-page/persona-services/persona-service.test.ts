@@ -36,7 +36,7 @@ vi.mock("@/features/auth-page/auth-api", () => ({ options: {}, authOptions: {} }
 
 // ── persona-documents-service mock ──────────────────────────────────────────
 vi.mock("@/features/persona-page/persona-services/persona-documents-service", () => ({
-  DeletePersonaDocumentsByPersonaId: vi.fn(async () => undefined),
+  DeletePersonaDocumentsByPersonaId: vi.fn(async () => ({ status: "OK", response: undefined })),
   UpdateOrAddPersonaDocuments: vi.fn(async () => ({ status: "OK", response: [] })),
 }));
 
@@ -58,8 +58,8 @@ vi.mock("@/features/chat-page/chat-services/code-interpreter-service", () => ({
 }));
 
 // ── chat-thread-service mock ─────────────────────────────────────────────────
-vi.mock("@/features/chat-page/chat-services/chat-thread-service", () => ({
-  UpsertChatThread: vi.fn(async (payload: any) => ({ status: "OK", response: { ...payload } })),
+vi.mock("@/features/chat-page/chat-services/chat-thread-write", () => ({
+  saveChatThread: vi.fn(async (payload: any) => ({ status: "OK", response: { ...payload } })),
 }));
 
 // ── access-group-service mock ────────────────────────────────────────────────
@@ -97,7 +97,7 @@ import {
 } from "./persona-ci-documents-service";
 
 import { UploadFileForCodeInterpreter } from "@/features/chat-page/chat-services/code-interpreter-service";
-import { UpsertChatThread } from "@/features/chat-page/chat-services/chat-thread-service";
+import { saveChatThread as UpsertChatThread } from "@/features/chat-page/chat-services/chat-thread-write";
 import { AccessGroupById, UserAccessGroups } from "./access-group-service";
 
 // ── helpers ──────────────────────────────────────────────────────────────────
@@ -136,6 +136,7 @@ beforeEach(() => {
 
   // restore default mock implementations after clearAllMocks
   vi.mocked(UpdateOrAddPersonaDocuments).mockResolvedValue({ status: "OK", response: [] });
+  vi.mocked(DeletePersonaDocumentsByPersonaId).mockResolvedValue({ status: "OK", response: undefined });
   vi.mocked(AccessGroupById).mockResolvedValue({ status: "OK", response: { id: "g1", name: "G", description: "" } });
   vi.mocked(UserAccessGroups).mockResolvedValue({ status: "OK", response: [] });
   vi.mocked(PersonaCIDocumentsByIds).mockResolvedValue({ status: "OK", response: [] });
@@ -358,6 +359,25 @@ describe("persona-service.ts", () => {
     seedPersona({ id: "p-other", userId: "other-hash" });
     const result = await EnsurePersonaOperation("p-other");
     expect(result.status).toBe("UNAUTHORIZED");
+  });
+
+  // 009b – a user who can only OPEN (use) a published agent may not edit it
+  it("009b EnsurePersonaOperation: published agent of another user is not editable", async () => {
+    await setSession(defaultSession);
+    seedPersona({ id: "p-published", userId: "other-hash", isPublished: true });
+    const result = await EnsurePersonaOperation("p-published");
+    expect(result.status).toBe("UNAUTHORIZED");
+    if (result.status === "UNAUTHORIZED") {
+      expect(result.errors[0].message).toMatch(/not allowed/);
+    }
+  });
+
+  // 009c – UpsertPersona removes only documents of the stored persona
+  it("009c UpsertPersona computes removals from the stored document ids, not from the input", async () => {
+    await setSession(defaultSession);
+    const p = seedPersona({ id: "p-docs", personaDocumentIds: ["own-doc"] });
+    await UpsertPersona({ ...p, personaDocumentIds: ["foreign-doc"] }, []);
+    expect(UpdateOrAddPersonaDocuments).toHaveBeenCalledWith([], ["own-doc"]);
   });
 
   // 010 – EnsurePersonaOperation returns OK for admin
