@@ -31,6 +31,8 @@ import {
   planMcpConfig,
   type SecretPlan,
 } from "./extension-save";
+import { extensionCredentialInfo, type ExtensionCredentialInfo } from "./extension-credentials";
+import { findUsableExtension } from "./extension-runtime";
 import { discoverMcpTools } from "./mcp/mcp-discovery";
 import { hasMcpUserTokens } from "./mcp/mcp-oauth";
 import {
@@ -555,6 +557,32 @@ export const FindMissingExtensionIds = async (
       status: "ERROR",
       errors: [{ message: `Error finding Extension: ${error}` }],
     };
+  }
+};
+
+/**
+ * For each extension id the current user may use (owner, published, or
+ * through `personaId`): does it send secret values its owner stored, and
+ * does the current user own it. Booleans only, for the notices in the agent
+ * editor and the chat; ids the user may not use are left out.
+ */
+export const GetExtensionCredentialInfo = async (
+  extensionIds: string[],
+  personaId?: string
+): Promise<ServerActionResponse<ExtensionCredentialInfo[]>> => {
+  try {
+    const ids = [...new Set((Array.isArray(extensionIds) ? extensionIds : []).filter((id) => typeof id === "string"))].slice(0, 50);
+    const agentId = typeof personaId === "string" && personaId ? personaId : undefined;
+    const userId = await userHashedId();
+    const result: ExtensionCredentialInfo[] = [];
+    for (const id of ids) {
+      const extension = await findUsableExtension({ extensionId: id, personaId: agentId, userId });
+      if (extension) result.push(extensionCredentialInfo(extension, userId));
+    }
+    return { status: "OK", response: result };
+  } catch (error) {
+    logWarn("GetExtensionCredentialInfo failed", { errorName: (error as { name?: string })?.name });
+    return { status: "ERROR", errors: [{ message: "Could not read the extension details." }] };
   }
 };
 

@@ -22,6 +22,7 @@ import {
   mcpOAuthUserSecretNames,
 } from "../extension-secrets";
 import type { ExtensionModel, McpToolInfo } from "../models";
+import { mcpSignInNotice, type McpSignInNotice } from "../extension-credentials";
 import { MCP_LIMITS } from "./mcp-client";
 import { discoverMcpTools } from "./mcp-discovery";
 import { discoverDraftMcpTools, type McpDraftInput } from "./mcp-draft-discovery";
@@ -113,12 +114,13 @@ export async function DiscoverDraftMcpTools(
  * who may use the extension under the access rule (owner, published, or
  * through `personaId`); ownership is not required. Returns the URL the
  * browser opens; the callback route finishes the sign-in and re-checks
- * access.
+ * access. For an extension the user does not own, `notice` names the host of
+ * the sign-in page and of the MCP server, for the browser to show first.
  */
 export async function StartMcpOAuth(
   extensionId: string,
   options: { personaId?: string; returnTo?: string } = {}
-): Promise<ServerActionResponse<{ authorizationUrl?: string; connected: boolean }>> {
+): Promise<ServerActionResponse<{ authorizationUrl?: string; connected: boolean; notice?: McpSignInNotice }>> {
   try {
     const userId = await userHashedId();
     const personaId = typeof options.personaId === "string" ? options.personaId : undefined;
@@ -166,7 +168,11 @@ export async function StartMcpOAuth(
     if (!url) {
       return { status: "ERROR", errors: [{ message: "The MCP server did not return a sign-in page." }] };
     }
-    return { status: "OK", response: { authorizationUrl: url.toString(), connected: false } };
+    const notice = mcpSignInNotice(extension, url, userId);
+    return {
+      status: "OK",
+      response: { authorizationUrl: url.toString(), connected: false, ...(notice ? { notice } : {}) },
+    };
   } catch (error) {
     logWarn("StartMcpOAuth failed", {
       extensionId,

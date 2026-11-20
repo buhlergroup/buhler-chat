@@ -85,6 +85,7 @@ import {
   FindAllExtensionForCurrentUser,
   FindAllExtensionForCurrentUserAndIds,
   CreateChatWithExtension,
+  GetExtensionCredentialInfo,
 } from "./extension-service";
 
 import { UpsertChatThread } from "@/features/chat-page/chat-services/chat-thread-service";
@@ -576,5 +577,39 @@ describe("extension-service.ts", () => {
       const result = await FindMissingExtensionIds(["still-here", "deleted-one"]);
       expect(result).toEqual({ status: "OK", response: ["deleted-one"] });
     });
+  });
+});
+
+// Pinned: the browser learns only booleans about stored credentials, and
+// only for extensions the user may use.
+describe("GetExtensionCredentialInfo", () => {
+  it("answers with booleans for usable extensions and leaves out the others", async () => {
+    seedExtension({
+      id: "pubmcp",
+      userId: "other-user",
+      isPublished: true,
+      functions: [],
+      headers: [],
+      kind: "mcp",
+      mcp: {
+        url: "https://mcp.example.com/mcp",
+        transport: "auto",
+        secrets: [{ id: "kv-row-1", name: "X-Hidden-Key", target: "X-Hidden-Key", placement: "header", value: "**********" }],
+        toolAllowList: [],
+        auth: "none",
+      },
+    });
+    seedExtension({ id: "ownhttp" });
+    seedExtension({ id: "privother", userId: "other-user", isPublished: false });
+
+    const result = await GetExtensionCredentialInfo(["pubmcp", "ownhttp", "privother"]);
+    expect(result).toEqual({
+      status: "OK",
+      response: [
+        { id: "pubmcp", usesStoredSecrets: true, ownedByYou: false },
+        { id: "ownhttp", usesStoredSecrets: true, ownedByYou: true },
+      ],
+    });
+    expect(JSON.stringify(result)).not.toMatch(/X-Hidden-Key|kv-row-1|X-Api-Key|client-h-1/);
   });
 });

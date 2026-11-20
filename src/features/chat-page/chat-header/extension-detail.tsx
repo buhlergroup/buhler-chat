@@ -10,9 +10,10 @@ import {
   SheetTrigger,
 } from "@/features/ui/sheet";
 import { Switch } from "@/features/ui/switch";
-import { Globe, PocketKnife } from "lucide-react";
+import { Globe, KeyRound, PocketKnife } from "lucide-react";
 import { FC, useEffect, useState } from "react";
 import { GetMcpConnections } from "@/features/extensions-page/extension-services/mcp/mcp-service";
+import { GetExtensionCredentialInfo } from "@/features/extensions-page/extension-services/extension-service";
 import { McpConnectButton } from "@/features/extensions-page/mcp-connect-button";
 import {
   AddExtensionToChatThread,
@@ -71,6 +72,26 @@ export const ExtensionDetail: FC<Props> = (props) => {
     };
   }, [open, mcpIdsKey, props.parent, props.personaId]);
 
+  // Extensions that run with the stored credentials of their owner (another
+  // user). The server answers with booleans only (chat only).
+  const [ownerCredentialIds, setOwnerCredentialIds] = useState<Set<string>>(new Set());
+  const extensionIdsKey = props.extensions.map((e) => e.id).join(",");
+  useEffect(() => {
+    if (!open || props.parent !== "chat" || !extensionIdsKey) return;
+    let cancelled = false;
+    GetExtensionCredentialInfo(extensionIdsKey.split(","), props.personaId)
+      .then((r) => {
+        if (cancelled || r.status !== "OK") return;
+        setOwnerCredentialIds(
+          new Set(r.response.filter((i) => i.usesStoredSecrets && !i.ownedByYou).map((i) => i.id))
+        );
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, [open, extensionIdsKey, props.parent, props.personaId]);
+
   const installedCount = props.installedExtensionIds?.length ?? 0;
   const totalCount = props.extensions.length;
 
@@ -112,6 +133,12 @@ export const ExtensionDetail: FC<Props> = (props) => {
                     <div className="text-muted-foreground">
                       {extension.description}
                     </div>
+                    {ownerCredentialIds.has(extension.id) && (
+                      <div className="flex items-center gap-1 text-xs text-muted-foreground">
+                        <KeyRound size={12} aria-hidden="true" />
+                        <span>Uses the credentials of the extension owner</span>
+                      </div>
+                    )}
                     {extension.id in connections && (
                       <div>
                         <McpConnectButton
