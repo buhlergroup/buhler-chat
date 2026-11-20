@@ -84,8 +84,14 @@ export const CodeInterpreterFileInput = () => {
       
       addAttachedFile(attachedFile);
 
-      // Persist to database
-      await AddAttachedFile(chatThreadId, attachedFile);
+      // Persist to database. The chat route only accepts code interpreter
+      // files recorded on the thread, so a failed write must not leave the
+      // file looking attached.
+      const persisted = await AddAttachedFile(chatThreadId, attachedFile);
+      if (persisted.status !== "OK") {
+        removeAttachedFile(attachedFile.id);
+        throw new Error(persisted.errors[0]?.message ?? "Could not attach the file to the chat");
+      }
 
       showSuccess({
         title: "File uploaded",

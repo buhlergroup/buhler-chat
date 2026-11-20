@@ -19,6 +19,7 @@ import {
 } from "ai";
 import type { StepResult, ToolSet } from "ai";
 import {
+  selectAttributableCodeInterpreterFileIds,
   validateCodeInterpreterFileIds,
   validateMultimodalInput,
 } from "@/features/chat-page/chat-services/chat-api/validate-input";
@@ -278,14 +279,31 @@ export async function POST(req: Request) {
   // files are mapped onto the CURRENT OpenAI file of each skill version (a
   // replaced skill's old file is deleted; a deleted skill's file is dropped).
   const agentSkills = await loadUsableSkills(ctx.thread.personaId);
+  // Only the code interpreter files the server can attribute to this request
+  // reach the container: the files attached to this thread (user uploads, the
+  // agent's code interpreter documents, the skill archives) and the current
+  // skill archives of an agent the caller may use. An OpenAI file id from the
+  // browser alone is not enough.
+  const ciAttachedFiles = ctx.attachedFiles.filter((f) => f.type !== "search-indexed");
+  const attributedCiFiles = selectAttributableCodeInterpreterFileIds({
+    requestedFileIds: payload.codeInterpreterFileIds ?? [],
+    attachedFiles: ciAttachedFiles,
+    extraAllowedIds: agentSkills.map((s) => s.openAiFileId),
+  });
+  if (attributedCiFiles.droppedCount > 0) {
+    logWarn("/api/chat dropped code interpreter files not attached to the thread", {
+      threadId: ctx.thread.id,
+      droppedCount: attributedCiFiles.droppedCount,
+    });
+  }
   const resolveSkillFiles = () =>
     ctx.thread.personaId
       ? resolveSkillCodeInterpreterFiles({
           skills: agentSkills,
-          attachedFiles: ctx.attachedFiles,
-          requestedFileIds: payload.codeInterpreterFileIds ?? [],
+          attachedFiles: ciAttachedFiles,
+          requestedFileIds: attributedCiFiles.fileIds,
         })
-      : { fileIds: payload.codeInterpreterFileIds ?? [], skillsInCodeInterpreter: [] };
+      : { fileIds: attributedCiFiles.fileIds, skillsInCodeInterpreter: [] };
   const skillFiles = resolveSkillFiles();
   const skillsInCodeInterpreter = effectiveToolsSafe.codeInterpreter
     ? skillFiles.skillsInCodeInterpreter

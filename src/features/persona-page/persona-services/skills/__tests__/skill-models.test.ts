@@ -90,14 +90,40 @@ describe("resolveSkillCodeInterpreterFiles", () => {
     expect(out.fileIds).toEqual(["file-old"]);
   });
 
-  it("passes unknown ids and non-skill files through", () => {
+  it("passes attached non-skill files through", () => {
     const out = resolveSkillCodeInterpreterFiles({
       skills: [],
       attachedFiles: attached,
-      requestedFileIds: ["file-user", "file-new-upload"],
+      requestedFileIds: ["file-user"],
     });
-    expect(out.fileIds).toEqual(["file-user", "file-new-upload"]);
+    expect(out.fileIds).toEqual(["file-user"]);
     expect(out.skillsInCodeInterpreter).toEqual([]);
+    expect(out.droppedCount).toBe(0);
+  });
+
+  // Pinned: ids that are not attached to the thread used to pass through, so
+  // a copied file id (e.g. the shared archive of a skill the user can no
+  // longer use, or another user's upload) reached the container.
+  it("drops requested ids that are not attached to the thread", () => {
+    const out = resolveSkillCodeInterpreterFiles({
+      skills: [{ name: "demo", openAiFileId: "file-new" }],
+      attachedFiles: attached,
+      requestedFileIds: ["file-user", "file-foreign", "file-other-skill"],
+    });
+    expect(out.fileIds).toEqual(["file-user"]);
+    expect(out.skillsInCodeInterpreter).toEqual([]);
+    expect(out.droppedCount).toBe(2);
+  });
+
+  it("accepts the current file of a usable skill even when it is not attached", () => {
+    const out = resolveSkillCodeInterpreterFiles({
+      skills: [{ name: "demo", openAiFileId: "file-new" }],
+      attachedFiles: attached,
+      requestedFileIds: ["file-new", "file-old"],
+    });
+    expect(out.fileIds).toEqual(["file-new"]);
+    expect(out.skillsInCodeInterpreter).toEqual(["demo"]);
+    expect(out.droppedCount).toBe(0);
   });
 });
 

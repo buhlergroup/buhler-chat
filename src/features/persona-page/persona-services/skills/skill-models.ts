@@ -200,24 +200,42 @@ export function buildSkillCatalogPrompt(
  * would make the container creation fail. Here every attached file whose
  * name is a skill archive (`skill-<name>.zip`) is swapped for the current
  * file id of that skill, and dropped when the skill no longer exists or the
- * user may no longer use it. Other files pass through unchanged. The result
- * keeps the request order, so the signature stays stable across turns.
+ * user may no longer use it. Other attached files pass through unchanged.
+ * A requested id that is not attached to the thread is kept only when it is
+ * the current file of a usable skill; any other id is dropped and counted.
+ * The result keeps the request order, so the signature stays stable across
+ * turns.
  */
 export function resolveSkillCodeInterpreterFiles(input: {
   skills: ReadonlyArray<Pick<PersonaSkillModel, "name" | "openAiFileId">>;
   attachedFiles: ReadonlyArray<{ id: string; name: string }>;
   requestedFileIds: ReadonlyArray<string>;
-}): { fileIds: string[]; skillsInCodeInterpreter: string[] } {
+}): { fileIds: string[]; skillsInCodeInterpreter: string[]; droppedCount: number } {
   const nameById = new Map(input.attachedFiles.map((f) => [f.id, f.name]));
   const skillByArchive = new Map(
     input.skills.map((s) => [skillArchiveFileName(s.name), s]),
   );
+  const skillByFileId = new Map(
+    input.skills.filter((s) => s.openAiFileId).map((s) => [s.openAiFileId as string, s]),
+  );
   const fileIds: string[] = [];
   const inCi = new Set<string>();
+  let droppedCount = 0;
   for (const id of input.requestedFileIds) {
     const name = nameById.get(id);
-    if (!name || !/^skill-[a-z0-9-]+\.zip$/.test(name)) {
-      fileIds.push(id);
+    if (name === undefined) {
+      // Not attached to this thread: only the current file of a usable skill.
+      const skill = skillByFileId.get(id);
+      if (!skill) {
+        droppedCount++;
+        continue;
+      }
+      if (!fileIds.includes(id)) fileIds.push(id);
+      inCi.add(skill.name);
+      continue;
+    }
+    if (!/^skill-[a-z0-9-]+\.zip$/.test(name)) {
+      if (!fileIds.includes(id)) fileIds.push(id);
       continue;
     }
     const skill = skillByArchive.get(name);
@@ -226,5 +244,5 @@ export function resolveSkillCodeInterpreterFiles(input: {
     if (!fileIds.includes(current)) fileIds.push(current);
     inCi.add(skill.name);
   }
-  return { fileIds, skillsInCodeInterpreter: [...inCi].sort() };
+  return { fileIds, skillsInCodeInterpreter: [...inCi].sort(), droppedCount };
 }
