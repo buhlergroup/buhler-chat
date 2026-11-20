@@ -1,4 +1,9 @@
 import { z } from "zod";
+import {
+  GRAPH_DRIVE_ID_PATTERN,
+  GRAPH_ITEM_ID_PATTERN,
+  isHttpsUrl,
+} from "@/features/common/services/sharepoint/graph-ids";
 
 /**
  * Agent skills — data model, limits and the access rule.
@@ -64,29 +69,15 @@ export type SkillFileEntry = z.infer<typeof SkillFileEntrySchema>;
 // Linked skills (SharePoint / OneDrive)
 // ---------------------------------------------------------------------------
 
-/**
- * Graph drive ids ("b!..." for SharePoint and OneDrive for Business, hex for
- * personal OneDrive) and item ids ("01ABC...", "ABC!123") only use these
- * characters. Anything else (slash, dot, "?", "%") is refused before a Graph
- * URL is built, so a value from the client cannot change the request path.
- */
-export const GRAPH_DRIVE_ID_PATTERN = /^[A-Za-z0-9!_-]{1,256}$/;
-export const GRAPH_ITEM_ID_PATTERN = /^[A-Za-z0-9!_-]{1,128}$/;
-
-export const isGraphDriveId = (v: unknown): v is string =>
-  typeof v === "string" && GRAPH_DRIVE_ID_PATTERN.test(v);
-export const isGraphItemId = (v: unknown): v is string =>
-  typeof v === "string" && GRAPH_ITEM_ID_PATTERN.test(v);
-
-/** True for an absolute https URL (the editor renders it as a link). */
-export const isHttpsUrl = (v: unknown): v is string => {
-  if (typeof v !== "string" || v.length > 2048) return false;
-  try {
-    return new URL(v).protocol === "https:";
-  } catch {
-    return false;
-  }
-};
+// Graph id and URL checks live in a shared module (also used by the
+// SharePoint files of an agent); re-exported here for the skill code.
+export {
+  GRAPH_DRIVE_ID_PATTERN,
+  GRAPH_ITEM_ID_PATTERN,
+  isGraphDriveId,
+  isGraphItemId,
+  isHttpsUrl,
+} from "@/features/common/services/sharepoint/graph-ids";
 
 /**
  * Where a linked skill comes from, and the SharePoint version of the zip the

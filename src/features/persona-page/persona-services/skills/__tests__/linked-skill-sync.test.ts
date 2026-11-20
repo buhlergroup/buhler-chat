@@ -89,12 +89,12 @@ import {
 import {
   GRAPH_BASE_URL,
   getDriveItemVersion,
-} from "../sharepoint-skill-graph";
+} from "@/features/common/services/sharepoint/graph-drive";
 import {
   ITEM_CHECK_MAX_ENTRIES,
   checkDriveItem,
   clearDriveItemChecks,
-} from "../drive-item-check-cache";
+} from "@/features/common/services/sharepoint/drive-item-check-cache";
 import type { PersonaSkillModel } from "../skill-models";
 
 const goodZip = (description = "Builds demo things v2.") =>

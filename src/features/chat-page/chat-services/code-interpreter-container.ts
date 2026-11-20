@@ -28,6 +28,7 @@ import "server-only";
  * without the prefix stability.
  */
 
+import { toFile } from "openai";
 import { OpenAIV1Instance } from "@/features/common/services/openai";
 import { logError, logInfo } from "@/features/common/services/logger";
 
@@ -168,4 +169,34 @@ export async function ensureCodeInterpreterContainer({
     });
     return undefined;
   }
+}
+
+/**
+ * Puts one file into an existing code interpreter container (the file
+ * appears under /mnt/data, like the files the container was created with).
+ * Returns the path inside the container. Throws when the containers API is
+ * not available or the upload fails.
+ */
+export async function uploadFileToCodeInterpreterContainer(
+  containerId: string,
+  fileName: string,
+  data: Buffer,
+): Promise<{ path: string; fileId?: string }> {
+  const client = OpenAIV1Instance();
+  const files = (client as { containers?: { files?: { create?: unknown } } }).containers?.files;
+  if (typeof files?.create !== "function") {
+    throw new Error("The code interpreter cannot take files on this deployment.");
+  }
+  const created = await (
+    files as {
+      create: (
+        containerId: string,
+        body: { file: unknown },
+      ) => Promise<{ id?: string; path?: string }>;
+    }
+  ).create(containerId, { file: await toFile(data, fileName) });
+  return {
+    path: typeof created?.path === "string" && created.path ? created.path : `/mnt/data/${fileName}`,
+    fileId: created?.id,
+  };
 }
