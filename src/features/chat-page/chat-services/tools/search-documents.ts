@@ -8,6 +8,22 @@ import { userHashedId } from "@/features/auth-page/helpers";
 import { logInfo, logDebug, logError } from "@/features/common/services/logger";
 import { AllowedPersonaDocumentIds } from "@/features/persona-page/persona-services/persona-documents-service";
 import type { ToolContext } from "./tool-context";
+import { odataEq, odataSearchIn } from "@/features/common/odata-filter";
+
+/**
+ * The search filter: the user's own documents of this chat thread, or the
+ * chunks of the persona documents the user may use. Values are quoted and
+ * escaped; persona document ids that are not valid ids are dropped.
+ */
+export function BuildDocumentSearchFilter(
+  userId: string,
+  threadId: string,
+  personaDocumentIds: readonly string[]
+): string {
+  const baseFilter = `(${odataEq("user", userId)} and ${odataEq("chatThreadId", threadId)})`;
+  const personaClause = odataSearchIn("personaDocumentId", personaDocumentIds);
+  return personaClause ? `${baseFilter} or ${personaClause}` : baseFilter;
+}
 
 /**
  * AI SDK v5 tool for RAG document search.
@@ -64,12 +80,11 @@ export function searchDocumentsTool(ctx: ToolContext) {
       const allowedPersonaDocumentIds =
         (await AllowedPersonaDocumentIds(ctx.personaDocumentIds)) ?? [];
 
-      const baseFilter = `(user eq '${userId}' and chatThreadId eq '${ctx.threadId}')`;
-      const personaClause =
-        allowedPersonaDocumentIds.length > 0
-          ? ` or search.in(personaDocumentId, '${allowedPersonaDocumentIds.join(",")}', ',')`
-          : "";
-      const filter = `${baseFilter}${personaClause}`;
+      const filter = BuildDocumentSearchFilter(
+        userId,
+        ctx.threadId,
+        allowedPersonaDocumentIds
+      );
 
       const searchPromise = SimilaritySearch(args.query, top, filter, skip, true);
 

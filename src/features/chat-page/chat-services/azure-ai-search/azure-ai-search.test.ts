@@ -304,3 +304,38 @@ describe("chat-page.unit.search.013 — internal primitives are not Server Actio
     expect((azureSearchModule as Record<string, unknown>).SimpleSearch).toBeUndefined();
   });
 });
+
+describe("chat-page.unit.search.014 — filters quote the values they contain", () => {
+  const captureFilter = () => {
+    const captured: { filter?: string } = {};
+    mockSearch.mockImplementationOnce(async (_text: any, opts: any) => {
+      captured.filter = opts?.filter;
+      return { results: makeSearchResultsGen([]) };
+    });
+    return captured;
+  };
+
+  it("DeleteSearchDocumentByPersonaDocumentId escapes a quote in the id", async () => {
+    const captured = captureFilter();
+    await DeleteSearchDocumentByPersonaDocumentId("x' or true or user eq '");
+    expect(captured.filter).toBe(
+      `personaDocumentId eq 'x'' or true or user eq ''' and user eq '${hashedEmail}'`
+    );
+  });
+
+  it("PersonaDocumentExistsInIndex escapes a quote in the id", async () => {
+    const captured = captureFilter();
+    await PersonaDocumentExistsInIndex("a' or true or personaDocumentId eq 'b");
+    expect(captured.filter).toBe(
+      "personaDocumentId eq 'a'' or true or personaDocumentId eq ''b'"
+    );
+  });
+
+  it("DeleteDocumentsOfChatThread scopes by thread and user", async () => {
+    const captured = captureFilter();
+    await DeleteDocumentsOfChatThread("t1");
+    expect(captured.filter).toBe(
+      `chatThreadId eq 't1' and user eq '${hashedEmail}'`
+    );
+  });
+});

@@ -9,6 +9,7 @@ import {
 import { ServerActionResponse } from "@/features/common/server-action-response";
 import { logError, logInfo, logWarn } from "@/features/common/services/logger";
 import { uniqueId } from "@/features/common/util";
+import { isValidId } from "@/features/common/odata-filter";
 import {
   CHAT_DEFAULT_PERSONA,
   NEW_CHAT_NAME,
@@ -355,12 +356,23 @@ export const UpsertChatThread = async (
 ): Promise<ServerActionResponse<ChatThreadModel>> => {
   try {
     if (chatThread.id) {
-      const response = await EnsureChatThreadOperation(chatThread.id);
-      if (response.status !== "OK") {
-        if (response.status !== "NOT_FOUND") {
-          return response;
-        }
+      if (!isValidId(chatThread.id)) {
+        return {
+          status: "ERROR",
+          errors: [{ message: "Invalid chat thread id" }],
+        };
       }
+      const response = await EnsureChatThreadOperation(chatThread.id);
+      if (response.status === "OK") {
+        // An existing thread stays in its partition.
+        chatThread.userId = response.response.userId;
+      } else if (response.status === "NOT_FOUND") {
+        chatThread.userId = await userHashedId();
+      } else {
+        return response;
+      }
+    } else {
+      chatThread.userId = await userHashedId();
     }
 
     chatThread.lastMessageAt = new Date();
@@ -388,16 +400,18 @@ export const UpsertChatThread = async (
 };
 
 export const CreateChatThread = async (options?: {
-  id?: string;
   name?: string;
   temporary?: boolean;
 }): Promise<ServerActionResponse<ChatThreadModel>> => {
   try {
+    const userId = await userHashedId();
     const modelToSave: ChatThreadModel = {
       name: options?.name ?? NEW_CHAT_NAME,
       useName: (await userSession())!.name,
-      userId: await userHashedId(),
-      id: options?.id ?? uniqueId(),
+      userId,
+      // The server chooses the id. The temporary chat of a user has one fixed
+      // id: the user id.
+      id: options?.temporary ? userId : uniqueId(),
       createdAt: new Date(),
       lastMessageAt: new Date(),
       bookmarked: false,

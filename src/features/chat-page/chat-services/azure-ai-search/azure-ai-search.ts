@@ -11,6 +11,7 @@ import { OpenAIEmbeddingInstance } from "@/features/common/services/openai";
 import { uniqueId } from "@/features/common/util";
 import { AzureKeyCredential, SearchClient, SearchIndex } from "@azure/search-documents";
 import { logDebug, logError } from "@/features/common/services/logger";
+import { odataEq } from "@/features/common/odata-filter";
 
 export interface AzureSearchDocumentIndex {
   id: string;
@@ -138,7 +139,7 @@ export const PersonaDocumentExistsInIndex = async (
 ): Promise<ServerActionResponse<AzureSearchDocumentIndex>> => {
   const result = await SimpleSearch(
     personaDocumentId,
-    `personaDocumentId eq '${personaDocumentId}'`
+    odataEq("personaDocumentId", personaDocumentId)
   );
 
   if (result.status === "OK") {
@@ -413,7 +414,7 @@ export const DeleteDocumentsOfChatThread = async (
     // find all documents for chat thread
     const documentsInChatResponse = await SimpleSearch(
       undefined,
-      `chatThreadId eq '${chatThreadId} and userid eq '${await userHashedId()}'`
+      `${odataEq("chatThreadId", chatThreadId)} and ${odataEq("user", await userHashedId())}`
     );
 
     if (documentsInChatResponse.status === "OK") {
@@ -465,7 +466,7 @@ export const DeleteSearchDocumentByPersonaDocumentId = async (
     // Find the document using personaDocumentId
     const documentResponse = await SimpleSearch(
       undefined,
-      `personaDocumentId eq '${personaDocumentId}' and user eq '${await userHashedId()}'`
+      `${odataEq("personaDocumentId", personaDocumentId)} and ${odataEq("user", await userHashedId())}`
     );
 
     if (

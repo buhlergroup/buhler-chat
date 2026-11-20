@@ -614,3 +614,49 @@ describe("chat-page.unit.thread-service.033 — EnsureChatThreadOperation blocks
     expect(result.status).toBe("UNAUTHORIZED");
   });
 });
+
+describe("chat-page.unit.thread-service.030 — the server chooses chat thread ids", () => {
+  it("CreateChatThread ignores an id sent by the client", async () => {
+    const result = await CreateChatThread({ id: "t1') or (user ne 'x" } as any);
+    expect(result.status).toBe("OK");
+    const doc = historyContainer.items.upsert.mock.calls[0][0];
+    expect(doc.id).not.toBe("t1') or (user ne 'x");
+    expect(doc.id).toMatch(/^[0-9A-Za-z]{36}$/);
+  });
+
+  it("CreateChatThread uses the user id as the id of the temporary chat", async () => {
+    const result = await CreateChatThread({ name: "Temp", temporary: true });
+    expect(result.status).toBe("OK");
+    const doc = historyContainer.items.upsert.mock.calls[0][0];
+    expect(doc.id).toBe(hashedEmail);
+    expect(doc.userId).toBe(hashedEmail);
+  });
+
+  it("UpsertChatThread refuses an id outside the id charset", async () => {
+    const result = await UpsertChatThread(
+      makeThread({ id: "t1') or (user ne 'x" })
+    );
+    expect(result.status).toBe("ERROR");
+    expect(historyContainer.items.upsert).not.toHaveBeenCalled();
+  });
+
+  it("UpsertChatThread stores a new thread in the caller's partition", async () => {
+    const result = await UpsertChatThread(
+      makeThread({ id: "newThread", userId: "other-user-hash" })
+    );
+    expect(result.status).toBe("OK");
+    const doc = historyContainer.items.upsert.mock.calls[0][0];
+    expect(doc.userId).toBe(hashedEmail);
+  });
+
+  it("UpsertChatThread keeps an existing thread in its partition", async () => {
+    historyItems.push(makeThread({ id: "t1" }));
+    const result = await UpsertChatThread(
+      makeThread({ id: "t1", userId: "other-user-hash", name: "Renamed" })
+    );
+    expect(result.status).toBe("OK");
+    const doc = historyContainer.items.upsert.mock.calls[0][0];
+    expect(doc.userId).toBe(hashedEmail);
+    expect(doc.name).toBe("Renamed");
+  });
+});
