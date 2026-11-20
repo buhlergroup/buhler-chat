@@ -154,15 +154,69 @@ describe("find_sharepoint_files", () => {
     expect(graph.count("/items/FOLDER1/children")).toBe(1);
   });
 
-  it("returns at most 50 results and says how many there are", async () => {
-    for (let i = 0; i < 70; i++) {
-      graph.add(DRIVE, { id: `MANY${i}`, name: `img-${String(i).padStart(2, "0")}.jpg`, parent: "FOLDER1" });
-    }
-    graph.pageSize = 25; // also follows @odata.nextLink pages
-    const res = await session().find({ query: "img" });
-    expect(res.files).toHaveLength(50);
-    expect(res.total).toBe(70);
-    expect(res.note).toMatch(/first 50 of 70/);
+  describe("pages of 50 files", () => {
+    // 164 matching files, as in a real folder.
+    const addMany = () => {
+      for (let i = 0; i < 164; i++) {
+        graph.add(DRIVE, { id: `MANY${i}`, name: `img-${String(i).padStart(3, "0")}.jpg`, parent: "FOLDER1" });
+      }
+      graph.pageSize = 25; // also follows @odata.nextLink pages
+    };
+    const names = (from: number, to: number) =>
+      Array.from({ length: to - from }, (_, i) => `img-${String(from + i).padStart(3, "0")}.jpg`);
+
+    it("page 1: the first 50, the total and the offset of the next page", async () => {
+      addMany();
+      const res = await session().find({ query: "img" });
+      expect(res.files.map((f) => f.path)).toEqual(names(0, 50));
+      expect(res).toMatchObject({ total: 164, offset: 0, nextOffset: 50 });
+      expect(res.note).toMatch(/Files 1 to 50 of 164.*offset 50/);
+    });
+
+    it("page 2 from the nextOffset, with one listing for the whole request", async () => {
+      addMany();
+      const s = session();
+      const first = await s.find({ query: "img" });
+      const reads = graph.count("/items/FOLDER1/children");
+      const second = await s.find({ query: "img", offset: first.nextOffset });
+      expect(second.files.map((f) => f.path)).toEqual(names(50, 100));
+      expect(second).toMatchObject({ total: 164, offset: 50, nextOffset: 100 });
+      // The listing limits are unchanged: no second listing for page 2.
+      expect(graph.count("/items/FOLDER1/children")).toBe(reads);
+    });
+
+    it("the last page has the rest and no nextOffset", async () => {
+      addMany();
+      const res = await session().find({ query: "img", offset: 150 });
+      expect(res.files.map((f) => f.path)).toEqual(names(150, 164));
+      expect(res.total).toBe(164);
+      expect(res.nextOffset).toBeUndefined();
+      expect(res.note).toMatch(/Files 151 to 164 of 164\. This is the last page\./);
+    });
+
+    it("an offset past the end: no files, the total and a hint", async () => {
+      addMany();
+      const res = await session().find({ query: "img", offset: 400 });
+      expect(res.files).toEqual([]);
+      expect(res.total).toBe(164);
+      expect(res.nextOffset).toBeUndefined();
+      expect(res.note).toMatch(/Offset 400 is past the last match: 164 file\(s\) match/);
+    });
+
+    it("an invalid offset counts as 0", async () => {
+      addMany();
+      for (const offset of [-5, 2.5, "50"]) {
+        const res = await session().find({ query: "img", offset });
+        expect(res.offset).toBe(0);
+        expect(res.files[0].path).toBe("img-000.jpg");
+      }
+    });
+
+    it("few matches: one page, no paging note", async () => {
+      const res = await session().find({ query: "photo" });
+      expect(res.nextOffset).toBeUndefined();
+      expect(res.note).toBeUndefined();
+    });
   });
 
   it("reports a source the user cannot read as not available", async () => {
