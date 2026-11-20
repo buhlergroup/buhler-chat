@@ -25,7 +25,8 @@ import {
   PersonaModelSchema,
   SharePointFile,
 } from "./models";
-import { DeletePersonaDocumentsByPersonaId } from "./persona-documents-service";
+import { deleteAgentFileRows } from "./persona-file-rows";
+import { retryOnEtagConflict } from "./persona-row";
 import { PersonaCIDocumentsByIds } from "./persona-ci-documents-service";
 import { downloadCodeInterpreterFile } from "./persona-ci-documents-store";
 import { UploadFileForCodeInterpreter } from "@/features/chat-page/chat-services/code-interpreter-service";
@@ -218,12 +219,10 @@ export const DeletePersona = async (
     const personaResponse = await EnsurePersonaOperation(personaId);
 
     if (personaResponse.status === "OK") {
-      const documentsResponse = await DeletePersonaDocumentsByPersonaId(
-        personaId
-      );
-      if (documentsResponse.status !== "OK") {
-        return documentsResponse;
-      }
+      // The agent's files: Search and Code rows (each in its own partition,
+      // with the Search index chunks), skills and SharePoint sources. A
+      // failure is logged and does not stop the agent delete.
+      await deleteAgentFileRows(personaResponse.response);
       await deleteSkillsForPersona(personaId);
       await deleteFileSourcesForPersona(personaId);
 
@@ -264,7 +263,9 @@ export const UpsertPersona = async (
   personaInput: PersonaModel
 ): Promise<ServerActionResponse<PersonaModel>> => {
   try {
-    for (let attempt = 0; ; attempt++) {
+    // On a 412 (a file was added or removed since the read) the row is read
+    // again and the form applied once more (retryOnEtagConflict).
+    return await retryOnEtagConflict(async (): Promise<ServerActionResponse<PersonaModel>> => {
       const personaResponse = await EnsurePersonaOperation(personaInput.id);
 
       // TODO: check if the user is part of the access group
@@ -340,41 +341,31 @@ export const UpsertPersona = async (
         return validationResponse;
       }
 
-      try {
-        const { resource } = await HistoryContainer()
-          .item(persona.id, persona.userId)
-          .replace<PersonaModel>(
-            modelToUpdate,
-            persona._etag
-              ? { accessCondition: { type: "IfMatch", condition: persona._etag } }
-              : undefined
-          );
+      const { resource } = await HistoryContainer()
+        .item(persona.id, persona.userId)
+        .replace<PersonaModel>(
+          modelToUpdate,
+          persona._etag
+            ? { accessCondition: { type: "IfMatch", condition: persona._etag } }
+            : undefined
+        );
 
-        if (resource) {
-          return {
-            status: "OK",
-            response: resource,
-          };
-        }
-
+      if (resource) {
         return {
-          status: "ERROR",
-          errors: [
-            {
-              message: "Error updating persona",
-            },
-          ],
+          status: "OK",
+          response: resource,
         };
-      } catch (error) {
-        const code =
-          (error as { code?: number })?.code ??
-          (error as { statusCode?: number })?.statusCode;
-        // 412: the row changed since it was read (a file was added or
-        // removed). Read it again and apply the form once more.
-        if (code === 412 && attempt < 4) continue;
-        throw error;
       }
-    }
+
+      return {
+        status: "ERROR",
+        errors: [
+          {
+            message: "Error updating persona",
+          },
+        ],
+      };
+    });
   } catch (error) {
     return {
       status: "ERROR",

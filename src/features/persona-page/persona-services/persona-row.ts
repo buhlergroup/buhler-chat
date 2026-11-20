@@ -12,11 +12,38 @@ import { readPersonaRow } from "./skills/persona-skill-store";
 
 type StoredPersona = PersonaModel & { _etag?: string };
 
-const isPreconditionFailed = (error: unknown) =>
+export const isPreconditionFailed = (error: unknown) =>
   ((error as { code?: number })?.code ?? (error as { statusCode?: number })?.statusCode) === 412;
 
-/** Writers that may race for one row (agent files add up to 4 at a time). */
-const MAX_ATTEMPTS = 10;
+/** Attempts of an etag-checked write (agent files add up to 4 at a time). */
+export const ETAG_MAX_ATTEMPTS = 10;
+
+/** Wait before the next attempt: 20 to 200 ms, random, so racing writers spread out. */
+export const etagRetryDelayMs = (random: () => number = Math.random): number =>
+  Math.round(20 + random() * 180);
+
+/** The wait; tests replace it. */
+export const etagRetryClock = {
+  sleep: (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)),
+};
+
+/**
+ * Runs `attempt` (read the row, change it, replace it with If-Match) again
+ * on a 412 (the row changed meanwhile), at most 10 times, with a short random
+ * wait in between. Other errors pass through. The one retry rule for the
+ * persona row (agent files, skill upload, the editor's save).
+ */
+export async function retryOnEtagConflict<T>(attempt: (n: number) => Promise<T>): Promise<T> {
+  for (let n = 0; ; n++) {
+    try {
+      return await attempt(n);
+    } catch (error) {
+      if (!isPreconditionFailed(error)) throw error;
+      if (n + 1 >= ETAG_MAX_ATTEMPTS) throw new Error("The agent changed while saving. Try again.");
+      await etagRetryClock.sleep(etagRetryDelayMs());
+    }
+  }
+}
 
 /**
  * Reads the persona row, applies `mutate` and writes it back only when the
@@ -28,25 +55,19 @@ export async function updatePersonaRow(
   personaId: string,
   mutate: (persona: PersonaModel) => PersonaModel | null,
 ): Promise<PersonaModel | undefined> {
-  for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt++) {
+  return retryOnEtagConflict(async () => {
     const current = (await readPersonaRow(personaId)) as StoredPersona | undefined;
     if (!current) return undefined;
     const next = mutate(current);
     if (!next) return current;
-    try {
-      const { resource } = await HistoryContainer()
-        .item(current.id, current.userId)
-        .replace<PersonaModel>(
-          next,
-          current._etag ? { accessCondition: { type: "IfMatch", condition: current._etag } } : undefined,
-        );
-      return resource ?? next;
-    } catch (error) {
-      if (isPreconditionFailed(error)) continue;
-      throw error;
-    }
-  }
-  throw new Error("The agent changed while saving. Try again.");
+    const { resource } = await HistoryContainer()
+      .item(current.id, current.userId)
+      .replace<PersonaModel>(
+        next,
+        current._etag ? { accessCondition: { type: "IfMatch", condition: current._etag } } : undefined,
+      );
+    return resource ?? next;
+  });
 }
 
 /** Switches the code interpreter on; null when it is on already. */

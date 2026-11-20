@@ -386,22 +386,30 @@ describe("chat-page.unit.search.016 — persona document chunks carry the agent 
     expect(mockDelete).toHaveBeenCalledWith("id", ["c1", "c2"]);
   });
 
-  it("deletes every chunk, also beyond the first page of a search", async () => {
-    const page = (from: number, n: number) =>
-      Array.from({ length: n }, (_, i) => ({ score: 1, document: { id: `c${from + i}` } }));
-    const skips: number[] = [];
+  it("deletes every chunk beyond the first 1000: next round excludes the deleted ids, no skip, no sort", async () => {
+    // 2005 chunks; the index serves any page of the ones the filter allows.
+    const all = Array.from({ length: 2005 }, (_, i) => `c${String(i).padStart(4, "0")}`);
+    const calls: any[] = [];
     mockSearch.mockImplementation(async (_t: any, opts: any) => {
-      skips.push(opts.skip);
-      return { results: makeSearchResultsGen(opts.skip === 0 ? page(0, 1000) : page(1000, 5)) };
+      calls.push(opts);
+      const excluded = new Set<string>(
+        (String(opts.filter).match(/search\.in\(id, '([^']*)'/)?.[1] ?? "").split(",").filter(Boolean),
+      );
+      const page = all.filter((id) => !excluded.has(id)).slice(0, opts.top);
+      return { results: makeSearchResultsGen(page.map((id) => ({ score: 1, document: { id } }))) };
     });
     mockDelete.mockImplementation((async (_key: string, ids: string[]) => ({
       results: ids.map(() => ({ succeeded: true })),
     })) as any);
     const res = await DeleteSearchDocumentByPersonaDocumentId("pd-big", "owner-hash");
     expect(res.status).toBe("OK");
-    expect(skips).toEqual([0, 1000]);
     const deleted = (mockDelete.mock.calls as unknown as Array<[string, string[]]>).flatMap((c) => c[1]);
-    expect(deleted).toHaveLength(1005);
+    expect(deleted).toHaveLength(2005);
+    expect(new Set(deleted).size).toBe(2005);
+    expect(calls).toHaveLength(3);
+    expect(calls.every((o) => o.skip === undefined && o.orderBy === undefined && o.top === 1000)).toBe(true);
+    expect(calls[0].filter).toBe("personaDocumentId eq 'pd-big' and user eq 'owner-hash'");
+    expect(calls[1].filter).toMatch(/^personaDocumentId eq 'pd-big' and user eq 'owner-hash' and not search\.in\(id, 'c0000,/);
   });
 
   it("no chunk left is OK; a failed delete is an ERROR", async () => {

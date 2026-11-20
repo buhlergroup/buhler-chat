@@ -14,7 +14,7 @@ import { OpenAIEmbeddingInstance } from "@/features/common/services/openai";
 import { uniqueId } from "@/features/common/util";
 import { AzureKeyCredential, SearchClient, SearchIndex } from "@azure/search-documents";
 import { logDebug, logError } from "@/features/common/services/logger";
-import { odataEq } from "@/features/common/odata-filter";
+import { odataEq, odataSearchIn } from "@/features/common/odata-filter";
 
 export interface AzureSearchDocumentIndex {
   id: string;
@@ -471,14 +471,17 @@ export const DeleteDocumentsOfChatThread = async (
 };
 
 // Largest page of one search request (Azure AI Search allows up to 1000),
-// and the largest `skip` it accepts.
+// and the most rounds of one delete (100 000 chunks).
 const DELETE_PAGE_SIZE = 1000;
-const MAX_SEARCH_SKIP = 100_000;
+const MAX_DELETE_ROUNDS = 100;
 
 /**
  * Deletes every index chunk of a persona document whose `user` is
- * `ownerUserId` (default: the current user). The chunks are read page by
- * page first (a search returns 50 by default), then deleted. No chunk left
+ * `ownerUserId` (default: the current user). Round by round: read one page
+ * of chunk ids, delete them, and read the next page with the ids deleted so
+ * far excluded. That needs no sort order (the key field need not be
+ * sortable) and no `skip` over a result that changes, and a chunk the index
+ * still shows for a moment after its delete is not read twice. No chunk left
  * is OK: nothing was to delete.
  */
 export const DeleteSearchDocumentByPersonaDocumentId = async (
@@ -486,41 +489,34 @@ export const DeleteSearchDocumentByPersonaDocumentId = async (
   ownerUserId?: string
 ): Promise<ServerActionResponse<boolean>> => {
   try {
-    const filter = `${odataEq("personaDocumentId", personaDocumentId)} and ${odataEq(
+    const base = `${odataEq("personaDocumentId", personaDocumentId)} and ${odataEq(
       "user",
       ownerUserId ?? (await userHashedId())
     )}`;
     const instance = AzureAISearchInstance<AzureSearchDocumentIndex>();
+    const deleted = new Set<string>();
+    const failed: { message: string }[] = [];
 
-    const ids: string[] = [];
-    for (let skip = 0; skip <= MAX_SEARCH_SKIP; skip += DELETE_PAGE_SIZE) {
+    for (let round = 0; round < MAX_DELETE_ROUNDS; round++) {
+      const exclude = odataSearchIn("id", [...deleted]);
       const page = await instance.search(undefined, {
-        filter,
+        filter: exclude ? `${base} and not ${exclude}` : base,
         top: DELETE_PAGE_SIZE,
-        skip,
         select: ["id"],
       });
-      let count = 0;
+      const ids: string[] = [];
       for await (const result of page.results) {
-        ids.push(result.document.id);
-        count++;
+        const id = result.document.id;
+        if (!deleted.has(id)) ids.push(id);
       }
-      if (count < DELETE_PAGE_SIZE) break;
-    }
+      if (ids.length === 0) break;
+      for (const id of ids) deleted.add(id);
 
-    if (ids.length === 0) {
-      return { status: "OK", response: true };
-    }
-
-    const failed: { message: string }[] = [];
-    for (let start = 0; start < ids.length; start += DELETE_PAGE_SIZE) {
-      const deletedResponse = await instance.deleteDocuments(
-        "id",
-        ids.slice(start, start + DELETE_PAGE_SIZE)
-      );
+      const deletedResponse = await instance.deleteDocuments("id", ids);
       for (const r of deletedResponse.results) {
         if (!r.succeeded) failed.push({ message: r.errorMessage || "Unknown error" });
       }
+      if (ids.length < DELETE_PAGE_SIZE) break;
     }
 
     return failed.length === 0

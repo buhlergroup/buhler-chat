@@ -38,8 +38,18 @@ vi.mock("@/features/common/services/cosmos", () => ({
 vi.mock("@/features/auth-page/auth-api", () => ({ options: {}, authOptions: {} }));
 
 // ── persona-documents-service mock ──────────────────────────────────────────
-vi.mock("@/features/persona-page/persona-services/persona-documents-service", () => ({
-  DeletePersonaDocumentsByPersonaId: vi.fn(async () => ({ status: "OK", response: undefined })),
+vi.mock("@/features/persona-page/persona-services/persona-documents-service", () => ({}));
+// The files of a deleted agent (their own tests: agent-delete-files.test.ts).
+vi.mock("@/features/persona-page/persona-services/persona-file-rows", () => ({
+  deleteAgentFileRows: vi.fn(async () => 0),
+}));
+vi.mock("@/features/persona-page/persona-services/skills/persona-skill-store", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("./skills/persona-skill-store")>()),
+  deleteSkillsForPersona: vi.fn(async () => {}),
+}));
+vi.mock("@/features/persona-page/persona-services/sharepoint-files/sharepoint-file-store", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("./sharepoint-files/sharepoint-file-store")>()),
+  deleteFileSourcesForPersona: vi.fn(async () => {}),
 }));
 vi.mock("@/features/persona-page/persona-services/persona-documents-store", () => ({
   addSearchDocument: vi.fn(async () => ({ status: "OK", response: "doc" })),
@@ -99,7 +109,10 @@ import {
   CreatePersonaChat,
 } from "./persona-service";
 
-import { DeletePersonaDocumentsByPersonaId } from "./persona-documents-service";
+import { deleteAgentFileRows } from "./persona-file-rows";
+import { deleteSkillsForPersona } from "./skills/persona-skill-store";
+import { deleteFileSourcesForPersona } from "./sharepoint-files/sharepoint-file-store";
+import { etagRetryClock } from "./persona-row";
 import { addSearchDocument } from "./persona-documents-store";
 
 import { PersonaCIDocumentsByIds } from "./persona-ci-documents-service";
@@ -145,7 +158,8 @@ beforeEach(() => {
   setSession(defaultSession);
 
   // restore default mock implementations after clearAllMocks
-  vi.mocked(DeletePersonaDocumentsByPersonaId).mockResolvedValue({ status: "OK", response: undefined });
+  vi.mocked(deleteAgentFileRows).mockResolvedValue(0);
+  vi.spyOn(etagRetryClock, "sleep").mockResolvedValue(undefined);
   vi.mocked(AccessGroupById).mockResolvedValue({ status: "OK", response: { id: "g1", name: "G", description: "" } });
   vi.mocked(UserAccessGroups).mockResolvedValue({ status: "OK", response: [] });
   vi.mocked(PersonaCIDocumentsByIds).mockResolvedValue({ status: "OK", response: [] });
@@ -426,6 +440,30 @@ describe("persona-service.ts", () => {
     expect(saved.personaDocumentIds).toEqual(["doc-1", "doc-2"]);
   });
 
+  it("009d2 UpsertPersona retries up to 10 times with a short random wait (the shared rule)", async () => {
+    await setSession(defaultSession);
+    const p = seedPersona({ id: "p-busy", _etag: "v1" });
+    const conflict = () => Object.assign(new Error("precondition failed"), { code: 412 });
+    for (let i = 0; i < 9; i++) itemReplace.mockRejectedValueOnce(conflict());
+    const result = await UpsertPersona({ ...p, name: "Renamed" });
+    expect(result.status).toBe("OK");
+    expect(itemReplace).toHaveBeenCalledTimes(10);
+    const waits = vi.mocked(etagRetryClock.sleep).mock.calls.map((c) => c[0]);
+    expect(waits).toHaveLength(9);
+    expect(waits.every((ms) => ms >= 20 && ms <= 200)).toBe(true);
+  });
+
+  it("009d3 UpsertPersona gives up after 10 conflicts", async () => {
+    await setSession(defaultSession);
+    const p = seedPersona({ id: "p-busy2", _etag: "v1" });
+    itemReplace.mockRejectedValue(Object.assign(new Error("precondition failed"), { code: 412 }));
+    const result = await UpsertPersona({ ...p, name: "Renamed" });
+    itemReplace.mockReset();
+    itemReplace.mockImplementation(async (doc: any) => ({ resource: { ...doc } }));
+    expect(result.status).toBe("ERROR");
+    expect(result.status === "ERROR" && result.errors[0].message).toMatch(/changed while saving/);
+  });
+
   it("009e UpsertPersona keeps the code interpreter on while the agent has files that need it", async () => {
     await setSession(defaultSession);
     const p = seedPersona({ id: "p-ci", codeInterpreterDocumentIds: ["ci-1"] });
@@ -464,8 +502,40 @@ describe("persona-service.ts", () => {
 
     const result = await DeletePersona("p-del");
     expect(result.status).toBe("OK");
-    expect(DeletePersonaDocumentsByPersonaId).toHaveBeenCalledWith("p-del");
+    expect(deleteAgentFileRows).toHaveBeenCalledWith(expect.objectContaining({ id: "p-del" }));
+    expect(deleteSkillsForPersona).toHaveBeenCalledWith("p-del");
+    expect(deleteFileSourcesForPersona).toHaveBeenCalledWith("p-del");
     expect(historyItems.find((i: any) => i.id === "p-del")).toBeUndefined();
+  });
+
+  it("011b an admin deletes another user's agent: the cleanup gets that agent with all its file ids", async () => {
+    await setSession(adminSession);
+    seedPersona({
+      id: "p-del-u",
+      userId: "user-u",
+      personaDocumentIds: ["doc-u"],
+      codeInterpreterDocumentIds: ["ci-u"],
+    });
+    const result = await DeletePersona("p-del-u");
+    expect(result.status).toBe("OK");
+    expect(deleteAgentFileRows).toHaveBeenCalledWith(
+      expect.objectContaining({
+        id: "p-del-u",
+        userId: "user-u",
+        personaDocumentIds: ["doc-u"],
+        codeInterpreterDocumentIds: ["ci-u"],
+      }),
+    );
+    expect(historyItems.find((i: any) => i.id === "p-del-u")).toBeUndefined();
+  });
+
+  it("011c a file cleanup that fails does not stop the agent delete", async () => {
+    await setSession(defaultSession);
+    seedPersona({ id: "p-del-f", personaDocumentIds: ["doc-1"] });
+    vi.mocked(deleteAgentFileRows).mockResolvedValueOnce(1);
+    const result = await DeletePersona("p-del-f");
+    expect(result.status).toBe("OK");
+    expect(historyItems.find((i: any) => i.id === "p-del-f")).toBeUndefined();
   });
 
   // 012 – UpsertPersona lets the owner publish/unpublish

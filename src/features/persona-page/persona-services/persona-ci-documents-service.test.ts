@@ -48,10 +48,7 @@ vi.mock("@/features/common/services/microsoft-graph-client", () => ({
   })),
 }));
 
-import {
-  PersonaCIDocumentsByIds,
-  DeletePersonaCIDocumentsByPersonaId,
-} from "./persona-ci-documents-service";
+import { PersonaCIDocumentsByIds } from "./persona-ci-documents-service";
 import {
   addCodeDocument,
   deleteCodeDocument,
@@ -157,65 +154,6 @@ describe("persona-ci-documents-service.ts", () => {
     expect((await deleteCodeDocument({ id: "ci-gone", userId: "owner-hash" })).status).toBe("OK");
   });
 
-  // 006 – DeletePersonaCIDocumentsByPersonaId deletes every owned CI doc
-  it("006 DeletePersonaCIDocumentsByPersonaId deletes 3 docs (owner, allowed)", async () => {
-    const ids = ["ci-1", "ci-2", "ci-3"];
-    historyItems.push({
-      id: "persona-1",
-      type: "PERSONA",
-      userId: USER_HASH,
-      isPublished: false,
-      codeInterpreterDocumentIds: ids,
-    });
-
-    const deleteSpy = vi.fn().mockResolvedValue({ resource: undefined });
-    historyContainer.item.mockImplementation((_id: string) => ({
-      read: vi.fn(),
-      delete: deleteSpy,
-    }));
-
-    const result = await DeletePersonaCIDocumentsByPersonaId("persona-1", ids);
-    expect(result.status).toBe("OK");
-    expect(deleteSpy).toHaveBeenCalledTimes(3);
-  });
-
-  it("006b DeletePersonaCIDocumentsByPersonaId: a user who can only use a published agent is not allowed (denied)", async () => {
-    historyItems.push({
-      id: "persona-pub",
-      type: "PERSONA",
-      userId: "other-hash",
-      isPublished: true,
-      codeInterpreterDocumentIds: ["ci-x"],
-    });
-    const deleteSpy = vi.fn().mockResolvedValue({ resource: undefined });
-    historyContainer.item.mockImplementation(() => ({ read: vi.fn(), delete: deleteSpy }));
-
-    const result = await DeletePersonaCIDocumentsByPersonaId("persona-pub", ["ci-x"]);
-    expect(result.status).toBe("UNAUTHORIZED");
-    if (result.status === "UNAUTHORIZED") {
-      expect(result.errors[0].message).toMatch(/not allowed/);
-    }
-    expect(deleteSpy).not.toHaveBeenCalled();
-  });
-
-  it("006c DeletePersonaCIDocumentsByPersonaId deletes only ids the persona references", async () => {
-    historyItems.push({
-      id: "persona-2",
-      type: "PERSONA",
-      userId: USER_HASH,
-      isPublished: false,
-      codeInterpreterDocumentIds: ["ci-own"],
-    });
-    const deleteSpy = vi.fn().mockResolvedValue({ resource: undefined });
-    historyContainer.item.mockImplementation(() => ({ read: vi.fn(), delete: deleteSpy }));
-
-    const result = await DeletePersonaCIDocumentsByPersonaId("persona-2", ["ci-own", "ci-foreign"]);
-    expect(result.status).toBe("OK");
-    expect(deleteSpy).toHaveBeenCalledTimes(1);
-    expect(historyContainer.item).toHaveBeenCalledWith("ci-own", USER_HASH);
-    expect(historyContainer.item).not.toHaveBeenCalledWith("ci-foreign", expect.anything());
-  });
-
   // 007 – addCodeDocument writes one row in the agent owner's partition
   it("007 addCodeDocument writes the row with the owner's id, not the caller's", async () => {
     const result = await addCodeDocument(
@@ -241,13 +179,14 @@ describe("persona-ci-documents-service.ts", () => {
     expect(row.userId).not.toBe(USER_HASH);
   });
 
-  it("008 the add, the single delete and the download are no Server Actions", () => {
+  it("008 the add, the deletes and the download are no Server Actions", () => {
     const exported = ciActions as Record<string, unknown>;
     for (const name of [
       "UpdateOrAddPersonaCIDocuments",
       "DeletePersonaCIDocumentById",
       "DownloadSharePointFile",
       "DownloadCIDocumentsFromSharePoint",
+      "DeletePersonaCIDocumentsByPersonaId",
     ]) {
       expect(exported[name]).toBeUndefined();
     }

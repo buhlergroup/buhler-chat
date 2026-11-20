@@ -1,9 +1,9 @@
 "use server";
 import "server-only";
 
-// Server actions for Search files of an agent: reads, the access check of a
-// chat, and the delete of a whole agent's rows. Adding and removing one file
-// is server code only (persona-documents-store.ts).
+// Server actions for Search files of an agent: reads and the access check of
+// a chat. Adding and removing a file, also when the agent is deleted, is
+// server code only (persona-documents-store.ts, persona-file-rows.ts).
 
 import { ServerActionResponse } from "@/features/common/server-action-response";
 import { getGraphClient } from "../../common/services/microsoft-graph-client";
@@ -11,7 +11,7 @@ import {
   GraphBatchRequest,
   postGraphBatches,
 } from "@/features/common/services/microsoft-graph-batch";
-import { getCurrentUser, userHashedId } from "@/features/auth-page/helpers";
+import { getCurrentUser } from "@/features/auth-page/helpers";
 import {
   DocumentMetadata,
   PERSONA_DOCUMENT_ATTRIBUTE,
@@ -19,13 +19,10 @@ import {
   SharePointFile,
   convertPersonaDocumentToSharePointDocument,
 } from "./models";
-import { HistoryContainer } from "@/features/common/services/cosmos";
-import { checkPersonaEdit } from "./persona-access";
 import {
   FindAccessiblePersonaDocument,
   PersonaAccessCache,
 } from "./persona-document-access";
-import { DeleteSearchDocumentByPersonaDocumentId } from "@/features/chat-page/chat-services/azure-ai-search/azure-ai-search";
 
 const positiveInt = (value: string | undefined, fallback: number) => {
   const n = Number(value);
@@ -228,47 +225,6 @@ const FindPersonaDocumentForCurrentUser = async (
       ],
     };
   }
-};
-
-export const DeletePersonaDocumentsByPersonaId = async (
-  personaId: string
-): Promise<ServerActionResponse<void>> => {
-  // Edit rights (owner or admin), the same rule as EnsurePersonaOperation.
-  // Being able to open (use) a shared or published agent is not enough.
-  const persona = await checkPersonaEdit(personaId);
-
-  if (persona.status !== "OK") {
-    return persona;
-  }
-
-  const personaDocuments = persona.response.personaDocumentIds;
-  if (!personaDocuments || personaDocuments.length === 0) {
-    return { status: "OK", response: undefined };
-  }
-
-  // Delete Documents from Azure Search
-  await Promise.all(
-    personaDocuments.map(async (oldDocumentId) => {
-      return await DeleteSearchDocumentByPersonaDocumentId(oldDocumentId);
-    })
-  );
-
-  // Delete Documents from Cosmos DB
-  await Promise.all(
-    personaDocuments.map((id) =>
-      DeletePersonaDocumentById(id).catch(() => {
-        // Best effort, as before: a missing document does not block the delete.
-      })
-    )
-  );
-
-  return { status: "OK", response: undefined };
-};
-
-const DeletePersonaDocumentById = async (personaDocumentId: string) => {
-  await HistoryContainer()
-    .item(personaDocumentId, await userHashedId())
-    .delete();
 };
 
 export const AuthorizedDocuments = async (

@@ -192,6 +192,7 @@ import {
   RemoveAgentFile,
 } from "../agent-file-service";
 import { readAgentFileLimits } from "../agent-file-store";
+import { etagRetryClock } from "../../persona-row";
 import { readCodeInterpreterMaxFileBytes } from "@/features/chat-page/chat-services/code-interpreter-constants";
 
 let graph: FakeGraph;
@@ -736,5 +737,47 @@ describe("Code size limit: one reader for the editor and the chat start", () => 
     [{ MAX_PERSONA_CI_DOCUMENT_SIZE: "1000", NEXT_PUBLIC_MAX_PERSONA_CI_DOCUMENT_SIZE: "2000" }],
   ])("readAgentFileLimits(%j).codeMaxBytes equals the preload limit", (env) => {
     expect(readAgentFileLimits(env).codeMaxBytes).toBe(readCodeInterpreterMaxFileBytes(env));
+  });
+});
+
+describe("two AddAgentFiles calls at the same time never exceed a limit", () => {
+  it("one Search slot left, two calls: one item is added, the other is undone with the limit reason", async () => {
+    vi.spyOn(etagRetryClock, "sleep").mockResolvedValue(undefined);
+    process.env.MAX_PERSONA_DOCUMENT_LIMIT = "2";
+    persona.personaDocumentIds = ["doc-old"];
+    addSearchDocument.mockImplementation(async (f: any, owner: string) => {
+      await new Promise((r) => setTimeout(r, 5));
+      return addSearchImpl(f, owner);
+    });
+    const [a, b] = await Promise.all([
+      AddAgentFiles("p1", pick("PDF1")),
+      AddAgentFiles("p1", pick("PDF2")),
+    ]);
+    const results = [a, b].map((r) => (r.status === "OK" ? r.response[0] : undefined));
+    expect(results.map((r) => r?.status).sort()).toEqual(["added", "rejected"]);
+    expect(results.find((r) => r?.status === "rejected")).toMatchObject({
+      reason: "An agent can have up to 2 Search files.",
+    });
+    expect(persona.personaDocumentIds).toHaveLength(2);
+    // The rejected item's row and index entries were undone.
+    expect(deleteSearchDocument).toHaveBeenCalledTimes(1);
+    expect(docRows).toHaveLength(1);
+  });
+
+  it("the same for Code files", async () => {
+    vi.spyOn(etagRetryClock, "sleep").mockResolvedValue(undefined);
+    persona.codeInterpreterDocumentIds = Array.from({ length: 19 }, (_, i) => `ci-old-${i}`);
+    graph.add(DRIVE, { id: "CSV2", name: "more.csv", parent: "ROOT", size: 100 });
+    addCodeDocument.mockImplementationOnce(async (f: any, owner: string) => {
+      await new Promise((r) => setTimeout(r, 5));
+      const row = docRow("PERSONA_CI_DOCUMENT", f, owner);
+      docRows.push(row);
+      return { status: "OK", response: row.id };
+    });
+    const [a, b] = await Promise.all([AddAgentFiles("p1", pick("CSV1")), AddAgentFiles("p1", pick("CSV2"))]);
+    const statuses = [a, b].map((r) => (r.status === "OK" ? r.response[0].status : r.status));
+    expect(statuses.sort()).toEqual(["added", "rejected"]);
+    expect(persona.codeInterpreterDocumentIds).toHaveLength(20);
+    expect(deleteCodeDocument).toHaveBeenCalledTimes(1);
   });
 });

@@ -36,7 +36,6 @@ import {
   readCodeInterpreterMaxFileBytes,
 } from "@/features/chat-page/chat-services/code-interpreter-constants";
 import {
-  PERSONA_ATTRIBUTE,
   PERSONA_CI_DOCUMENT_ATTRIBUTE,
   PERSONA_DOCUMENT_ATTRIBUTE,
   type DocumentMetadata,
@@ -47,6 +46,7 @@ import {
 import { addSearchDocument, deleteSearchDocument } from "../persona-documents-store";
 import { addCodeDocument, deleteCodeDocument } from "../persona-ci-documents-store";
 import { updatePersonaRow, withCodeInterpreterOn } from "../persona-row";
+import { deleteFileRowsIfUnlisted } from "../persona-file-rows";
 import { querySkillsByPersonaId, readPersonaRow, type SkillAccess } from "../skills/persona-skill-store";
 import { SKILL_LIMITS, type PersonaSkillModel } from "../skills/skill-models";
 import { fetchLinkedSkillZip, type LinkedZipResult } from "../skills/linked-skill-sync";
@@ -116,11 +116,25 @@ export function readAgentFileLimits(env: Record<string, string | undefined> = pr
 
 type IdList = "personaDocumentIds" | "codeInterpreterDocumentIds";
 
-const withId = (field: IdList, id: string, codeInterpreterOn = false) => (p: PersonaModel) => ({
-  ...p,
-  [field]: [...(p[field] ?? []).filter((x) => x !== id), id],
-  ...(codeInterpreterOn ? { defaultTools: { ...(p.defaultTools ?? {}), codeInterpreter: true } } : {}),
-});
+/** The list of a use is full on the stored row: the add is undone. */
+class UseLimitReached extends Error {}
+
+/**
+ * Lists the id on the persona. The limit is checked again on the row as it
+ * is written (fresh, etag-checked), so adds of several requests at the same
+ * time never exceed it together.
+ */
+const withId =
+  (field: IdList, id: string, max: number, limitMessage: string, codeInterpreterOn = false) =>
+  (p: PersonaModel) => {
+    const list = p[field] ?? [];
+    if (!list.includes(id) && list.length >= max) throw new UseLimitReached(limitMessage);
+    return {
+      ...p,
+      [field]: [...list.filter((x) => x !== id), id],
+      ...(codeInterpreterOn ? { defaultTools: { ...(p.defaultTools ?? {}), codeInterpreter: true } } : {}),
+    };
+  };
 
 const withoutId = (field: IdList, id: string) => (p: PersonaModel) =>
   (p[field] ?? []).includes(id) ? { ...p, [field]: (p[field] ?? []).filter((x) => x !== id) } : null;
@@ -500,7 +514,11 @@ async function addAsSearch(target: Target, item: ResolvedItem, limits: AgentFile
     };
   }
   const ref: AgentFileRef = { kind: "document", id: res.response };
-  return attachToPersona(target, ref, withId("personaDocumentIds", ref.id));
+  return attachToPersona(
+    target,
+    ref,
+    withId("personaDocumentIds", ref.id, limits.maxSearchFiles, limitText("search", limits.maxSearchFiles)),
+  );
 }
 
 /** Code: a PERSONA_CI_DOCUMENT row, listed on the persona; code interpreter on. */
@@ -521,7 +539,11 @@ async function addAsCode(target: Target, item: ResolvedItem, limits: AgentFileLi
     return { ok: false, message: `The file could not be added as a Code file. ${errorsText(res.errors)}` };
   }
   const ref: AgentFileRef = { kind: "ci-document", id: res.response };
-  return attachToPersona(target, ref, withId("codeInterpreterDocumentIds", ref.id, true));
+  return attachToPersona(
+    target,
+    ref,
+    withId("codeInterpreterDocumentIds", ref.id, limits.maxCodeFiles, limitText("code", limits.maxCodeFiles), true),
+  );
 }
 
 type SkillZip = Extract<LinkedZipResult, { ok: true }>;
@@ -578,13 +600,16 @@ async function attachToPersona(
     if (!stored) throw new Error("Agent not found.");
     return { ok: true, ref };
   } catch (error) {
-    logError("agent files: persona update failed, add undone", {
+    (error instanceof UseLimitReached ? logInfo : logError)("agent files: persona update failed, add undone", {
       personaId: target.personaId,
       kind: ref.kind,
       error: error instanceof Error ? error.message : String(error),
     });
     await undoAdd(target, ref);
-    return { ok: false, message: "The agent could not be saved. Try again." };
+    return {
+      ok: false,
+      message: error instanceof UseLimitReached ? error.message : "The agent could not be saved. Try again.",
+    };
   }
 }
 
@@ -800,79 +825,20 @@ export async function addAgentFiles(
 // Remove
 // ---------------------------------------------------------------------------
 
-const PERSONA_LISTED_QUERY: Record<IdList, string> = {
-  personaDocumentIds:
-    "SELECT VALUE COUNT(1) FROM root r WHERE r.type=@type AND r.id!=@personaId AND ARRAY_CONTAINS(r.personaDocumentIds, @id)",
-  codeInterpreterDocumentIds:
-    "SELECT VALUE COUNT(1) FROM root r WHERE r.type=@type AND r.id!=@personaId AND ARRAY_CONTAINS(r.codeInterpreterDocumentIds, @id)",
-};
-
-/** Whether an agent other than `personaId` lists the id (it then keeps the row). */
-async function listedByAnotherAgent(field: IdList, id: string, personaId: string): Promise<boolean> {
-  const { resources } = await HistoryContainer()
-    .items.query<number>({
-      query: PERSONA_LISTED_QUERY[field],
-      parameters: [
-        { name: "@type", value: PERSONA_ATTRIBUTE },
-        { name: "@personaId", value: personaId },
-        { name: "@id", value: id },
-      ],
-    })
-    .fetchAll();
-  return (resources[0] ?? 0) > 0;
-}
-
-/**
- * The rows with this id and type, in any partition: a row written before
- * the owner-partition rule (an admin added the file) is in the admin's.
- */
-async function rowsById(
-  type: typeof PERSONA_DOCUMENT_ATTRIBUTE | typeof PERSONA_CI_DOCUMENT_ATTRIBUTE,
-  id: string,
-): Promise<Array<{ id: string; userId: string }>> {
-  const { resources } = await HistoryContainer()
-    .items.query<{ id: string; userId: string; type: string }>({
-      query: "SELECT r.id, r.userId, r.type FROM root r WHERE r.type=@type AND r.id=@id",
-      parameters: [
-        { name: "@type", value: type },
-        { name: "@id", value: id },
-      ],
-    })
-    .fetchAll();
-  return resources.filter((r) => r?.id === id && r.type === type && typeof r.userId === "string");
-}
-
 /**
  * Deletes the stored data of a Search or Code file the agent no longer
- * lists: each row in its own partition, and for Search its index entries.
- * A row another agent still lists stays. Returns a warning when something
- * could not be deleted (logged; the file is no longer used either way).
+ * lists (persona-file-rows.ts). Returns a warning when something could not
+ * be deleted (logged; the file is no longer used either way).
  */
 async function deleteUnlistedRows(personaId: string, ref: AgentFileRef): Promise<string | undefined> {
-  const isSearch = ref.kind === "document";
-  try {
-    if (await listedByAnotherAgent(isSearch ? "personaDocumentIds" : "codeInterpreterDocumentIds", ref.id, personaId)) {
-      logInfo("agent files: row kept, another agent lists it", { personaId, kind: ref.kind });
-      return undefined;
-    }
-    const rows = await rowsById(isSearch ? PERSONA_DOCUMENT_ATTRIBUTE : PERSONA_CI_DOCUMENT_ATTRIBUTE, ref.id);
-    const results = await Promise.all(
-      rows.map((row) => (isSearch ? deleteSearchDocument(row) : deleteCodeDocument(row))),
-    );
-    const errors = results.flatMap((r) => (r.status === "OK" ? [] : r.errors));
-    if (errors.length === 0) return undefined;
-    logError("agent files: stored data of a removed file not deleted", {
-      personaId,
-      kind: ref.kind,
-      errors: errors.map((e) => e.message),
-    });
-  } catch (error) {
-    logError("agent files: stored data of a removed file not deleted", {
-      personaId,
-      kind: ref.kind,
-      error: error instanceof Error ? error.message : String(error),
-    });
-  }
+  if (ref.kind !== "document" && ref.kind !== "ci-document") return undefined;
+  const errors = await deleteFileRowsIfUnlisted(personaId, ref.kind, ref.id);
+  if (errors.length === 0) return undefined;
+  logError("agent files: stored data of a removed file not deleted", {
+    personaId,
+    kind: ref.kind,
+    errors,
+  });
   return REMOVED_NOT_CLEANED_WARNING;
 }
 
