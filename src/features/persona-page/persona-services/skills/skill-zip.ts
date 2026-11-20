@@ -16,10 +16,12 @@ import "server-only";
  *
  * Every entry is fully inflated during validation with a hard output cap of
  * its declared size, so a lying header cannot expand past the limits, and
- * the CRC-32 is checked.
+ * the CRC-32 is checked. Validation inflates on the zlib thread pool (async),
+ * so a large upload does not block the event loop.
  */
 
-import { inflateRawSync } from "node:zlib";
+import { inflateRaw, inflateRawSync } from "node:zlib";
+import { promisify } from "node:util";
 import {
   SKILL_LIMITS,
   SKILL_NAME_PATTERN,
@@ -200,8 +202,10 @@ export function readZipEntries(buf: Buffer, limits: SkillLimits = SKILL_LIMITS):
   return entries;
 }
 
-/** Inflates one entry, capped at its declared size, and checks the CRC. */
-function inflateEntry(buf: Buffer, entry: RawEntry): Buffer {
+const inflateRawAsync = promisify(inflateRaw);
+
+/** The compressed bytes of one entry, after its local header. */
+function entryData(buf: Buffer, entry: RawEntry): Buffer {
   const lh = entry.localHeaderOffset;
   if (lh + 30 > buf.length || buf.readUInt32LE(lh) !== SIG_LOCAL) {
     throw new SkillZipError(`The zip is damaged at ${entry.path}.`);
@@ -211,21 +215,11 @@ function inflateEntry(buf: Buffer, entry: RawEntry): Buffer {
   const start = lh + 30 + nameLen + extraLen;
   const end = start + entry.compressedSize;
   if (end > buf.length) throw new SkillZipError(`The zip is damaged at ${entry.path}.`);
-  const compressed = buf.subarray(start, end);
+  return buf.subarray(start, end);
+}
 
-  let out: Buffer;
-  if (entry.method === 0) {
-    out = Buffer.from(compressed);
-  } else {
-    try {
-      // maxOutputLength makes a lying header fail instead of filling memory.
-      out = inflateRawSync(compressed, {
-        maxOutputLength: Math.max(1, entry.uncompressedSize),
-      });
-    } catch {
-      throw new SkillZipError(`The zip is damaged or larger than declared at ${entry.path}.`);
-    }
-  }
+/** Checks the real size and the CRC of an inflated entry. */
+function checkInflated(entry: RawEntry, out: Buffer): Buffer {
   if (out.length !== entry.uncompressedSize) {
     throw new SkillZipError(`The size of ${entry.path} does not match the zip header.`);
   }
@@ -233,6 +227,38 @@ function inflateEntry(buf: Buffer, entry: RawEntry): Buffer {
     throw new SkillZipError(`Checksum error in ${entry.path}.`);
   }
   return out;
+}
+
+const damagedOrTooLarge = (entry: RawEntry) =>
+  new SkillZipError(`The zip is damaged or larger than declared at ${entry.path}.`);
+
+/** Inflates one entry, capped at its declared size, and checks the CRC. */
+function inflateEntry(buf: Buffer, entry: RawEntry): Buffer {
+  const compressed = entryData(buf, entry);
+  if (entry.method === 0) return checkInflated(entry, Buffer.from(compressed));
+  let out: Buffer;
+  try {
+    // maxOutputLength makes a lying header fail instead of filling memory.
+    out = inflateRawSync(compressed, { maxOutputLength: Math.max(1, entry.uncompressedSize) });
+  } catch {
+    throw damagedOrTooLarge(entry);
+  }
+  return checkInflated(entry, out);
+}
+
+/** Same as inflateEntry, but inflates off the event loop. */
+async function inflateEntryAsync(buf: Buffer, entry: RawEntry): Promise<Buffer> {
+  const compressed = entryData(buf, entry);
+  if (entry.method === 0) return checkInflated(entry, Buffer.from(compressed));
+  let out: Buffer;
+  try {
+    out = await inflateRawAsync(compressed, {
+      maxOutputLength: Math.max(1, entry.uncompressedSize),
+    });
+  } catch {
+    throw damagedOrTooLarge(entry);
+  }
+  return checkInflated(entry, out);
 }
 
 // ---------------------------------------------------------------------------
@@ -375,22 +401,27 @@ export interface ValidatedSkillPackage {
 
 /**
  * Validates a skill zip against the limits and the Agent Skills format.
- * Throws SkillZipError with a user-facing message on the first problem.
+ * Rejects with SkillZipError with a user-facing message on the first problem.
  */
-export function validateSkillZip(
+export async function validateSkillZip(
   buf: Buffer,
   limits: SkillLimits = SKILL_LIMITS,
-): ValidatedSkillPackage {
+): Promise<ValidatedSkillPackage> {
   if (buf.length > limits.maxZipBytes) {
     throw new SkillZipError(
       `The zip is larger than ${Math.round(limits.maxZipBytes / 1_000_000)} MB.`,
     );
   }
   const all = readZipEntries(buf, limits);
+  // Junk entries (__MACOSX/, .DS_Store, Thumbs.db) are not part of the skill,
+  // but they stay in the stored zip, which the sandbox extracts as a whole.
+  // So they count for the file limit and the size and bomb checks below. They
+  // are not inflated: the extractor stops at the declared size of an entry.
+  const allFiles = all.filter((e) => !e.isDirectory);
   const entries = all.filter((e) => !isJunkPath(e.path));
   const files = entries.filter((e) => !e.isDirectory);
   if (files.length === 0) throw new SkillZipError("The zip is empty.");
-  if (files.length > limits.maxFiles) {
+  if (allFiles.length > limits.maxFiles) {
     throw new SkillZipError(`The zip has more than ${limits.maxFiles} files.`);
   }
 
@@ -404,7 +435,7 @@ export function validateSkillZip(
 
   // Bomb checks on the declared sizes first (cheap), then the real ones below.
   let declaredTotal = 0;
-  for (const f of files) {
+  for (const f of allFiles) {
     declaredTotal += f.uncompressedSize;
     if (
       f.uncompressedSize > limits.ratioCheckMinBytes &&
@@ -454,7 +485,7 @@ export function validateSkillZip(
   let skillMdBuf: Buffer | undefined;
   let realTotal = 0;
   for (const f of files) {
-    const out = inflateEntry(buf, f);
+    const out = await inflateEntryAsync(buf, f);
     realTotal += out.length;
     if (f.path === `${rootPrefix}SKILL.md`) skillMdBuf = out;
   }

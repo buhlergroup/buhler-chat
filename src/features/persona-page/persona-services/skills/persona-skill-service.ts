@@ -118,7 +118,7 @@ export async function UploadPersonaSkill(
     const buf = Buffer.from(await file.arrayBuffer());
     let pkg;
     try {
-      pkg = validateSkillZip(buf);
+      pkg = await validateSkillZip(buf);
     } catch (error) {
       if (error instanceof SkillZipError) {
         return { status: "ERROR", errors: [{ message: error.message }] };
