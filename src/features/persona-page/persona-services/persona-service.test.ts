@@ -379,6 +379,46 @@ describe("persona-service.ts", () => {
     expect(UpdateOrAddPersonaDocuments).toHaveBeenCalledWith([], ["own-doc"]);
   });
 
+  // 009d – UpsertPersona: a failed document update is an error, nothing is saved
+  it("009d UpsertPersona returns the document error and keeps the stored document ids", async () => {
+    await setSession(defaultSession);
+    const p = seedPersona({ id: "p-docs-fail", personaDocumentIds: ["doc-a", "doc-b"] });
+    vi.mocked(UpdateOrAddPersonaDocuments).mockResolvedValueOnce({
+      status: "ERROR",
+      errors: [{ message: "indexing failed" }],
+    });
+
+    const result = await UpsertPersona({ ...p, name: "Renamed" }, []);
+
+    expect(result.status).toBe("ERROR");
+    if (result.status === "ERROR") {
+      expect(result.errors[0].message).toMatch(/not saved.*documents could not be updated/);
+      expect(result.errors.map((e) => e.message)).toContain("indexing failed");
+    }
+    // Nothing written: the stored ids are not replaced by an empty list.
+    expect(historyContainer.items.upsert).not.toHaveBeenCalled();
+    expect(historyItems.find((i: any) => i.id === "p-docs-fail")).toMatchObject({
+      name: "Seed Persona",
+      personaDocumentIds: ["doc-a", "doc-b"],
+    });
+  });
+
+  it("009e UpsertPersona saves the document ids the document update returns", async () => {
+    await setSession(defaultSession);
+    const p = seedPersona({ id: "p-docs-ok", personaDocumentIds: ["doc-a"] });
+    vi.mocked(UpdateOrAddPersonaDocuments).mockResolvedValueOnce({
+      status: "OK",
+      response: ["doc-a", "doc-c"],
+    });
+
+    const result = await UpsertPersona(p, []);
+
+    expect(result.status).toBe("OK");
+    expect(historyContainer.items.upsert).toHaveBeenCalledWith(
+      expect.objectContaining({ personaDocumentIds: ["doc-a", "doc-c"] })
+    );
+  });
+
   // 010 – EnsurePersonaOperation returns OK for admin
   it("010 EnsurePersonaOperation returns OK for admin", async () => {
     await setSession(adminSession);

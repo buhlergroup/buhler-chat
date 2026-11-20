@@ -42,7 +42,6 @@ import {
   currentPersonaViewer,
   findPersonaDocument,
 } from "./persona-access";
-import { RevalidateCache } from "@/features/common/navigation-helpers";
 import {
   DeleteAgentStats,
   RecordAgentChatStarted,
@@ -289,11 +288,23 @@ export const UpsertPersona = async (
         persona.personaDocumentIds || []
       );
 
-      let personaDocumentIds: string[] = [];
-
-      if (personaDocumentIdsResponse.status == "OK") {
-        personaDocumentIds = personaDocumentIdsResponse.response;
+      // A failed document update is an error for the whole save: the agent is
+      // not saved, so its stored document ids are not replaced by an empty
+      // list, and the editor shows the error.
+      if (personaDocumentIdsResponse.status !== "OK") {
+        return {
+          status: "ERROR",
+          errors: [
+            {
+              message:
+                "The agent was not saved: its documents could not be updated. Try again.",
+            },
+            ...(personaDocumentIdsResponse.errors ?? []),
+          ],
+        };
       }
+
+      const personaDocumentIds = personaDocumentIdsResponse.response;
 
       const wasPublished = persona.isPublished;
       const willPublish = personaInput.isPublished;
@@ -355,21 +366,6 @@ export const UpsertPersona = async (
       const { resource } = await HistoryContainer().items.upsert<PersonaModel>(
         modelToUpdate
       );
-
-      // the check is here so that we are sure that a [] is saved for the personaDocumentIds
-      if (personaDocumentIdsResponse.status !== "OK") {
-        RevalidateCache({
-          page: "persona",
-        });
-        RevalidateCache({
-          page: "agent",
-        });
-
-        return {
-          status: "ERROR",
-          errors: personaDocumentIdsResponse.errors,
-        };
-      }
 
       if (resource) {
         return {
