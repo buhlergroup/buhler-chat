@@ -119,6 +119,14 @@
     "fast-xml-builder": "^1.2.0",
     "postcss": "$postcss",
     "esbuild": "^0.28.1",
-    "postcss-selector-parser": "6.1.5"
+    "postcss-selector-parser": "6.1.5",
+    "@hono/node-server": "2.1.6",
+    "hono": "4.13.16",
+    "router": "2.2.0",
+    "encodeurl": "2.0.1",
+    "express-rate-limit": "8.7.3",
+    "@modelcontextprotocol/sdk": {
+      "jose": "6.2.15"
+    }
   }
 }
