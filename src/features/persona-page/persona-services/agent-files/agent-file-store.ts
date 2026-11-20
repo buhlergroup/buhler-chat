@@ -58,6 +58,7 @@ import {
   type AgentFileSizeLimits,
 } from "./agent-file-classifier";
 import {
+  AGENT_FILE_STATUS_TEXT,
   AGENT_FILE_USE_TEXT,
   USE_OF_REF_KIND,
   type AddAgentFileResult,
@@ -257,8 +258,8 @@ async function readItemInfo(token: string, driveId: string, itemId: string): Pro
     return { ok: true, info: await getDriveItemInfo(token, driveId, itemId) };
   } catch (error) {
     return isFileAccessDenied(error)
-      ? { ok: false, status: "no-access", message: "Ask the owner of this item in SharePoint for access." }
-      : { ok: false, status: "unavailable", message: "SharePoint is busy. Try again later." };
+      ? { ok: false, status: "no-access", message: AGENT_FILE_STATUS_TEXT["no-access"] }
+      : { ok: false, status: "unavailable", message: AGENT_FILE_STATUS_TEXT.unavailable };
   }
 }
 
@@ -454,6 +455,21 @@ const asMetadata = (item: ResolvedItem): DocumentMetadata => ({
   createdDateTime: "",
 });
 
+/**
+ * Runs a mechanism that returns a ServerActionResponse; a throw becomes an
+ * ERROR, so one failing item does not stop the other items of a pick.
+ */
+async function runMechanism<T>(fn: () => Promise<ServerActionResponse<T>>): Promise<ServerActionResponse<T>> {
+  try {
+    return await fn();
+  } catch (error) {
+    logError("agent files: mechanism failed", {
+      error: error instanceof Error ? error.message : String(error),
+    });
+    return { status: "ERROR", errors: [{ message: "Try again." }] };
+  }
+}
+
 /** Rolls back a mechanism add when the persona row could not follow. */
 async function undoAdd(personaId: string, ref: AgentFileRef): Promise<void> {
   try {
@@ -493,9 +509,16 @@ async function addAsSearch(personaId: string, item: ResolvedItem, limits: AgentF
       message: `The file is larger than ${Math.round(limits.searchMaxBytes / 1_048_576)} MB, the limit for Search files.`,
     };
   }
-  const res = await UpdateOrAddPersonaDocuments([asMetadata(item)], []);
+  // When the indexing fails, the item is rejected and the persona row is not
+  // touched: its stored ids stay as they were.
+  const res = await runMechanism(() => UpdateOrAddPersonaDocuments([asMetadata(item)], []));
   if (res.status !== "OK" || !res.response[0]) {
-    return { ok: false, message: res.status === "OK" ? "The file could not be indexed." : errorsText(res.errors) };
+    return {
+      ok: false,
+      message: `The file could not be indexed for Search, so it was not added. ${
+        res.status === "OK" ? "Try again." : errorsText(res.errors)
+      }`,
+    };
   }
   const ref: AgentFileRef = { kind: "document", id: res.response[0] };
   return attachToPersona(personaId, ref, withId("personaDocumentIds", ref.id));
@@ -514,9 +537,14 @@ async function addAsCode(personaId: string, item: ResolvedItem, limits: AgentFil
       message: `The file is larger than ${Math.round(limits.codeMaxBytes / 1_048_576)} MB, the limit for Code files.`,
     };
   }
-  const res = await UpdateOrAddPersonaCIDocuments([asMetadata(item)], []);
+  const res = await runMechanism(() => UpdateOrAddPersonaCIDocuments([asMetadata(item)], []));
   if (res.status !== "OK" || !res.response[0]) {
-    return { ok: false, message: res.status === "OK" ? "The file could not be added." : errorsText(res.errors) };
+    return {
+      ok: false,
+      message: `The file could not be added as a Code file. ${
+        res.status === "OK" ? "Try again." : errorsText(res.errors)
+      }`,
+    };
   }
   const ref: AgentFileRef = { kind: "ci-document", id: res.response[0] };
   return attachToPersona(personaId, ref, withId("codeInterpreterDocumentIds", ref.id, true));

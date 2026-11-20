@@ -206,4 +206,45 @@ describe("PersonaFiles", () => {
     expect(await screen.findByText("Check now")).toBeInTheDocument();
     expect(screen.queryByText("Replace zip")).not.toBeInTheDocument();
   });
+
+  it("'Check now' shows the server's error when SharePoint did not answer", async () => {
+    const { toast } = await import("@/features/ui/use-toast");
+    vi.mocked(toast).mockClear();
+    actions.ListAgentFiles.mockResolvedValue(
+      editorList([
+        item({ ref: { kind: "skill", id: "s1" }, name: "brand.zip", use: "skill", allowedUses: ["skill", "code"], linkedSkill: true }),
+      ]),
+    );
+    actions.CheckPersonaSkillNow.mockResolvedValue({
+      status: "ERROR",
+      errors: [{ message: "SharePoint did not answer. Try again in a moment." }],
+    });
+    render(<PersonaFiles personaId="p1" />);
+    await userEvent.click(await screen.findByTestId("persona-file-use"));
+    await userEvent.click(await screen.findByText("Check now"));
+    await waitFor(() => expect(actions.CheckPersonaSkillNow).toHaveBeenCalledWith("p1", "s1"));
+    await waitFor(() =>
+      expect(toast).toHaveBeenCalledWith(
+        expect.objectContaining({
+          description: "SharePoint did not answer. Try again in a moment.",
+          variant: "destructive",
+        }),
+      ),
+    );
+  });
+
+  it("tells 'SharePoint did not answer' apart from 'no access'", async () => {
+    actions.ListAgentFiles.mockResolvedValue(
+      editorList([
+        item({ ref: { kind: "document", id: "d-busy" }, name: "Unknown file", status: "unavailable", webUrl: undefined, allowedUses: ["search"] }),
+        item({ ref: { kind: "document", id: "d-locked" }, name: "Unknown file", status: "no-access", webUrl: undefined, allowedUses: ["search"] }),
+      ]),
+    );
+    render(<PersonaFiles personaId="p1" />);
+    const texts = (await screen.findAllByTestId("persona-file-status")).map((s) => s.textContent);
+    expect(texts).toEqual([
+      "SharePoint did not answer. Try again in a moment.",
+      "Ask the owner of this item in SharePoint for access.",
+    ]);
+  });
 });

@@ -27,6 +27,7 @@ import {
   RemoveAgentFile,
 } from "../persona-services/agent-files/agent-file-service";
 import {
+  AGENT_FILE_STATUS_TEXT,
   AGENT_FILE_USE_TEXT,
   MAX_ITEMS_PER_ADD,
   isAgentFileUse,
@@ -54,10 +55,7 @@ const SHAREPOINT_URL = process.env.NEXT_PUBLIC_SHAREPOINT_URL ?? "";
 export const FILES_SUBTITLE =
   "Add files and folders from SharePoint. The app chooses how the agent uses each item. You can change it.";
 
-const STATUS_TEXT: Partial<Record<AgentFileItem["status"], string>> = {
-  "no-access": "Ask the owner of this item in SharePoint for access.",
-  unavailable: "SharePoint is busy. Try again later.",
-};
+const STATUS_TEXT: Partial<Record<AgentFileItem["status"], string>> = AGENT_FILE_STATUS_TEXT;
 
 const formatSize = (bytes: number): string =>
   bytes >= 1_000_000

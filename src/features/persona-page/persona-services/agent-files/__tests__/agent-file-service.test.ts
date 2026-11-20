@@ -324,6 +324,30 @@ describe("AddAgentFiles: one pick, per-item result (decisions 2, 4, 11)", () => 
     expect(docRows).toEqual([]);
   });
 
+  it("rejects a Search file whose indexing fails and keeps the stored ids", async () => {
+    persona.personaDocumentIds = ["doc-old"];
+    UpdateOrAddPersonaDocuments.mockResolvedValueOnce({ status: "ERROR", errors: [{ message: "indexing failed" }] } as any);
+    const [first, second] = await add("PDF1", "PDF2");
+    expect(first).toMatchObject({
+      status: "rejected",
+      name: "Handbook.pdf",
+      reason: expect.stringMatching(/could not be indexed for Search.*indexing failed/),
+    });
+    // The other item of the pick is still added.
+    expect(second).toMatchObject({ status: "added", use: "search" });
+    expect(persona.personaDocumentIds).toEqual(["doc-old", second.status === "added" ? second.ref.id : ""]);
+  });
+
+  it("rejects a Search file whose indexing throws and does not write the persona row", async () => {
+    persona.personaDocumentIds = ["doc-old"];
+    UpdateOrAddPersonaDocuments.mockRejectedValueOnce(new Error("search service down"));
+    const [res] = await add("PDF1");
+    expect(res).toMatchObject({ status: "rejected", reason: expect.stringMatching(/could not be indexed for Search/) });
+    expect(JSON.stringify(res)).not.toMatch(/search service down/);
+    expect(persona.personaDocumentIds).toEqual(["doc-old"]);
+    expect(replace).not.toHaveBeenCalled();
+  });
+
   it("retries the persona write on an etag conflict, so a parallel change is kept", async () => {
     replace.mockImplementationOnce(async () => {
       persona = { ...persona, name: "Renamed by a parallel save", _etag: "v-parallel" };
@@ -384,6 +408,44 @@ describe("ListAgentFiles: one list over all four row types (decision 10)", () =>
     const res = await ListAgentFiles("p1");
     const item = res.status === "OK" ? res.response.items[0] : undefined;
     expect(item).toMatchObject({ status: "no-access", allowedUses: ["search"] });
+  });
+
+  it.each([
+    ["503", () => graph.add(DRIVE, { id: "BUSY", name: "Busy.pdf", parent: "ROOT", status: 503 })],
+    [
+      "a network error",
+      () => {
+        graph.add(DRIVE, { id: "BUSY", name: "Busy.pdf", parent: "ROOT" });
+        vi.stubGlobal(
+          "fetch",
+          vi.fn(async (input: string) => {
+            if (String(input).includes("/items/BUSY")) throw new TypeError("fetch failed");
+            return graph.fetch(input);
+          }),
+        );
+      },
+    ],
+  ])("no answer from SharePoint (%s): the item is unavailable, not readable, and says so", async (_label, setup) => {
+    setup();
+    docRows.push({ id: "doc-b", type: "PERSONA_DOCUMENT", userId: "owner-hash", externalFile: { documentId: "BUSY", parentReference: { driveId: DRIVE } } });
+    persona.personaDocumentIds = ["doc-b"];
+    const res = await ListAgentFiles("p1");
+    const item = res.status === "OK" ? res.response.items[0] : undefined;
+    expect(item).toMatchObject({
+      status: "unavailable",
+      statusMessage: "SharePoint did not answer. Try again in a moment.",
+      allowedUses: ["search"],
+    });
+    expect(item?.webUrl).toBeUndefined();
+    expect(item?.sizeBytes).toBeUndefined();
+    expect(JSON.stringify(item)).not.toMatch(/Busy\.pdf/);
+  });
+
+  it("an add whose metadata check gets no answer is rejected with a try-again reason, not an access reason", async () => {
+    graph.add(DRIVE, { id: "BUSY", name: "Busy.pdf", parent: "ROOT", status: 503 });
+    const [res] = await add("BUSY");
+    expect(res).toMatchObject({ status: "rejected", reason: "SharePoint did not answer. Try again in a moment." });
+    expect(UpdateOrAddPersonaDocuments).not.toHaveBeenCalled();
   });
 
   it("a viewer gets the count only: no names, no links, no Graph call (decision 9)", async () => {
@@ -482,6 +544,16 @@ describe("ChangeAgentFileUse (decision 5)", () => {
     expect(res.status).toBe("ERROR");
     expect(persona.personaDocumentIds).toEqual([added.ref.id]);
     expect(persona.codeInterpreterDocumentIds).toEqual([]);
+  });
+
+  it("keeps a Code file in Code when its indexing for Search fails", async () => {
+    const [added] = await add("CSV1");
+    if (added.status !== "added") throw new Error("not added");
+    UpdateOrAddPersonaDocuments.mockResolvedValueOnce({ status: "ERROR", errors: [{ message: "indexing failed" }] } as any);
+    const res = await ChangeAgentFileUse("p1", added.ref, "search");
+    expect(res.status === "ERROR" && res.errors[0].message).toMatch(/could not be indexed for Search.*indexing failed/);
+    expect(persona.codeInterpreterDocumentIds).toEqual([added.ref.id]);
+    expect(persona.personaDocumentIds).toEqual([]);
   });
 
   it("undoes the new entry when removing the old one fails", async () => {

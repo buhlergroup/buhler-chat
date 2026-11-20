@@ -81,6 +81,16 @@ export const USE_OF_REF_KIND: Record<AgentFileRefKind, AgentFileUse> = {
  */
 export type AgentFileStatus = "ok" | "no-access" | "unavailable" | "sync-error" | "missing";
 
+/**
+ * The texts of the two Graph statuses. "unavailable" covers a timeout, a 5xx
+ * and a network error: without an answer the item is not shown as readable
+ * (fail closed), but the text says to try again, not to ask for access.
+ */
+export const AGENT_FILE_STATUS_TEXT = {
+  "no-access": "Ask the owner of this item in SharePoint for access.",
+  unavailable: "SharePoint did not answer. Try again in a moment.",
+} as const satisfies Partial<Record<AgentFileStatus, string>>;
+
 /** One file or folder of an agent, as the editor shows it. */
 export interface AgentFileItem {
   ref: AgentFileRef;
