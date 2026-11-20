@@ -42,7 +42,6 @@ import {
   currentPersonaViewer,
   findPersonaDocument,
 } from "./persona-access";
-import { RevalidateCache } from "@/features/common/navigation-helpers";
 import {
   DeleteAgentStats,
   RecordAgentChatStarted,
@@ -55,6 +54,7 @@ import {
 } from "./skills/persona-skill-store";
 import { deleteFileSourcesForPersona } from "./sharepoint-files/sharepoint-file-store";
 import { getCodeInterpreterFileLimit } from "@/features/chat-page/chat-services/code-interpreter-constants";
+import { unavailableAgentFileNames } from "@/features/chat-page/chat-services/chat-api/unavailable-agent-files";
 import {
   extensionIdsForAgentSave,
   usableExtensionIdsForAgent,
@@ -289,11 +289,23 @@ export const UpsertPersona = async (
         persona.personaDocumentIds || []
       );
 
-      let personaDocumentIds: string[] = [];
-
-      if (personaDocumentIdsResponse.status == "OK") {
-        personaDocumentIds = personaDocumentIdsResponse.response;
+      // A failed document update is an error for the whole save: the agent is
+      // not saved, so its stored document ids are not replaced by an empty
+      // list, and the editor shows the error.
+      if (personaDocumentIdsResponse.status !== "OK") {
+        return {
+          status: "ERROR",
+          errors: [
+            {
+              message:
+                "The agent was not saved: its documents could not be updated. Try again.",
+            },
+            ...(personaDocumentIdsResponse.errors ?? []),
+          ],
+        };
       }
+
+      const personaDocumentIds = personaDocumentIdsResponse.response;
 
       const wasPublished = persona.isPublished;
       const willPublish = personaInput.isPublished;
@@ -355,21 +367,6 @@ export const UpsertPersona = async (
       const { resource } = await HistoryContainer().items.upsert<PersonaModel>(
         modelToUpdate
       );
-
-      // the check is here so that we are sure that a [] is saved for the personaDocumentIds
-      if (personaDocumentIdsResponse.status !== "OK") {
-        RevalidateCache({
-          page: "persona",
-        });
-        RevalidateCache({
-          page: "agent",
-        });
-
-        return {
-          status: "ERROR",
-          errors: personaDocumentIdsResponse.errors,
-        };
-      }
 
       if (resource) {
         return {
@@ -479,6 +476,9 @@ export const CreatePersonaChat = async (
 
     // Download and upload Code Interpreter documents from SharePoint
     let attachedFiles: AttachedFileModel[] = [];
+    // Names of the documents that could not be loaded; the model is told
+    // about them (thread.unavailableAgentFiles), the user may lack access.
+    const notLoadedFileNames: string[] = [];
     const ciDocumentIds = persona.codeInterpreterDocumentIds || [];
     
     if (ciDocumentIds.length > 0) {
@@ -506,6 +506,7 @@ export const CreatePersonaChat = async (
                 fileName: doc.fileName,
                 error: downloadResult.errors
               });
+              notLoadedFileNames.push(doc.fileName);
               continue;
             }
 
@@ -537,6 +538,7 @@ export const CreatePersonaChat = async (
                 fileName: name,
                 error: uploadResult.errors
               });
+              notLoadedFileNames.push(doc.fileName);
             }
           } catch (error) {
             logError("Error processing CI document", {
@@ -544,6 +546,7 @@ export const CreatePersonaChat = async (
               fileName: doc.fileName,
               error: error instanceof Error ? error.message : String(error)
             });
+            notLoadedFileNames.push(doc.fileName);
           }
         }
       }
@@ -576,6 +579,7 @@ export const CreatePersonaChat = async (
     // use enter the thread.
     const chatUserId = await userHashedId();
     const extensionIds = await usableExtensionIdsForAgent(persona, chatUserId);
+    const unavailableAgentFiles = unavailableAgentFileNames(notLoadedFileNames);
 
     // The attached files are built here on the server (agent documents and
     // skill archives), so the thread is created directly; the UpsertChatThread
@@ -599,6 +603,7 @@ export const CreatePersonaChat = async (
       selectedModel: persona.selectedModel as ChatModel | undefined,
       subAgentIds: persona.subAgentIds || [],
       defaultTools: persona.defaultTools,
+      ...(unavailableAgentFiles.length > 0 ? { unavailableAgentFiles } : {}),
     }).catch((error) => {
       logError("Failed to create the agent chat", {
         personaId,

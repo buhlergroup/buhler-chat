@@ -5,7 +5,6 @@ import {
   ServerActionResponse,
   zodErrorsToServerActionErrors,
 } from "@/features/common/server-action-response";
-import { getGraphClient } from "../../common/services/microsoft-graph-client";
 import { getCurrentUser, userHashedId } from "@/features/auth-page/helpers";
 import {
   DocumentMetadata,
@@ -23,8 +22,15 @@ import {
   ResolvePersonaDocumentIds,
 } from "./persona-document-access";
 import { logInfo, logError, logDebug } from "@/features/common/services/logger";
-import { ResponseType } from "@microsoft/microsoft-graph-client";
-import { getCodeInterpreterFileLimit } from "@/features/chat-page/chat-services/code-interpreter-constants";
+import {
+  getCodeInterpreterFileLimit,
+  getCodeInterpreterMaxFileBytes,
+} from "@/features/chat-page/chat-services/code-interpreter-constants";
+import {
+  GRAPH_DOWNLOAD_TIMEOUT_MS,
+  downloadDriveItem,
+  getDriveItemVersion,
+} from "@/features/common/services/sharepoint/graph-drive";
 import { checkPersonaEdit } from "./persona-access";
 
 /**
@@ -272,26 +278,43 @@ export const DownloadSharePointFile = async (
 ): Promise<ServerActionResponse<{ buffer: Buffer; name: string; contentType: string }>> => {
   try {
     const { token } = await getCurrentUser();
-    const client = getGraphClient(token);
 
-    // First get file metadata
-    const metadata = await client
-      .api(`/drives/${driveId}/items/${itemId}`)
-      .select("name,file")
-      .get();
+    // Metadata first (short timeout): the size is checked before the
+    // download, with the same limit as the editor (512 MB by default).
+    const metadata = await getDriveItemVersion(token, driveId, itemId);
+    const maxBytes = getCodeInterpreterMaxFileBytes(
+      process.env.NEXT_PUBLIC_MAX_PERSONA_CI_DOCUMENT_SIZE
+    );
+    if (metadata.size > maxBytes) {
+      logError("SharePoint file is larger than the code interpreter limit", {
+        driveId,
+        itemId,
+        size: metadata.size,
+        maxBytes,
+      });
+      return {
+        status: "ERROR",
+        errors: [
+          {
+            message: `The file is larger than ${Math.round(maxBytes / (1024 * 1024))} MB.`,
+          },
+        ],
+      };
+    }
 
     const fileName = metadata.name;
-    const contentType = metadata.file?.mimeType || "application/octet-stream";
+    const contentType = metadata.mimeType || "application/octet-stream";
 
     logDebug("Downloading SharePoint file", { driveId, itemId, fileName });
 
-    // Download the file content
-    const response = await client
-      .api(`/drives/${driveId}/items/${itemId}/content`)
-      .responseType(ResponseType.ARRAYBUFFER)
-      .get();
-
-    const buffer = Buffer.from(response);
+    // The download stops after the time limit (60 s) and after maxBytes.
+    const buffer = await downloadDriveItem(
+      token,
+      driveId,
+      itemId,
+      maxBytes,
+      GRAPH_DOWNLOAD_TIMEOUT_MS
+    );
 
     logInfo("SharePoint file downloaded successfully", {
       fileName,

@@ -235,13 +235,14 @@ export function buildSkillCatalogPrompt(
       : "You have these skills. When a task matches a skill, call `load_skill` with its name BEFORE you start, " +
         "then follow its instructions. Load files of the skill with `load_skill` and `path`, or use them in the code interpreter as `load_skill` explains.\n" +
         lines.join("\n");
-  // Names only: the user cannot open the SharePoint file, so nothing of its
-  // content (not even the description) goes into the prompt.
+  // Names only: the user cannot open the SharePoint file (or SharePoint did
+  // not answer), so nothing of its content (not even the description) goes
+  // into the prompt.
   const missing =
     unavailable.length === 0
       ? ""
       : (catalog ? "\n" : "") +
-        `These skills of the agent are not available in this chat, because the user has no access to their file in SharePoint: ${[...unavailable].sort().join(", ")}. ` +
+        `These skills of the agent are not available in this chat, because their file in SharePoint could not be opened with the user's access: ${[...unavailable].sort().join(", ")}. ` +
         "If a task needs one of them, tell the user in one short sentence and continue without it.";
   return "\n\n## Skills\n" + catalog + missing;
 }

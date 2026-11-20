@@ -49,6 +49,8 @@ interface FakeFile {
   content?: Buffer;
   /** Metadata request hangs until the abort signal fires. */
   hang?: boolean;
+  /** Metadata request fails with a network error. */
+  networkError?: boolean;
 }
 let file: FakeFile;
 const fetchMock = vi.fn(async (input: string, init?: RequestInit): Promise<Response> => {
@@ -59,6 +61,9 @@ const fetchMock = vi.fn(async (input: string, init?: RequestInit): Promise<Respo
         reject(Object.assign(new Error("aborted"), { name: "TimeoutError" })),
       );
     });
+  }
+  if (file.networkError && !url.includes("/content")) {
+    throw new TypeError("fetch failed");
   }
   if (url.includes("/content")) {
     if (file.contentStatus) return new Response("denied", { status: file.contentStatus });
@@ -81,6 +86,7 @@ const fetchMock = vi.fn(async (input: string, init?: RequestInit): Promise<Respo
 vi.stubGlobal("fetch", fetchMock);
 
 import {
+  NOT_REACHABLE_MESSAGE,
   fetchLinkedSkillZip,
   syncLinkedSkill,
   syncLinkedSkills,
@@ -266,19 +272,35 @@ describe("syncLinkedSkill at chat time", () => {
     expect(fetchMock).not.toHaveBeenCalled();
   });
 
-  it.each([500, 503, 429])("Graph %i: uses the stored version", async (status) => {
+  // No answer from SharePoint is no proof of access: fail closed, like 403.
+  it.each([500, 503, 429])("Graph %i on metadata: the skill is not used in this request", async (status) => {
     file.metaStatus = status;
     const res = await syncLinkedSkill(linkedSkill(), "t", [], deps);
-    expect(res).toMatchObject({ status: "kept", invalid: false });
-    expect(res.skill.blobName).toBe("agent-skills/p1/s1-0.zip");
-    expect(res.skill.openAiFileId).toBe("file-v1");
+    expect(res).toMatchObject({ status: "denied", message: NOT_REACHABLE_MESSAGE });
+    expect(contentCalls()).toHaveLength(0);
+    expect(UploadBlob).not.toHaveBeenCalled();
   });
 
-  it("timeout: uses the stored version", async () => {
+  it("timeout on metadata: the skill is not used in this request", async () => {
     file.hang = true;
     const res = await syncLinkedSkill(linkedSkill(), "t", [], deps, { metadataTimeoutMs: 20 });
+    expect(res).toMatchObject({ status: "denied", message: NOT_REACHABLE_MESSAGE });
+    expect(contentCalls()).toHaveLength(0);
+  });
+
+  it("network error on metadata: the skill is not used in this request", async () => {
+    file.networkError = true;
+    const res = await syncLinkedSkill(linkedSkill(), "t", [], deps);
+    expect(res).toMatchObject({ status: "denied", message: NOT_REACHABLE_MESSAGE });
+  });
+
+  it("new version, download times out after the metadata answer: keeps the stored copy (access proven)", async () => {
+    file.cTag = "c2";
+    file.contentStatus = 503;
+    const res = await syncLinkedSkill(linkedSkill(), "t", [], deps);
     expect(res).toMatchObject({ status: "kept", invalid: false });
     expect(res.skill.openAiFileId).toBe("file-v1");
+    expect(UploadBlob).not.toHaveBeenCalled();
   });
 
   it("invalid new zip: keeps the last good version and records the error once", async () => {
@@ -369,18 +391,21 @@ describe("syncLinkedSkills for one chat request", () => {
     expect(res.unavailable).toEqual(["demo-skill"]);
   });
 
-  it("503: keeps the cached linked skill", async () => {
-    file.metaStatus = 503;
-    const res = await syncLinkedSkills([linkedSkill()], "t", deps);
-    expect(res.skills).toHaveLength(1);
-    expect(res.skills[0].openAiFileId).toBe("file-v1");
-    expect(res.unavailable).toEqual([]);
+  it.each([
+    ["500", { metaStatus: 500 }],
+    ["503", { metaStatus: 503 }],
+    ["a network error", { networkError: true }],
+  ])("%s: leaves the linked skill out and names it as unavailable", async (_label, over) => {
+    Object.assign(file, over);
+    const res = await syncLinkedSkills([linkedSkill(), uploadedSkill()], "t", deps);
+    expect(res.skills.map((s) => s.name)).toEqual(["other-skill"]);
+    expect(res.unavailable).toEqual(["demo-skill"]);
   });
 });
 
 describe("per-user check cache (60 s)", () => {
   const metaCalls = () => fetchMock.mock.calls.filter((c) => !String(c[0]).includes("/content"));
-  const sync = (opts: { userId?: string; force?: boolean } = {}) =>
+  const sync = (opts: { userId?: string; force?: boolean; metadataTimeoutMs?: number } = {}) =>
     syncLinkedSkill(rows.get("s1") as Row, "user-token", [], deps, { userId: "user-a", ...opts });
 
   let now = 1_000_000;
@@ -420,10 +445,18 @@ describe("per-user check cache (60 s)", () => {
     expect(metaCalls()).toHaveLength(1);
   });
 
-  it("does not cache transient errors", async () => {
+  it("does not cache transient errors: the next request uses the skill again", async () => {
     file.metaStatus = 503;
-    expect((await sync()).status).toBe("kept");
+    expect((await sync()).status).toBe("denied");
     file.metaStatus = undefined;
+    expect((await sync()).status).toBe("current");
+    expect(metaCalls()).toHaveLength(2);
+  });
+
+  it("does not cache a timeout: the next request checks again", async () => {
+    file.hang = true;
+    expect((await sync({ metadataTimeoutMs: 20 })).status).toBe("denied");
+    file.hang = false;
     expect((await sync()).status).toBe("current");
     expect(metaCalls()).toHaveLength(2);
   });

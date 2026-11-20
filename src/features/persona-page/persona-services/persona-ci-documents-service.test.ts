@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { createHash } from "crypto";
 import { setSession, defaultSession } from "@/__tests__/helpers/session-mock";
 
@@ -54,6 +54,7 @@ import {
   DeletePersonaCIDocumentById,
   DeletePersonaCIDocumentsByPersonaId,
   UpdateOrAddPersonaCIDocuments,
+  DownloadSharePointFile,
 } from "./persona-ci-documents-service";
 
 const makeCIDoc = (id: string) => ({
@@ -264,5 +265,103 @@ describe("persona-ci-documents-service.ts", () => {
       expect(result.errors[0].message).toMatch(/maximum is 20/i);
     }
     expect(historyContainer.items.upsert).not.toHaveBeenCalled();
+  });
+});
+
+// ── DownloadSharePointFile: bounded download (size limit + timeout) ─────────
+describe("DownloadSharePointFile bounds the download", () => {
+  const MB = 1024 * 1024;
+  let meta: { status?: number; size: number; mimeType?: string };
+  let content: { status?: number; body: Uint8Array; hang?: boolean };
+  const fetchMock = vi.fn(async (input: string, init?: RequestInit): Promise<Response> => {
+    const url = String(input);
+    if (url.includes("/content")) {
+      if (content.hang) {
+        return new Promise((_resolve, reject) => {
+          init?.signal?.addEventListener("abort", () =>
+            reject(Object.assign(new Error("aborted"), { name: "TimeoutError" }))
+          );
+        });
+      }
+      if (content.status) return new Response("x", { status: content.status });
+      return new Response(content.body, { status: 200 });
+    }
+    if (meta.status) return new Response("{}", { status: meta.status });
+    return new Response(
+      JSON.stringify({
+        name: "data.csv",
+        cTag: "c1",
+        eTag: "e1",
+        size: meta.size,
+        file: meta.mimeType ? { mimeType: meta.mimeType } : {},
+      }),
+      { status: 200 }
+    );
+  });
+  const contentCalls = () => fetchMock.mock.calls.filter((c) => String(c[0]).includes("/content"));
+
+  beforeEach(() => {
+    fetchMock.mockClear();
+    vi.stubGlobal("fetch", fetchMock);
+    meta = { size: 4, mimeType: "text/csv" };
+    content = { body: new Uint8Array([1, 2, 3, 4]) };
+    delete process.env.NEXT_PUBLIC_MAX_PERSONA_CI_DOCUMENT_SIZE;
+  });
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.restoreAllMocks();
+  });
+
+  it("downloads a file with its name and MIME type", async () => {
+    const res = await DownloadSharePointFile("b!drive_1", "01ITEM");
+    expect(res.status).toBe("OK");
+    if (res.status === "OK") {
+      expect(res.response.name).toBe("data.csv");
+      expect(res.response.contentType).toBe("text/csv");
+      expect([...res.response.buffer]).toEqual([1, 2, 3, 4]);
+    }
+    expect(String(fetchMock.mock.calls[0][0]).startsWith("https://graph.microsoft.com/v1.0/")).toBe(true);
+  });
+
+  it("refuses a file above 512 MB from its metadata, before any download", async () => {
+    meta.size = 512 * MB + 1;
+    const res = await DownloadSharePointFile("b!drive_1", "01ITEM");
+    expect(res.status).toBe("ERROR");
+    if (res.status === "ERROR") expect(res.errors[0].message).toMatch(/larger than 512 MB/);
+    expect(contentCalls()).toHaveLength(0);
+  });
+
+  it("accepts a file of exactly 512 MB by its metadata", async () => {
+    meta.size = 512 * MB;
+    const res = await DownloadSharePointFile("b!drive_1", "01ITEM");
+    expect(res.status).toBe("OK");
+  });
+
+  it("stops a download that is larger than its metadata said", async () => {
+    process.env.NEXT_PUBLIC_MAX_PERSONA_CI_DOCUMENT_SIZE = "3";
+    meta.size = 2;
+    const res = await DownloadSharePointFile("b!drive_1", "01ITEM");
+    expect(res.status).toBe("ERROR");
+  });
+
+  it("gives the download 60 s and fails when it times out", async () => {
+    const controllers: AbortController[] = [];
+    const timeoutSpy = vi.spyOn(AbortSignal, "timeout").mockImplementation(() => {
+      const c = new AbortController();
+      controllers.push(c);
+      return c.signal;
+    });
+    content.hang = true;
+    const pending = DownloadSharePointFile("b!drive_1", "01ITEM");
+    await vi.waitFor(() => expect(contentCalls()).toHaveLength(1));
+    expect(timeoutSpy).toHaveBeenLastCalledWith(60_000);
+    controllers[controllers.length - 1].abort();
+    const res = await pending;
+    expect(res.status).toBe("ERROR");
+  });
+
+  it.each([403, 404, 500])("fails on Graph %i", async (status) => {
+    meta.status = status;
+    expect((await DownloadSharePointFile("b!drive_1", "01ITEM")).status).toBe("ERROR");
   });
 });

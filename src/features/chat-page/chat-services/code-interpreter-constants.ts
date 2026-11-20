@@ -8,6 +8,17 @@ export function getCodeInterpreterFileLimit(value: string | undefined): number {
     : DEFAULT_CODE_INTERPRETER_FILE_LIMIT;
 }
 
+/** Largest code interpreter file of an agent, in bytes (512 MB). */
+export const DEFAULT_CODE_INTERPRETER_MAX_FILE_BYTES = 536870912;
+
+/** Size limit per code interpreter file; the editor uses the same value. */
+export function getCodeInterpreterMaxFileBytes(value: string | undefined): number {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) && parsed > 0
+    ? parsed
+    : DEFAULT_CODE_INTERPRETER_MAX_FILE_BYTES;
+}
+
 export const CODE_INTERPRETER_SUPPORTED_EXTENSIONS = [
   // Data files
   "CSV", "JSON", "XML", "XLSX", "XLS",

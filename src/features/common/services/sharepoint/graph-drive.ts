@@ -34,6 +34,8 @@ export interface DriveItemVersion {
   lastModifiedDateTime: string;
   size: number;
   isFile: boolean;
+  /** MIME type of a file, when Graph sends one. */
+  mimeType?: string;
 }
 
 export class GraphFileError extends Error {
@@ -123,7 +125,7 @@ export async function getDriveItemVersion(
     eTag?: unknown;
     lastModifiedDateTime?: unknown;
     size?: unknown;
-    file?: unknown;
+    file?: { mimeType?: unknown } | null;
   };
   const cTag = typeof body.cTag === "string" && body.cTag ? body.cTag : undefined;
   const eTag = typeof body.eTag === "string" && body.eTag ? body.eTag : undefined;
@@ -140,6 +142,9 @@ export async function getDriveItemVersion(
       typeof body.lastModifiedDateTime === "string" ? body.lastModifiedDateTime : "",
     size: typeof body.size === "number" ? body.size : 0,
     isFile: Boolean(body.file),
+    ...(typeof body.file?.mimeType === "string" && body.file.mimeType
+      ? { mimeType: body.file.mimeType }
+      : {}),
   };
 }
 
