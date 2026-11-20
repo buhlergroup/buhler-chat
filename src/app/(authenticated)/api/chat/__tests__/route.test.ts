@@ -2,6 +2,11 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 
 // ── Heavy server-only modules ─────────────────────────────────────────────────
 vi.mock("server-only", () => ({}));
+// Agent skills: no skills in these tests (the store would reach Cosmos).
+vi.mock("@/features/persona-page/persona-services/skills/persona-skill-store", () => ({
+  loadUsableSkills: vi.fn(async () => []),
+  readSkillFile: vi.fn(),
+}));
 vi.mock("@/features/common/services/logger", () => ({
   logError: vi.fn(),
   logWarn: vi.fn(),
@@ -372,6 +377,72 @@ describe("/api/chat route (AI SDK v6)", () => {
             codeInterpreterContainerId: undefined,
           }),
         }),
+      );
+    });
+  });
+
+  describe("code_interpreter files: only files the server can attribute", () => {
+    // Pinned: the browser's codeInterpreterFileIds used to reach the container
+    // unchecked, so any OpenAI file id (another user's upload, a skill archive
+    // copied while the user still had access) was mounted. Only files recorded
+    // on the caller's thread, and the current files of usable skills, go in.
+    const ciCtx = {
+      ...CTX,
+      thread: { ...CTX.thread, codeInterpreterContainerId: undefined },
+      defaultTools: { codeInterpreter: true },
+      attachedFiles: [
+        { id: "file-mine", name: "data.csv", type: "code-interpreter" },
+        { id: "doc-indexed", name: "notes.pdf", type: "search-indexed" },
+      ],
+    };
+
+    it("drops ids that are not attached to the thread", async () => {
+      mockLoadThreadContext.mockResolvedValue(structuredClone(ciCtx));
+      mockEnsureContainer.mockResolvedValue("cntr_1");
+
+      await POST(
+        makeRequest({
+          message: "plot this",
+          id: "t1",
+          codeInterpreterEnabled: true,
+          codeInterpreterFileIds: ["file-foreign", "file-mine", "doc-indexed"],
+        }),
+      );
+
+      expect(mockEnsureContainer).toHaveBeenCalledWith(
+        expect.objectContaining({ fileIds: ["file-mine"] }),
+      );
+      expect(mockUpdateContainer).toHaveBeenCalledWith("t1", "", "file-mine");
+    });
+
+    it("in an agent chat keeps the current skill file and drops other ids", async () => {
+      const { loadUsableSkills } = await import(
+        "@/features/persona-page/persona-services/skills/persona-skill-store"
+      );
+      (loadUsableSkills as unknown as ReturnType<typeof vi.fn>).mockResolvedValueOnce([
+        { name: "demo", description: "d", openAiFileId: "file-skill-v2" },
+      ]);
+      mockLoadThreadContext.mockResolvedValue({
+        ...structuredClone(ciCtx),
+        thread: { ...ciCtx.thread, personaId: "p1" },
+        attachedFiles: [
+          ...ciCtx.attachedFiles,
+          { id: "file-skill-v1", name: "skill-demo.zip", type: "code-interpreter" },
+        ],
+      });
+      mockEnsureContainer.mockResolvedValue("cntr_2");
+
+      await POST(
+        makeRequest({
+          message: "plot this",
+          id: "t1",
+          codeInterpreterEnabled: true,
+          codeInterpreterFileIds: ["file-mine", "file-skill-v1", "file-other-agent-skill"],
+        }),
+      );
+
+      expect(mockEnsureContainer).toHaveBeenCalledWith(
+        expect.objectContaining({ fileIds: ["file-mine", "file-skill-v2"] }),
       );
     });
   });

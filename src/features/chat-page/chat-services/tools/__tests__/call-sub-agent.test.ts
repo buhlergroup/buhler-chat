@@ -40,6 +40,11 @@ vi.mock("@/features/common/services/logger", () => ({
   logWarn: vi.fn(),
 }));
 
+// Agent skills: no skills in these tests (the store would reach Cosmos).
+vi.mock("@/features/persona-page/persona-services/skills/persona-skill-store", () => ({
+  loadUsableSkills: vi.fn(async () => []),
+  readSkillFile: vi.fn(),
+}));
 vi.mock("@/features/persona-page/persona-services/persona-service", () => ({
   FindPersonaByID: mockFindPersonaByID,
   FindAllPersonaForCurrentUser: vi.fn(async () => ({ status: "OK", response: [] })),
@@ -305,6 +310,29 @@ describe("callSubAgentTool – execute", () => {
       { abortSignal: undefined }
     );
     expect(buildToolset).not.toHaveBeenCalled();
+  });
+
+  it("gives a sub-agent its own skills: catalog in the instructions, load_skill context without code interpreter", async () => {
+    const { buildToolset } = await import("../registry");
+    const store = await import(
+      "@/features/persona-page/persona-services/skills/persona-skill-store"
+    );
+    const skill = { name: "demo-skill", description: "Builds demos." };
+    vi.mocked(store.loadUsableSkills).mockResolvedValueOnce([skill as never]);
+
+    const t = callSubAgentTool(makeCtx());
+    await (t as any).execute(
+      { agent_id: "agent-1", task: "task" },
+      { abortSignal: undefined }
+    );
+
+    expect(store.loadUsableSkills).toHaveBeenCalledWith("agent-1");
+    expect(buildToolset).toHaveBeenCalledWith(
+      expect.objectContaining({ skills: [skill], skillsInCodeInterpreter: [] })
+    );
+    const call = mockGenerateText.mock.calls[0][0] as { instructions: string };
+    expect(call.instructions).toContain(FAKE_PERSONA.personaMessage);
+    expect(call.instructions).toContain("- demo-skill: Builds demos.");
   });
 
 describe("callSubAgentTool — the sub-agent's own extensions", () => {

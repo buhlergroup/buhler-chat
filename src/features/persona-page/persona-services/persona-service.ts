@@ -2,7 +2,7 @@
 import "server-only";
 
 import { getCurrentUser, userHashedId } from "@/features/auth-page/helpers";
-import { saveChatThread } from "@/features/chat-page/chat-services/chat-thread-write";
+import { createChatThreadWithServerFiles } from "@/features/chat-page/chat-services/code-interpreter-file-access";
 import {
   CHAT_THREAD_ATTRIBUTE,
   ChatThreadModel,
@@ -47,7 +47,13 @@ import {
   DeleteAgentStats,
   RecordAgentChatStarted,
 } from "@/features/common/services/agent-stats-service";
-import { logInfo, logError } from "@/features/common/services/logger";
+import { logInfo, logError, logWarn } from "@/features/common/services/logger";
+import {
+  deleteSkillsForPersona,
+  loadUsableSkills,
+  uploadSkillArchivesForCodeInterpreter,
+} from "./skills/persona-skill-store";
+import { getCodeInterpreterFileLimit } from "@/features/chat-page/chat-services/code-interpreter-constants";
 
 interface PersonaInput {
   name: string;
@@ -220,6 +226,7 @@ export const DeletePersona = async (
       if (documentsResponse.status !== "OK") {
         return documentsResponse;
       }
+      await deleteSkillsForPersona(personaId);
 
       const { resource: deletedPersona } = await HistoryContainer()
         .item(personaId, personaResponse.response.userId)
@@ -490,7 +497,8 @@ export const CreatePersonaChat = async (
                 id: uploadResult.response.id,
                 name: uploadResult.response.name,
                 type: "code-interpreter",
-                uploadedAt: new Date()
+                uploadedAt: new Date(),
+                source: "agent-document",
               });
               
               logInfo("Successfully uploaded CI document to OpenAI", {
@@ -516,9 +524,32 @@ export const CreatePersonaChat = async (
       }
     }
 
-    // Server-built thread: saveChatThread, not the client-facing
-    // UpsertChatThread (which takes only the title and the bookmark).
-    const response = await saveChatThread({
+    // Agent skills: each skill zip becomes one code interpreter file, so the
+    // model can unpack it and run the skill's scripts (see load_skill). Only
+    // up to the per-chat code interpreter file limit, after the agent's own
+    // documents; a skill without its archive still works through load_skill.
+    const skills = await loadUsableSkills(persona.id);
+    if (skills.length > 0) {
+      const room =
+        getCodeInterpreterFileLimit(process.env.MAX_PERSONA_CI_DOCUMENT_LIMIT) -
+        attachedFiles.length;
+      if (room < skills.length) {
+        logWarn("Agent skills exceed the code interpreter file limit", {
+          personaId,
+          skills: skills.length,
+          room,
+        });
+      }
+      const skillFiles = await uploadSkillArchivesForCodeInterpreter(
+        skills.slice(0, Math.max(0, room)),
+      );
+      attachedFiles = [...attachedFiles, ...skillFiles];
+    }
+
+    // The attached files are built here on the server (agent documents and
+    // skill archives), so the thread is created directly; the UpsertChatThread
+    // action would drop code interpreter files it did not record itself.
+    const created = await createChatThreadWithServerFiles({
       name: persona.name,
       useName: user.name,
       userId: await userHashedId(),
@@ -537,7 +568,16 @@ export const CreatePersonaChat = async (
       selectedModel: persona.selectedModel as ChatModel | undefined,
       subAgentIds: persona.subAgentIds || [],
       defaultTools: persona.defaultTools,
+    }).catch((error) => {
+      logError("Failed to create the agent chat", {
+        personaId,
+        error: error instanceof Error ? error.message : String(error),
+      });
+      return undefined;
     });
+    const response: ServerActionResponse<ChatThreadModel> = created
+      ? { status: "OK", response: created }
+      : { status: "ERROR", errors: [{ message: "The chat could not be created." }] };
 
     if (response.status === "OK") {
       // Fire-and-forget: stats must never block or fail chat creation.

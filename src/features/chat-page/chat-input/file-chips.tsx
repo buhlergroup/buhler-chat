@@ -62,7 +62,9 @@ export const FileChips = ({ chatDocuments }: FileChipsProps) => {
         method: "DELETE",
       });
 
-      if (!deleteResponse.ok) {
+      // 404: not a file this user uploaded (an agent document or skill
+      // archive): it stays in OpenAI and is only detached from this chat.
+      if (!deleteResponse.ok && deleteResponse.status !== 404) {
         const errorText = await deleteResponse.text();
         throw new Error(errorText || "Failed to delete file from Code Interpreter");
       }

@@ -32,6 +32,7 @@ import {
   normalizeChatModelId,
   withNormalizedSelectedModel,
 } from "./models";
+import { mergeClientAttachedFiles } from "./code-interpreter-file-access";
 
 const VALID_REASONING_EFFORTS: ReadonlyArray<ReasoningEffort> = [
   "minimal",
@@ -372,6 +373,11 @@ export const RemoveExtensionFromChatThread = async (props: {
  * thread, so a client cannot attach an agent or an extension to a thread, or
  * write a thread for another user. A changed personaId is ignored.
  *
+ * The client's `attachedFiles` list is merged on the server with
+ * `mergeClientAttachedFiles`: code interpreter files can only be kept or
+ * removed, never added (the server records those itself, see
+ * code-interpreter-file-access.ts).
+ *
  * This action does not create threads. Server code that builds a new thread
  * uses `saveChatThread` (chat-thread-write.ts), which is not an RPC endpoint.
  */
@@ -391,9 +397,19 @@ export const UpsertChatThread = async (
       return response;
     }
 
-    return await saveChatThread(
-      applyUserThreadChanges(response.response, chatThread)
+    // The stored thread comes from the caller's own partition; only name and
+    // bookmark are taken from the client, plus the server-side merge of the
+    // attached files.
+    const stored = response.response;
+    const updated = applyUserThreadChanges(stored, chatThread);
+    const attachedFiles = mergeClientAttachedFiles(
+      stored.attachedFiles,
+      chatThread.attachedFiles,
     );
+    if (attachedFiles !== undefined) {
+      updated.attachedFiles = attachedFiles;
+    }
+    return await saveChatThread(updated);
   } catch (error) {
     return {
       status: "ERROR",
@@ -611,6 +627,14 @@ export const AddAttachedFile = async (
       const existingFiles = chatThread.attachedFiles || [];
       // Avoid duplicates
       if (!existingFiles.some(f => f.id === file.id)) {
+        // Code interpreter files are recorded by the server when they are
+        // uploaded (/api/code-interpreter/upload), never from a client id.
+        if (file.type !== "search-indexed") {
+          return {
+            status: "NOT_FOUND",
+            errors: [{ message: "File not found" }],
+          };
+        }
         chatThread.attachedFiles = [...existingFiles, file];
         return await saveChatThread(chatThread);
       }

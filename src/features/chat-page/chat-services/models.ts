@@ -1108,11 +1108,20 @@ export type ChatRole = "system" | "user" | "assistant" | "function" | "tool" | "
 
 export type AttachedFileType = "code-interpreter" | "search-indexed";
 
+/**
+ * Who put a code interpreter file on the thread. Set by the server only:
+ * "upload" = the thread owner uploaded it (/api/code-interpreter/upload),
+ * "agent-document" / "skill" = added at chat start from the agent. Rows
+ * written before this field existed have none.
+ */
+export type AttachedFileSource = "upload" | "agent-document" | "skill";
+
 export interface AttachedFileModel {
   id: string;
   name: string;
   type: AttachedFileType;
   uploadedAt?: Date;
+  source?: AttachedFileSource;
 }
 
 export interface ThreadUsage {

@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, it, expect } from "vitest";
 import {
+  selectAttributableCodeInterpreterFileIds,
   validateCodeInterpreterFileIds,
   validateMultimodalInput,
 } from "../validate-input";
@@ -173,5 +174,49 @@ describe("Code Interpreter files", () => {
   it("rejects invalid file IDs", () => {
     const result = validateCodeInterpreterFileIds(["file-1", ""]);
     expect(result.ok).toBe(false);
+  });
+});
+
+// Pinned: the browser sends codeInterpreterFileIds; an id that the server
+// cannot attribute to this thread (another user's file, a skill archive
+// copied earlier) must not reach the code interpreter container.
+describe("selectAttributableCodeInterpreterFileIds", () => {
+  const attachedFiles = [
+    { id: "file-upload", type: "code-interpreter" },
+    { id: "file-agent-doc", type: "code-interpreter" },
+    { id: "doc-indexed", type: "search-indexed" },
+  ];
+
+  it("keeps files attached to the thread, in request order", () => {
+    const out = selectAttributableCodeInterpreterFileIds({
+      requestedFileIds: ["file-agent-doc", "file-upload"],
+      attachedFiles,
+    });
+    expect(out).toEqual({ fileIds: ["file-agent-doc", "file-upload"], droppedCount: 0 });
+  });
+
+  it("drops ids that are not attached and search-indexed documents", () => {
+    const out = selectAttributableCodeInterpreterFileIds({
+      requestedFileIds: ["file-foreign", "file-upload", "doc-indexed"],
+      attachedFiles,
+    });
+    expect(out).toEqual({ fileIds: ["file-upload"], droppedCount: 2 });
+  });
+
+  it("accepts extra allowed ids (current skill files) and ignores empty ones", () => {
+    const out = selectAttributableCodeInterpreterFileIds({
+      requestedFileIds: ["file-skill", "file-upload", "file-skill"],
+      attachedFiles,
+      extraAllowedIds: [undefined, "file-skill"],
+    });
+    expect(out).toEqual({ fileIds: ["file-skill", "file-upload"], droppedCount: 0 });
+  });
+
+  it("drops everything when nothing is attached", () => {
+    const out = selectAttributableCodeInterpreterFileIds({
+      requestedFileIds: ["file-a", "file-b"],
+      attachedFiles: [],
+    });
+    expect(out).toEqual({ fileIds: [], droppedCount: 2 });
   });
 });

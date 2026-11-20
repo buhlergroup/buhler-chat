@@ -18,7 +18,6 @@ import {
 } from "../../chat-services/code-interpreter-constants";
 import { getActiveChatStore } from "../../active-chat-store";
 import { InputImageStore } from "@/features/ui/chat/chat-input-area/input-image-store";
-import { AddAttachedFile } from "../../chat-services/chat-thread-service";
 
 // File extensions that should be handled by Code Interpreter instead of Azure Search
 // These are data files that are better processed by Python code
@@ -124,6 +123,9 @@ class FileStore {
         try {
           const uploadFormData = new FormData();
           uploadFormData.append("file", file);
+          // The server records the upload on this thread; only recorded
+          // files reach the code interpreter.
+          uploadFormData.append("threadId", chatThreadId);
 
           const response = await fetch("/api/code-interpreter/upload", {
             method: "POST",
@@ -142,6 +144,7 @@ class FileStore {
             name: data.name,
             type: "code-interpreter",
             uploadedAt: new Date(),
+            source: "upload",
           };
 
           // Write synchronously to the per-thread Zustand store so a
@@ -151,9 +154,6 @@ class FileStore {
             active.getState().addAttachedFile(attachedFile);
             active.getState().toggleCodeInterpreter(true);
           }
-
-          // Persist to database
-          await AddAttachedFile(chatThreadId, attachedFile);
 
           this.uploadButtonLabel = file.name + " ready for analysis";
           showSuccess({

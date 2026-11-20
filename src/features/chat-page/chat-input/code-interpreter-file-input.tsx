@@ -13,7 +13,7 @@ import {
 } from "@/features/ui/tooltip";
 import { cn } from "@/ui/lib";
 import { AttachedFileModel } from "../chat-services/models";
-import { AddAttachedFile, RemoveAttachedFile } from "../chat-services/chat-thread-service";
+import { RemoveAttachedFile } from "../chat-services/chat-thread-service";
 
 const CODE_INTERPRETER_SUPPORTED_EXTENSIONS = [
   ".csv", ".json", ".xml", ".xlsx", ".xls",
@@ -62,6 +62,9 @@ export const CodeInterpreterFileInput = () => {
     try {
       const formData = new FormData();
       formData.append("file", file);
+      // The server records the upload on this thread; only recorded files
+      // reach the code interpreter.
+      formData.append("threadId", chatThreadId);
 
       const response = await fetch("/api/code-interpreter/upload", {
         method: "POST",
@@ -79,13 +82,11 @@ export const CodeInterpreterFileInput = () => {
         id: data.id,
         name: data.name,
         type: "code-interpreter",
-        uploadedAt: new Date()
+        uploadedAt: new Date(),
+        source: "upload",
       };
       
       addAttachedFile(attachedFile);
-
-      // Persist to database
-      await AddAttachedFile(chatThreadId, attachedFile);
 
       showSuccess({
         title: "File uploaded",
@@ -104,7 +105,9 @@ export const CodeInterpreterFileInput = () => {
         method: "DELETE",
       });
 
-      if (!deleteResponse.ok) {
+      // 404: not a file this user uploaded (an agent document or skill
+      // archive): it stays in OpenAI and is only detached from this chat.
+      if (!deleteResponse.ok && deleteResponse.status !== 404) {
         const errorText = await deleteResponse.text();
         throw new Error(errorText || "Failed to delete file from Code Interpreter");
       }

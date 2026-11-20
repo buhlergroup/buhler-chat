@@ -124,3 +124,40 @@ export function validateCodeInterpreterFileIds(
 
   return { ok: true };
 }
+
+/**
+ * Keeps only the code interpreter file IDs the server can attribute to this
+ * request. The browser sends `codeInterpreterFileIds`, but an OpenAI file ID
+ * alone proves nothing about who may use the file, so an ID is accepted only
+ * when it is:
+ *   - a code interpreter file attached to the current thread (the thread was
+ *     loaded for the caller; user uploads, the agent's code interpreter
+ *     documents and the skill archives are recorded there), or
+ *   - in `extraAllowedIds` (the current skill archive files of an agent the
+ *     caller may use).
+ * Everything else is dropped. The result keeps the request order without
+ * duplicates, so the file-set signature stays stable across turns.
+ */
+export function selectAttributableCodeInterpreterFileIds(input: {
+  requestedFileIds: ReadonlyArray<string>;
+  attachedFiles: ReadonlyArray<{ id: string; type?: string }>;
+  extraAllowedIds?: ReadonlyArray<string | undefined>;
+}): { fileIds: string[]; droppedCount: number } {
+  const allowed = new Set<string>();
+  for (const f of input.attachedFiles) {
+    if (f.id && f.type !== "search-indexed") allowed.add(f.id);
+  }
+  for (const id of input.extraAllowedIds ?? []) {
+    if (id) allowed.add(id);
+  }
+  const fileIds: string[] = [];
+  let droppedCount = 0;
+  for (const id of input.requestedFileIds) {
+    if (!allowed.has(id)) {
+      droppedCount++;
+      continue;
+    }
+    if (!fileIds.includes(id)) fileIds.push(id);
+  }
+  return { fileIds, droppedCount };
+}

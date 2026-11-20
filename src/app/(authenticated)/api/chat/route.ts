@@ -19,6 +19,7 @@ import {
 } from "ai";
 import type { StepResult, ToolSet } from "ai";
 import {
+  selectAttributableCodeInterpreterFileIds,
   validateCodeInterpreterFileIds,
   validateMultimodalInput,
 } from "@/features/chat-page/chat-services/chat-api/validate-input";
@@ -60,6 +61,14 @@ import { resolvePromptCacheKey } from "@/features/chat-page/chat-services/models
 import { CHAT_DEFAULT_SYSTEM_PROMPT } from "@/features/theme/theme-config";
 import { resolveExtensionsForChat } from "@/features/extensions-page/extension-services/extension-runtime";
 import { logError, logInfo, logWarn } from "@/features/common/services/logger";
+import {
+  loadUsableSkills,
+  refreshSkillOpenAiFiles,
+} from "@/features/persona-page/persona-services/skills/persona-skill-store";
+import {
+  buildSkillCatalogPrompt,
+  resolveSkillCodeInterpreterFiles,
+} from "@/features/persona-page/persona-services/skills/skill-models";
 import { type UserPrompt } from "@/features/chat-page/chat-services/models";
 
 // Allow streaming responses to run for up to 10 minutes (600 seconds)
@@ -265,6 +274,50 @@ export async function POST(req: Request) {
     });
   }
 
+  // Agent skills (personas only), filtered by the access rule. The catalog
+  // (names + descriptions) joins the persona message: both are fixed for the
+  // life of the thread unless the owner changes the skills, so the prefix
+  // stays cacheable. The skill archives among this turn's code interpreter
+  // files are mapped onto the CURRENT OpenAI file of each skill version (a
+  // replaced skill's old file is deleted; a deleted skill's file is dropped).
+  const agentSkills = await loadUsableSkills(ctx.thread.personaId);
+  // Only the code interpreter files the server can attribute to this request
+  // reach the container: the files attached to this thread (user uploads, the
+  // agent's code interpreter documents, the skill archives) and the current
+  // skill archives of an agent the caller may use. An OpenAI file id from the
+  // browser alone is not enough.
+  const ciAttachedFiles = ctx.attachedFiles.filter((f) => f.type !== "search-indexed");
+  const attributedCiFiles = selectAttributableCodeInterpreterFileIds({
+    requestedFileIds: payload.codeInterpreterFileIds ?? [],
+    attachedFiles: ciAttachedFiles,
+    extraAllowedIds: agentSkills.map((s) => s.openAiFileId),
+  });
+  if (attributedCiFiles.droppedCount > 0) {
+    logWarn("/api/chat dropped code interpreter files not attached to the thread", {
+      threadId: ctx.thread.id,
+      droppedCount: attributedCiFiles.droppedCount,
+    });
+  }
+  const resolveSkillFiles = () =>
+    ctx.thread.personaId
+      ? resolveSkillCodeInterpreterFiles({
+          skills: agentSkills,
+          attachedFiles: ciAttachedFiles,
+          requestedFileIds: attributedCiFiles.fileIds,
+        })
+      : { fileIds: attributedCiFiles.fileIds, skillsInCodeInterpreter: [] };
+  const skillFiles = resolveSkillFiles();
+  const skillsInCodeInterpreter = effectiveToolsSafe.codeInterpreter
+    ? skillFiles.skillsInCodeInterpreter
+    : [];
+  if (agentSkills.length > 0) {
+    logInfo("/api/chat agent skills", {
+      threadId: ctx.thread.id,
+      skills: agentSkills.map((s) => s.name),
+      skillsInCodeInterpreter,
+    });
+  }
+
   // ── prompt prefix assembly (cache-stability critical) ──────────────────
   // The generative-UI block is process-constant, so it is handed to
   // buildSystemMessage as `trailingStaticBlock` instead of being concatenated
@@ -273,7 +326,8 @@ export async function POST(req: Request) {
   const system =
     buildSystemMessage({
       staticSystemPrompt: CHAT_DEFAULT_SYSTEM_PROMPT,
-      personaMessage: ctx.thread.personaMessage ?? "",
+      personaMessage:
+        (ctx.thread.personaMessage ?? "") + buildSkillCatalogPrompt(agentSkills),
       documentHint: ctx.documentHint,
       trailingStaticBlock:
         // Generative UI: GPT-5.5 reliably declines a UI *tool* under tool_choice
@@ -312,6 +366,8 @@ export async function POST(req: Request) {
     // Browser-local datetime for the get_current_time tool (server UTC fallback).
     clientDateTime: req.headers.get("x-client-datetime") ?? undefined,
     depth: 0,
+    skills: agentSkills,
+    skillsInCodeInterpreter,
   });
 
   // Code-interpreter file IDs the user attached this turn. The chat-store
@@ -322,8 +378,8 @@ export async function POST(req: Request) {
   // mint a fresh container with `container: { fileIds }`. Without this
   // the route used to (and now again does) ignore attached files,
   // surfacing as "I don't have this file" from the model.
-  const requestedCiFileIds = payload.codeInterpreterFileIds ?? [];
-  const requestedCiSignature = getFileIdsSignature(requestedCiFileIds);
+  let requestedCiFileIds = skillFiles.fileIds;
+  let requestedCiSignature = getFileIdsSignature(requestedCiFileIds);
   const persistedCiSignature = ctx.thread.codeInterpreterFileIdsSignature ?? "";
   const ciFilesChanged = requestedCiSignature !== persistedCiSignature;
   if (effectiveToolsSafe.codeInterpreter && ciFilesChanged) {
@@ -365,11 +421,26 @@ export async function POST(req: Request) {
   // so the steady state is still one container per thread and one stable tool
   // definition.
   if (effectiveToolsSafe.codeInterpreter) {
-    const containerId = await ensureCodeInterpreterContainer({
+    let containerId = await ensureCodeInterpreterContainer({
       threadId: ctx.thread.id,
       existingContainerId: ctx.thread.codeInterpreterContainerId,
       fileIds: requestedCiFileIds,
     });
+    // Attach error with skill archives: a cached skill file may be gone.
+    // Re-upload the missing ones and try once more with the new ids.
+    if (
+      !containerId &&
+      skillsInCodeInterpreter.length > 0 &&
+      (await refreshSkillOpenAiFiles(agentSkills))
+    ) {
+      requestedCiFileIds = resolveSkillFiles().fileIds;
+      requestedCiSignature = getFileIdsSignature(requestedCiFileIds);
+      containerId = await ensureCodeInterpreterContainer({
+        threadId: ctx.thread.id,
+        existingContainerId: ctx.thread.codeInterpreterContainerId,
+        fileIds: requestedCiFileIds,
+      });
+    }
     // Nothing to do when the id is unchanged: it is already on the thread and
     // already persisted. Only a new or replaced container needs a write.
     if (containerId && containerId !== ctx.thread.codeInterpreterContainerId) {

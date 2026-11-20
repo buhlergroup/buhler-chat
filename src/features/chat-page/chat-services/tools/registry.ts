@@ -11,6 +11,7 @@ import { getCurrentTimeTool } from "./get-current-time";
 import { extensionTool } from "./extension-tool";
 import { buildExtensionToolKey } from "./tool-key";
 import { mcpExtensionTools } from "./mcp-tool";
+import { loadSkillTool } from "./load-skill";
 import type { ToolContext } from "./tool-context";
 import { compareByCodepoint } from "./stabilize-toolset";
 
@@ -49,6 +50,11 @@ export async function buildToolset(
   // Current time — always available. Lets the model fetch the user's local
   // datetime on demand instead of baking it into the (cache-sensitive) prompt.
   entries.push(["get_current_time", getCurrentTimeTool(ctx)]);
+
+  // Agent skills — only when the agent has skills the user may use.
+  if ((ctx.skills?.length ?? 0) > 0) {
+    entries.push(["load_skill", loadSkillTool(ctx)]);
+  }
 
   // Sub-agent tools are always available (subject to the recursion
   // guard). There is no "fixed assignment" — any persona the user has
