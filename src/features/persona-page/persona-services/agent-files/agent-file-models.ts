@@ -43,16 +43,6 @@ export const AGENT_FILE_USE_TEXT: Record<AgentFileUse, { label: string; help: st
   },
 };
 
-/** Uses that only work with the code interpreter switched on. */
-export const USES_THAT_NEED_CODE_INTERPRETER: ReadonlySet<AgentFileUse> = new Set<AgentFileUse>([
-  "code",
-  "skill",
-  "on-demand",
-]);
-
-export const useNeedsCodeInterpreter = (use: AgentFileUse): boolean =>
-  USES_THAT_NEED_CODE_INTERPRETER.has(use);
-
 /** The row behind an item. The id is the row id of that kind. */
 export const AGENT_FILE_REF_KINDS = ["document", "ci-document", "skill", "file-source"] as const;
 export type AgentFileRefKind = (typeof AGENT_FILE_REF_KINDS)[number];
@@ -89,8 +79,7 @@ export const USE_OF_REF_KIND: Record<AgentFileRefKind, AgentFileUse> = {
  * newest file is not valid (chats use the last good version). missing: the
  * agent lists the item, but its row is gone.
  */
-export const AGENT_FILE_STATUSES = ["ok", "no-access", "unavailable", "sync-error", "missing"] as const;
-export type AgentFileStatus = (typeof AGENT_FILE_STATUSES)[number];
+export type AgentFileStatus = "ok" | "no-access" | "unavailable" | "sync-error" | "missing";
 
 /** One file or folder of an agent, as the editor shows it. */
 export interface AgentFileItem {

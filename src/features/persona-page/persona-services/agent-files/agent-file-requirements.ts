@@ -6,8 +6,8 @@ import { queryFileSourcesByPersonaId } from "../sharepoint-files/sharepoint-file
 
 /**
  * True when the agent has a file whose use needs the code interpreter:
- * a Code file, a skill or an On-demand file or folder (see
- * USES_THAT_NEED_CODE_INTERPRETER). The agent save keeps the code
+ * a Code file, a skill or an On-demand file or folder (the table in
+ * agent-file-models.ts). The agent save keeps the code
  * interpreter default tool on while this is true.
  */
 export async function agentFilesNeedCodeInterpreter(
