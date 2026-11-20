@@ -9,8 +9,12 @@ import { HistoryContainer } from "@/features/common/services/cosmos";
 import { PERSONA_ATTRIBUTE } from "@/features/persona-page/persona-services/models";
 import { EXTENSION_ATTRIBUTE, type ExtensionModel } from "./models";
 
-/** Why a user may use an extension. */
-export type ExtensionGrant = "owner" | "published" | "agent";
+/**
+ * Why a user may use an extension. "legacy" is rule 4 in
+ * decideExtensionAccess: an extension of another user that an agent already
+ * listed before the access rule (temporary, see there).
+ */
+export type ExtensionGrant = "owner" | "published" | "agent" | "legacy";
 
 /** The agent (persona) fields the rule reads. */
 export interface AgentForAccess {
@@ -68,11 +72,17 @@ export async function canOpenAgent(
  *   1. owner:     the user owns E;
  *   2. published: E is published (admin-published, visible to everyone);
  *   3. agent:     the chat runs agent A, the user can open A (canOpenAgent),
- *                 A lists E in its CURRENT extensionIds, and A's owner owns E.
+ *                 A lists E in its CURRENT extensionIds, and A's owner owns E;
+ *   4. legacy:    as 3, but E belongs to another user (not A's owner) and is
+ *                 not published. Agents saved before this rule can list such
+ *                 an extension; they keep it for now. A save cannot add a new
+ *                 one (extensionIdsForAgentSave in extension-runtime.ts), so
+ *                 only attachments that already exist are granted this way.
  *
  * Rule 3 is "access to an agent implies access to its extensions". It runs
  * with the agent's authority, so it only covers extensions the agent's owner
- * owns: an agent cannot grant an extension its owner could not use. It reads
+ * owns: an agent cannot grant an extension its owner could not use (except
+ * the temporary rule 4 for attachments that already exist). It reads
  * the agent's current list, so an extension removed from the agent stops
  * working in old threads too.
  *
@@ -89,13 +99,18 @@ export async function decideExtensionAccess<
   const decision: ExtensionAccessDecision<E> = { granted: [], denied: [] };
 
   let agentOpen: boolean | undefined;
-  const agentGrants = async (extension: E): Promise<boolean> => {
+  const agentGrant = async (extension: E): Promise<"agent" | "legacy" | undefined> => {
     const agent = input.agent;
-    if (!agent) return false;
-    if (!(agent.extensionIds ?? []).includes(extension.id)) return false;
-    if (extension.userId !== agent.userId) return false;
+    if (!agent) return undefined;
+    if (!(agent.extensionIds ?? []).includes(extension.id)) return undefined;
     agentOpen ??= await canOpenAgent(agent, input.userId, input.isGroupMember);
-    return agentOpen;
+    if (!agentOpen) return undefined;
+    if (extension.userId === agent.userId) return "agent";
+    // TODO: remove rule 4 ("legacy") after the existing agents are migrated
+    // (the owners re-attach their own extension, or an admin publishes it).
+    // Until then an extension of another user that an agent already lists
+    // stays usable for everyone who can open the agent, as before the rule.
+    return "legacy";
   };
 
   for (const id of new Set(input.extensionIds)) {
@@ -106,10 +121,10 @@ export async function decideExtensionAccess<
       decision.granted.push({ extension, grant: "owner" });
     } else if (extension.isPublished) {
       decision.granted.push({ extension, grant: "published" });
-    } else if (await agentGrants(extension)) {
-      decision.granted.push({ extension, grant: "agent" });
     } else {
-      decision.denied.push({ id, reason: "no-access" });
+      const grant = await agentGrant(extension);
+      if (grant) decision.granted.push({ extension, grant });
+      else decision.denied.push({ id, reason: "no-access" });
     }
   }
   return decision;

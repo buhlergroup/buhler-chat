@@ -97,7 +97,8 @@ export async function buildMcpConnection(
 /**
  * Resolves the extensions a chat turn (or a sub-agent call) may use, with
  * their secrets. Access is decided ONLY by decideExtensionAccess:
- * owner, published, or granted through the agent the chat runs.
+ * owner, published, or granted through the agent the chat runs (rules 3 and
+ * 4, "legacy"). Each legacy use is logged with the agent and extension id.
  */
 export async function resolveExtensionsForChat(
   input: { extensionIds: readonly string[]; personaId?: string },
@@ -124,6 +125,16 @@ export async function resolveExtensionsForChat(
       personaId: input.personaId,
       denied: decision.denied,
     });
+  }
+
+  for (const { extension, grant } of decision.granted) {
+    if (grant === "legacy") {
+      // TODO: remove with rule 4 in decideExtensionAccess.
+      logInfo("resolveExtensionsForChat: legacy foreign extension on agent", {
+        personaId: input.personaId,
+        extensionId: extension.id,
+      });
+    }
   }
 
   const store = deps.store();
@@ -175,7 +186,8 @@ export async function findUsableExtension(
 /**
  * The extension ids of an agent that `userId` may use in a chat with that
  * agent, in the agent's order: decideExtensionAccess with the agent as the
- * granting agent (owner, published, or rule 3 "the agent's owner owns it").
+ * granting agent (owner, published, rule 3 "the agent's owner owns it", or
+ * rule 4 "legacy": already on the stored agent).
  * CreatePersonaChat stores only these ids on the new thread, so a thread
  * never carries an extension id the chatting user may not use.
  */
@@ -200,4 +212,59 @@ export async function usableExtensionIdsForAgent(
     });
   }
   return decision.granted.map(({ extension }) => extension.id);
+}
+
+/**
+ * The extension ids an agent save stores (CreatePersona, UpsertPersona), in
+ * the requested order.
+ *
+ * - An id that is already on the stored agent is kept as it is, also an
+ *   extension of another user (rule 4 "legacy" in decideExtensionAccess), so
+ *   editing an existing agent does not drop it.
+ * - A NEW id is kept only when the extension exists and passes the strict
+ *   rule for this agent: it is published, or the agent's owner owns it. Any
+ *   other new id is refused (left out and logged by id), so a save cannot
+ *   create a new legacy attachment. A new agent has no stored ids.
+ *
+ * `agentOwnerId` is the agent's owner, not the user who saves: an admin who
+ * edits another user's agent cannot attach the admin's own private extension
+ * (its secrets would then serve everyone who can open the agent).
+ */
+export async function extensionIdsForAgentSave(
+  input: {
+    requestedIds: readonly unknown[] | undefined;
+    storedIds: readonly string[] | undefined;
+    agentOwnerId: string;
+    agentId?: string;
+  },
+  deps: Pick<ResolveExtensionsDeps, "findExtensions"> = defaultDeps
+): Promise<{ kept: string[]; refused: string[] }> {
+  const requested = [
+    ...new Set((Array.isArray(input.requestedIds) ? input.requestedIds : []).filter(
+      (id): id is string => typeof id === "string" && id.length > 0
+    )),
+  ];
+  const stored = new Set(input.storedIds ?? []);
+  const newIds = requested.filter((id) => !stored.has(id));
+
+  const allowedNew = new Set<string>();
+  if (newIds.length > 0) {
+    const extensions = await deps.findExtensions(newIds);
+    for (const extension of extensions) {
+      if (!newIds.includes(extension.id)) continue;
+      if (extension.isPublished || extension.userId === input.agentOwnerId) {
+        allowedNew.add(extension.id);
+      }
+    }
+  }
+
+  const kept = requested.filter((id) => stored.has(id) || allowedNew.has(id));
+  const refused = newIds.filter((id) => !allowedNew.has(id));
+  if (refused.length > 0) {
+    logInfo("extensionIdsForAgentSave: new extension ids refused", {
+      personaId: input.agentId,
+      refused,
+    });
+  }
+  return { kept, refused };
 }

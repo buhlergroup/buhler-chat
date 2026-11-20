@@ -55,7 +55,10 @@ import {
 } from "./skills/persona-skill-store";
 import { deleteFileSourcesForPersona } from "./sharepoint-files/sharepoint-file-store";
 import { getCodeInterpreterFileLimit } from "@/features/chat-page/chat-services/code-interpreter-constants";
-import { usableExtensionIdsForAgent } from "@/features/extensions-page/extension-services/extension-runtime";
+import {
+  extensionIdsForAgentSave,
+  usableExtensionIdsForAgent,
+} from "@/features/extensions-page/extension-services/extension-runtime";
 
 interface PersonaInput {
   name: string;
@@ -132,6 +135,15 @@ export const CreatePersona = async (
       };
     }
 
+    // A new agent has no stored extension ids: only published extensions and
+    // the user's own are stored (extensionIdsForAgentSave).
+    const userId = await userHashedId();
+    const { kept: extensionIds } = await extensionIdsForAgentSave({
+      requestedIds: props.extensionIds,
+      storedIds: [],
+      agentOwnerId: userId,
+    });
+
     const modelToSave: PersonaModel = {
       id: uniqueId(),
       name: props.name,
@@ -142,11 +154,11 @@ export const CreatePersona = async (
       isPublished: props.isPublished,
       trustLevel: props.isPublished ? "community" : undefined,
       publishedAt: props.isPublished ? new Date() : undefined,
-      userId: await userHashedId(),
+      userId,
       creatorName: (await getCurrentUser()).name,
       createdAt: new Date(),
       updatedAt: new Date(),
-      extensionIds: props.extensionIds,
+      extensionIds,
       type: "PERSONA",
       personaDocumentIds: personaDocumentIds.response,
       accessGroup: props.accessGroup,
@@ -297,6 +309,16 @@ export const UpsertPersona = async (
             : ("community" as const)
           : persona.trustLevel;
 
+      // Extension ids already on the stored agent stay (also another user's,
+      // the temporary "legacy" rule); a NEW id must be published or owned by
+      // the agent's owner (extensionIdsForAgentSave).
+      const { kept: extensionIds } = await extensionIdsForAgentSave({
+        requestedIds: personaInput.extensionIds,
+        storedIds: persona.extensionIds,
+        agentOwnerId: persona.userId,
+        agentId: persona.id,
+      });
+
       const modelToUpdate: PersonaModel = {
         ...persona,
         name: personaInput.name,
@@ -316,7 +338,7 @@ export const UpsertPersona = async (
         // ISO string, hence the coercion); track modifications in updatedAt.
         createdAt: new Date(persona.createdAt),
         updatedAt: new Date(),
-        extensionIds: personaInput.extensionIds,
+        extensionIds,
         accessGroup: personaInput.accessGroup,
         personaDocumentIds: personaDocumentIds,
         codeInterpreterDocumentIds: personaInput.codeInterpreterDocumentIds || [],

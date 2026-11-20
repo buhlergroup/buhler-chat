@@ -548,7 +548,49 @@ describe("persona-service.ts", () => {
 
     expect(result.status).toBe("OK");
     const callArg = vi.mocked(createChatThreadWithServerFiles).mock.calls[0][0] as any;
-    expect(callArg.extension).toEqual(["e-agent-owner", "e-third-published"]);
+    // "e-third-private" is already on the stored agent: temporary rule 4
+    // "legacy" (decideExtensionAccess) keeps it for viewers of the agent.
+    expect(callArg.extension).toEqual(["e-agent-owner", "e-third-private", "e-third-published"]);
+  });
+
+  // 014c - agent save: a foreign extension already on the agent stays, a NEW
+  // foreign unpublished one is refused (extensionIdsForAgentSave).
+  it("014c UpsertPersona keeps a stored foreign extension and refuses a new one", async () => {
+    await setSession(defaultSession);
+    const p = seedPersona({ id: "p-ext-save", extensionIds: ["e-foreign-old"] });
+    historyItems.push(
+      { id: "e-foreign-old", type: "EXTENSION", userId: "third-hash", isPublished: false },
+      { id: "e-foreign-new", type: "EXTENSION", userId: "third-hash", isPublished: false },
+      { id: "e-own", type: "EXTENSION", userId: USER_HASH, isPublished: false },
+      { id: "e-published", type: "EXTENSION", userId: "third-hash", isPublished: true },
+    );
+
+    const result = await UpsertPersona(
+      { ...p, extensionIds: ["e-foreign-old", "e-foreign-new", "e-own", "e-published"] },
+      []
+    );
+
+    expect(result.status).toBe("OK");
+    const saved = historyContainer.items.upsert.mock.calls[0][0];
+    expect(saved.extensionIds).toEqual(["e-foreign-old", "e-own", "e-published"]);
+  });
+
+  // 014d - a new agent has no stored ids: nothing is legacy.
+  it("014d CreatePersona refuses a foreign unpublished extension", async () => {
+    await setSession(defaultSession);
+    historyItems.push(
+      { id: "e-foreign", type: "EXTENSION", userId: "third-hash", isPublished: false },
+      { id: "e-own", type: "EXTENSION", userId: USER_HASH, isPublished: false },
+    );
+
+    const result = await CreatePersona(
+      { ...validPersonaInput(), extensionIds: ["e-foreign", "e-own"] },
+      []
+    );
+
+    expect(result.status).toBe("OK");
+    const saved = historyContainer.items.create.mock.calls[0][0];
+    expect(saved.extensionIds).toEqual(["e-own"]);
   });
 
   // 015 – CreatePersonaChat continues after a single CI doc fails to download

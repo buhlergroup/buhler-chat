@@ -635,4 +635,24 @@ describe("GetExtensionCredentialInfo", () => {
     });
     expect(JSON.stringify(result)).not.toMatch(/X-Hidden-Key|kv-row-1|X-Api-Key|client-h-1/);
   });
+
+  // Pinned (temporary rule 4 "legacy"): an extension of another user that
+  // the agent already lists gets the credential notice too.
+  it("covers a legacy extension of another user on an agent the user can open", async () => {
+    // findAgentUnchecked reads the first query result: the agent goes first.
+    historyItems.push({
+      id: "agent-legacy",
+      type: "PERSONA",
+      userId: "agent-owner",
+      isPublished: true,
+      extensionIds: ["legacyext"],
+    });
+    seedExtension({ id: "legacyext", userId: "other-user", isPublished: false });
+
+    const result = await GetExtensionCredentialInfo(["legacyext"], "agent-legacy");
+    expect(result).toEqual({
+      status: "OK",
+      response: [{ id: "legacyext", usesStoredSecrets: true, ownedByYou: false }],
+    });
+  });
 });

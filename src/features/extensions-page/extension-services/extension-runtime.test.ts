@@ -12,7 +12,9 @@ vi.mock("@/features/common/services/logger", () => ({
   logDebug: vi.fn(),
 }));
 
+import { logInfo } from "@/features/common/services/logger";
 import {
+  extensionIdsForAgentSave,
   resolveExtensionsForChat,
   usableExtensionIdsForAgent,
   type ResolveExtensionsDeps,
@@ -136,6 +138,47 @@ describe("resolveExtensionsForChat", () => {
     expect(result).toEqual([]);
   });
 
+  // Pinned (temporary rule 4 "legacy"): an agent saved before the access rule
+  // lists another user's private extension. A viewer who can open the agent
+  // still gets it with its secrets (server side only), and the use is logged
+  // with ids only.
+  it("gives a viewer of the agent a legacy extension of another user and logs it by id", async () => {
+    vi.mocked(logInfo).mockClear();
+    const foreign = mcpExtension({ userId: "third-party" });
+    const result = await resolveExtensionsForChat(
+      { extensionIds: [foreign.id], personaId: "agent-1" },
+      deps({ findExtensions: async () => [foreign] })
+    );
+    expect(result).toHaveLength(1);
+    expect(result[0].extension.id).toBe(foreign.id);
+    expect(result[0].mcp?.headers.Authorization).toBe(`Bearer ${FAKE_SECRET}`);
+    expect(logInfo).toHaveBeenCalledWith(
+      "resolveExtensionsForChat: legacy foreign extension on agent",
+      { personaId: "agent-1", extensionId: foreign.id }
+    );
+    const logged = JSON.stringify(vi.mocked(logInfo).mock.calls);
+    expect(logged).not.toContain(FAKE_SECRET);
+    expect(logged).not.toContain(foreign.name);
+  });
+
+  it("gives no legacy extension to a user who cannot open the agent", async () => {
+    const foreign = mcpExtension({ userId: "third-party" });
+    const result = await resolveExtensionsForChat(
+      { extensionIds: [foreign.id], personaId: "agent-1" },
+      deps({
+        findExtensions: async () => [foreign],
+        findAgent: async () => ({
+          id: "agent-1",
+          userId: "agent-owner",
+          isPublished: false,
+          accessGroup: { id: "g" },
+          extensionIds: [foreign.id],
+        }),
+      })
+    );
+    expect(result).toEqual([]);
+  });
+
   it("does not touch Cosmos or Key Vault for a thread without extensions", async () => {
     const findExtensions = vi.fn();
     const result = await resolveExtensionsForChat({ extensionIds: [] }, deps({ findExtensions }));
@@ -189,15 +232,16 @@ describe("usableExtensionIdsForAgent (CreatePersonaChat)", () => {
     ext("third-published", "someone-else", true),
   ];
 
-  it("keeps only the agent's extensions the chatting user may use, in the agent's order", async () => {
+  it("keeps the agent's extensions the chatting user may use, in the agent's order (legacy included)", async () => {
     const ids = await usableExtensionIdsForAgent(agent, "chat-user", {
       findExtensions,
       isGroupMember: async () => false,
     });
-    expect(ids).toEqual(["own-by-owner", "third-published"]);
+    // "third-private" is on the stored agent: rule 4 "legacy".
+    expect(ids).toEqual(["own-by-owner", "third-private", "third-published"]);
   });
 
-  it("drops the agent-granted ones when the user cannot open the agent", async () => {
+  it("drops the agent-granted and legacy ones when the user cannot open the agent", async () => {
     const ids = await usableExtensionIdsForAgent(
       { ...agent, accessGroup: { id: "g" } },
       "chat-user",
@@ -215,5 +259,83 @@ describe("usableExtensionIdsForAgent (CreatePersonaChat)", () => {
       })
     ).toEqual([]);
     expect(find).not.toHaveBeenCalled();
+  });
+});
+
+describe("extensionIdsForAgentSave (CreatePersona, UpsertPersona)", () => {
+  const ext = (id: string, userId: string, isPublished = false): ExtensionModel => ({
+    ...mcpExtension({ userId, isPublished }),
+    id,
+  });
+  const findExtensions = vi.fn(async (ids: readonly string[]) =>
+    [
+      ext("own", "agent-owner"),
+      ext("published", "someone-else", true),
+      ext("foreign-old", "someone-else"),
+      ext("foreign-new", "someone-else"),
+      ext("admin-own", "admin-user"),
+    ].filter((e) => ids.includes(e.id))
+  );
+
+  it("keeps a foreign extension that is already on the stored agent", async () => {
+    const { kept, refused } = await extensionIdsForAgentSave(
+      {
+        requestedIds: ["foreign-old", "own"],
+        storedIds: ["foreign-old"],
+        agentOwnerId: "agent-owner",
+        agentId: "agent-1",
+      },
+      { findExtensions }
+    );
+    expect(kept).toEqual(["foreign-old", "own"]);
+    expect(refused).toEqual([]);
+  });
+
+  it("refuses a NEW unpublished extension of another user", async () => {
+    const { kept, refused } = await extensionIdsForAgentSave(
+      {
+        requestedIds: ["own", "foreign-new", "published"],
+        storedIds: ["own"],
+        agentOwnerId: "agent-owner",
+        agentId: "agent-1",
+      },
+      { findExtensions }
+    );
+    expect(kept).toEqual(["own", "published"]);
+    expect(refused).toEqual(["foreign-new"]);
+  });
+
+  it("treats nothing as legacy for a new agent and refuses unknown ids", async () => {
+    const { kept, refused } = await extensionIdsForAgentSave(
+      {
+        requestedIds: ["foreign-old", "own", "deleted", "own"],
+        storedIds: [],
+        agentOwnerId: "agent-owner",
+      },
+      { findExtensions }
+    );
+    expect(kept).toEqual(["own"]);
+    expect(refused).toEqual(["foreign-old", "deleted"]);
+  });
+
+  it("checks new ids against the agent owner, not an admin who saves", async () => {
+    // An admin's own private extension would become a legacy attachment that
+    // serves the admin's secrets to every viewer of the agent.
+    const { kept, refused } = await extensionIdsForAgentSave(
+      { requestedIds: ["admin-own"], storedIds: [], agentOwnerId: "agent-owner", agentId: "agent-1" },
+      { findExtensions }
+    );
+    expect(kept).toEqual([]);
+    expect(refused).toEqual(["admin-own"]);
+  });
+
+  it("does not query Cosmos when no id is new", async () => {
+    findExtensions.mockClear();
+    const { kept } = await extensionIdsForAgentSave(
+      { requestedIds: ["foreign-old"], storedIds: ["foreign-old", "own"], agentOwnerId: "agent-owner" },
+      { findExtensions }
+    );
+    expect(kept).toEqual(["foreign-old"]);
+    expect(findExtensions).not.toHaveBeenCalled();
   });
 });

@@ -130,12 +130,42 @@ describe("decideExtensionAccess (the extension access rule)", () => {
     expect(d.denied).toEqual([{ id: "gone", reason: "not-found" }]);
   });
 
-  it("does not let an agent grant an extension its owner does not own", async () => {
-    // The agent owner attached someone else's private extension by id.
+  // Pinned (temporary rule 4): agents saved before the access rule can list
+  // another user's private extension. Everyone who can open the agent keeps
+  // using it, marked "legacy"; a save cannot add a new one
+  // (extensionIdsForAgentSave).
+  it("grants an extension of another user that the agent already lists as legacy", async () => {
     const d = await decideExtensionAccess({
       extensionIds: ["foreign"],
       extensions: [ext("foreign", "third-party")],
       agent: agent({ isPublished: true, extensionIds: ["foreign"] }),
+      userId: USER,
+      isGroupMember: notMember,
+    });
+    expect(d.granted.map((g) => [g.extension.id, g.grant])).toEqual([["foreign", "legacy"]]);
+    expect(d.denied).toEqual([]);
+  });
+
+  it("gives no legacy extension to a user who cannot open the agent", async () => {
+    const d = await decideExtensionAccess({
+      extensionIds: ["foreign", "mcp-1"],
+      extensions: [ext("foreign", "third-party"), ext("mcp-1", OWNER)],
+      agent: agent({ accessGroup: { id: "group-1" }, extensionIds: ["foreign", "mcp-1"] }),
+      userId: USER,
+      isGroupMember: notMember,
+    });
+    expect(d.granted).toEqual([]);
+    expect(d.denied).toEqual([
+      { id: "foreign", reason: "no-access" },
+      { id: "mcp-1", reason: "no-access" },
+    ]);
+  });
+
+  it("gives no legacy grant for an extension the agent does not list", async () => {
+    const d = await decideExtensionAccess({
+      extensionIds: ["foreign"],
+      extensions: [ext("foreign", "third-party")],
+      agent: agent({ isPublished: true, extensionIds: ["mcp-1"] }),
       userId: USER,
       isGroupMember: notMember,
     });
