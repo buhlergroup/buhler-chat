@@ -149,7 +149,7 @@ describe("PersonaFiles", () => {
   });
 
   it("removes an item from its menu", async () => {
-    actions.RemoveAgentFile.mockResolvedValue({ status: "OK", response: true });
+    actions.RemoveAgentFile.mockResolvedValue({ status: "OK", response: {} });
     render(<PersonaFiles personaId="p1" />);
     await userEvent.click(await screen.findByTestId("persona-file-use"));
     await userEvent.click(await screen.findByText("Remove"));
@@ -246,5 +246,44 @@ describe("PersonaFiles", () => {
       "SharePoint did not answer. Try again in a moment.",
       "Ask the owner of this item in SharePoint for access.",
     ]);
+  });
+  it("shows the error and 'Try again' when the files cannot be loaded, and loads again", async () => {
+    actions.ListAgentFiles.mockResolvedValueOnce({
+      status: "ERROR",
+      errors: [{ message: "The files could not be loaded." }],
+    });
+    render(<PersonaFiles personaId="p1" />);
+    const alert = await screen.findByTestId("persona-files-load-error");
+    expect(alert).toHaveTextContent("The files could not be loaded.");
+    expect(screen.queryByText("Loading files...")).not.toBeInTheDocument();
+    await userEvent.click(within(alert).getByRole("button", { name: "Try again" }));
+    expect(await screen.findByRole("link", { name: "Handbook.pdf" })).toBeInTheDocument();
+    expect(screen.queryByTestId("persona-files-load-error")).not.toBeInTheDocument();
+    expect(actions.ListAgentFiles).toHaveBeenCalledTimes(2);
+  });
+
+  it("shows the error and 'Try again' when the list call throws", async () => {
+    actions.ListAgentFiles.mockRejectedValueOnce(new Error("network"));
+    render(<PersonaFiles personaId="p1" />);
+    const alert = await screen.findByTestId("persona-files-load-error");
+    expect(alert).toHaveTextContent("The files could not be loaded.");
+    expect(within(alert).getByRole("button", { name: "Try again" })).toBeInTheDocument();
+  });
+
+  it("shows the server's warning when a removed file's stored copy stays", async () => {
+    const { toast } = await import("@/features/ui/use-toast");
+    vi.mocked(toast).mockClear();
+    actions.RemoveAgentFile.mockResolvedValue({
+      status: "OK",
+      response: { warning: "The file is removed from the agent and is no longer used. Its stored copy could not be deleted." },
+    });
+    render(<PersonaFiles personaId="p1" />);
+    await userEvent.click(await screen.findByTestId("persona-file-use"));
+    await userEvent.click(await screen.findByText("Remove"));
+    await waitFor(() =>
+      expect(toast).toHaveBeenCalledWith(
+        expect.objectContaining({ description: expect.stringMatching(/stored copy could not be deleted/) }),
+      ),
+    );
   });
 });

@@ -348,7 +348,10 @@ export async function POST(req: Request) {
       personaMessage:
         (ctx.thread.personaMessage ?? "") +
         buildSkillCatalogPrompt(agentSkills, unavailableSkills) +
-        buildUnavailableAgentFilesPrompt(ctx.thread.unavailableAgentFiles),
+        buildUnavailableAgentFilesPrompt(
+          ctx.thread.unavailableAgentFiles,
+          ctx.thread.notFoundAgentFileCount,
+        ),
       documentHint: ctx.documentHint,
       trailingStaticBlock:
         // Generative UI: GPT-5.5 reliably declines a UI *tool* under tool_choice

@@ -26,10 +26,8 @@ import {
   SharePointFile,
 } from "./models";
 import { DeletePersonaDocumentsByPersonaId } from "./persona-documents-service";
-import { 
-  PersonaCIDocumentsByIds, 
-  DownloadSharePointFile 
-} from "./persona-ci-documents-service";
+import { PersonaCIDocumentsByIds } from "./persona-ci-documents-service";
+import { downloadCodeInterpreterFile } from "./persona-ci-documents-store";
 import { UploadFileForCodeInterpreter } from "@/features/chat-page/chat-services/code-interpreter-service";
 import { UserAccessGroups } from "./access-group-service";
 import {
@@ -470,7 +468,10 @@ export const CreatePersonaChat = async (
     // Names of the documents that could not be loaded; the model is told
     // about them (thread.unavailableAgentFiles), the user may lack access.
     const notLoadedFileNames: string[] = [];
-    const ciDocumentIds = persona.codeInterpreterDocumentIds || [];
+    // Listed ids whose row the user cannot get (deleted, or not readable by
+    // the access rule): no name to tell, only the number.
+    let notFoundFileCount = 0;
+    const ciDocumentIds = [...new Set(persona.codeInterpreterDocumentIds || [])];
     
     if (ciDocumentIds.length > 0) {
       logInfo("Loading Code Interpreter documents for persona chat", {
@@ -479,14 +480,24 @@ export const CreatePersonaChat = async (
       });
 
       const ciDocsResponse = await PersonaCIDocumentsByIds(ciDocumentIds);
-      
+      notFoundFileCount =
+        ciDocsResponse.status === "OK"
+          ? ciDocumentIds.length - new Set(ciDocsResponse.response.map((d) => d.id)).size
+          : ciDocumentIds.length;
+      if (notFoundFileCount > 0) {
+        logWarn("Agent code interpreter files not found", {
+          personaId,
+          notFound: notFoundFileCount,
+        });
+      }
+
       if (ciDocsResponse.status === "OK" && ciDocsResponse.response.length > 0) {
         const ciDocs = ciDocsResponse.response;
         
         for (const doc of ciDocs) {
           try {
             // Download file from SharePoint
-            const downloadResult = await DownloadSharePointFile(
+            const downloadResult = await downloadCodeInterpreterFile(
               doc.externalFile.parentReference.driveId,
               doc.externalFile.documentId
             );
@@ -595,6 +606,7 @@ export const CreatePersonaChat = async (
       subAgentIds: persona.subAgentIds || [],
       defaultTools: persona.defaultTools,
       ...(unavailableAgentFiles.length > 0 ? { unavailableAgentFiles } : {}),
+      ...(notFoundFileCount > 0 ? { notFoundAgentFileCount: notFoundFileCount } : {}),
     }).catch((error) => {
       logError("Failed to create the agent chat", {
         personaId,

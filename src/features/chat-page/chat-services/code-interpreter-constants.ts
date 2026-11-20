@@ -11,12 +11,23 @@ export function getCodeInterpreterFileLimit(value: string | undefined): number {
 /** Largest code interpreter file of an agent, in bytes (512 MB). */
 export const DEFAULT_CODE_INTERPRETER_MAX_FILE_BYTES = 536870912;
 
-/** Size limit per code interpreter file; the editor uses the same value. */
-export function getCodeInterpreterMaxFileBytes(value: string | undefined): number {
-  const parsed = Number(value);
-  return Number.isFinite(parsed) && parsed > 0
-    ? parsed
-    : DEFAULT_CODE_INTERPRETER_MAX_FILE_BYTES;
+/**
+ * Size limit per code interpreter file of an agent, in bytes. The one reader
+ * for the agent editor (Code files) and the chat start (preload): the first
+ * valid value of MAX_PERSONA_CI_DOCUMENT_SIZE, then
+ * NEXT_PUBLIC_MAX_PERSONA_CI_DOCUMENT_SIZE, else 512 MB.
+ */
+export function readCodeInterpreterMaxFileBytes(
+  env: Record<string, string | undefined> = process.env
+): number {
+  for (const value of [
+    env.MAX_PERSONA_CI_DOCUMENT_SIZE,
+    env.NEXT_PUBLIC_MAX_PERSONA_CI_DOCUMENT_SIZE,
+  ]) {
+    const parsed = Number(value);
+    if (value?.trim() && Number.isInteger(parsed) && parsed > 0) return parsed;
+  }
+  return DEFAULT_CODE_INTERPRETER_MAX_FILE_BYTES;
 }
 
 export const CODE_INTERPRETER_SUPPORTED_EXTENSIONS = [

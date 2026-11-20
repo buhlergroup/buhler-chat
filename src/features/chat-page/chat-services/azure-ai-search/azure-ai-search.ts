@@ -302,15 +302,23 @@ export const ExtensionSimilaritySearch = async (props: {
   }
 };
 
+/**
+ * Indexes text chunks. `user` of each chunk is the current user, or
+ * `ownerUserId` when given: the chunks of an agent's Search file carry the
+ * agent owner's id, like the file's row (DeleteSearchDocumentByPersonaDocumentId
+ * finds them by it).
+ */
 export const IndexDocuments = async (
   docs: string[],
   fileName?: string,
   chatThreadId?: string,
-  personaDocumentId?: string
+  personaDocumentId?: string,
+  ownerUserId?: string
 ): Promise<Array<ServerActionResponse<boolean>>> => {
   const response: ServerActionResponse<boolean>[] = [];
 
   try {
+    const user = ownerUserId ?? (await userHashedId());
     logDebug("IndexDocuments starting", {
       docCount: docs.length,
       fileName,
@@ -324,7 +332,7 @@ export const IndexDocuments = async (
       const docToAdd: AzureSearchDocumentIndex = {
         id: uniqueId(),
         chatThreadId: chatThreadId || null,
-        user: await userHashedId(),
+        user,
         pageContent: doc,
         metadata: fileName || null,
         embedding: [],
@@ -462,50 +470,62 @@ export const DeleteDocumentsOfChatThread = async (
   }
 };
 
+// Largest page of one search request (Azure AI Search allows up to 1000),
+// and the largest `skip` it accepts.
+const DELETE_PAGE_SIZE = 1000;
+const MAX_SEARCH_SKIP = 100_000;
+
+/**
+ * Deletes every index chunk of a persona document whose `user` is
+ * `ownerUserId` (default: the current user). The chunks are read page by
+ * page first (a search returns 50 by default), then deleted. No chunk left
+ * is OK: nothing was to delete.
+ */
 export const DeleteSearchDocumentByPersonaDocumentId = async (
-  personaDocumentId: string
+  personaDocumentId: string,
+  ownerUserId?: string
 ): Promise<ServerActionResponse<boolean>> => {
   try {
-    // Find the document using personaDocumentId
-    const documentResponse = await SimpleSearch(
-      undefined,
-      `${odataEq("personaDocumentId", personaDocumentId)} and ${odataEq("user", await userHashedId())}`
-    );
+    const filter = `${odataEq("personaDocumentId", personaDocumentId)} and ${odataEq(
+      "user",
+      ownerUserId ?? (await userHashedId())
+    )}`;
+    const instance = AzureAISearchInstance<AzureSearchDocumentIndex>();
 
-    if (
-      documentResponse.status === "OK" &&
-      documentResponse.response.length > 0
-    ) {
-      const documents = documentResponse.response.map((r) => r.document);
-      const instance = AzureAISearchInstance();
-
-      const deletedResponse = await instance.deleteDocuments(documents);
-
-      if (deletedResponse.results.every((r) => r.succeeded)) {
-        return {
-          status: "OK",
-          response: true,
-        };
-      } else {
-        return {
-          status: "ERROR",
-          errors: deletedResponse.results
-            .filter((r) => !r.succeeded)
-            .map((r) => ({
-              message: r.errorMessage || "Unknown error",
-            })),
-        };
+    const ids: string[] = [];
+    for (let skip = 0; skip <= MAX_SEARCH_SKIP; skip += DELETE_PAGE_SIZE) {
+      const page = await instance.search(undefined, {
+        filter,
+        top: DELETE_PAGE_SIZE,
+        skip,
+        select: ["id"],
+      });
+      let count = 0;
+      for await (const result of page.results) {
+        ids.push(result.document.id);
+        count++;
       }
-    } else {
-      return {
-        status: "ERROR",
-        errors: [
-          {
-            message: `No document found with personaDocumentId: ${personaDocumentId}`,
-          },
-        ],
-      };
+      if (count < DELETE_PAGE_SIZE) break;
     }
+
+    if (ids.length === 0) {
+      return { status: "OK", response: true };
+    }
+
+    const failed: { message: string }[] = [];
+    for (let start = 0; start < ids.length; start += DELETE_PAGE_SIZE) {
+      const deletedResponse = await instance.deleteDocuments(
+        "id",
+        ids.slice(start, start + DELETE_PAGE_SIZE)
+      );
+      for (const r of deletedResponse.results) {
+        if (!r.succeeded) failed.push({ message: r.errorMessage || "Unknown error" });
+      }
+    }
+
+    return failed.length === 0
+      ? { status: "OK", response: true }
+      : { status: "ERROR", errors: failed };
   } catch (e) {
     return {
       status: "ERROR",

@@ -14,6 +14,10 @@ import "server-only";
  * (personaDocumentIds, codeInterpreterDocumentIds). Only this module changes
  * these lists, always with an etag-checked replace, so a concurrent agent
  * save (UpsertPersona, which keeps the stored lists) cannot drop an id.
+ *
+ * Every row is written in the agent OWNER's partition, also when an admin
+ * adds the file: chats find a Search or Code row only there
+ * (FindAccessiblePersonaDocument). A row is deleted in its own partition.
  */
 
 import { SqlQuerySpec } from "@azure/cosmos";
@@ -27,8 +31,12 @@ import {
   type DriveItemInfo,
 } from "@/features/common/services/sharepoint/graph-drive";
 import { isGraphDriveId, isGraphItemId, isHttpsUrl } from "@/features/common/services/sharepoint/graph-ids";
-import { getCodeInterpreterFileLimit } from "@/features/chat-page/chat-services/code-interpreter-constants";
 import {
+  getCodeInterpreterFileLimit,
+  readCodeInterpreterMaxFileBytes,
+} from "@/features/chat-page/chat-services/code-interpreter-constants";
+import {
+  PERSONA_ATTRIBUTE,
   PERSONA_CI_DOCUMENT_ATTRIBUTE,
   PERSONA_DOCUMENT_ATTRIBUTE,
   type DocumentMetadata,
@@ -36,14 +44,12 @@ import {
   type PersonaDocument,
   type PersonaModel,
 } from "../models";
-import { UpdateOrAddPersonaDocuments } from "../persona-documents-service";
-import {
-  DeletePersonaCIDocumentById,
-  UpdateOrAddPersonaCIDocuments,
-} from "../persona-ci-documents-service";
+import { addSearchDocument, deleteSearchDocument } from "../persona-documents-store";
+import { addCodeDocument, deleteCodeDocument } from "../persona-ci-documents-store";
+import { updatePersonaRow, withCodeInterpreterOn } from "../persona-row";
 import { querySkillsByPersonaId, readPersonaRow, type SkillAccess } from "../skills/persona-skill-store";
 import { SKILL_LIMITS, type PersonaSkillModel } from "../skills/skill-models";
-import { fetchLinkedSkillZip } from "../skills/linked-skill-sync";
+import { fetchLinkedSkillZip, type LinkedZipResult } from "../skills/linked-skill-sync";
 import { linkSharePointSkill } from "../skills/link-sharepoint-skill";
 import { DeletePersonaSkill } from "../skills/persona-skill-service";
 import { queryFileSourcesByPersonaId } from "../sharepoint-files/sharepoint-file-store";
@@ -60,8 +66,11 @@ import {
 import {
   AGENT_FILE_STATUS_TEXT,
   AGENT_FILE_USE_TEXT,
+  REMOVED_NOT_CLEANED_WARNING,
   USE_OF_REF_KIND,
   type AddAgentFileResult,
+  type ChangeAgentFileUseResult,
+  type RemoveAgentFileResult,
   type AgentFileItem,
   type AgentFilePick,
   type AgentFileRef,
@@ -95,53 +104,15 @@ export function readAgentFileLimits(env: Record<string, string | undefined> = pr
     maxSkills: SKILL_LIMITS.maxSkillsPerAgent,
     maxOnDemand: sharePoint.maxSources,
     searchMaxBytes: positiveInt(env.MAX_PERSONA_DOCUMENT_SIZE, 10_485_760),
-    codeMaxBytes: positiveInt(
-      env.MAX_PERSONA_CI_DOCUMENT_SIZE ?? env.NEXT_PUBLIC_MAX_PERSONA_CI_DOCUMENT_SIZE,
-      536_870_912,
-    ),
+    // The same reader as the download at chat start.
+    codeMaxBytes: readCodeInterpreterMaxFileBytes(env),
     onDemandMaxBytes: sharePoint.maxFileBytes,
   };
 }
 
 // ---------------------------------------------------------------------------
-// Persona row: etag-checked change of the file lists
+// Persona row: the file lists (etag-checked write in persona-row.ts)
 // ---------------------------------------------------------------------------
-
-type StoredPersona = PersonaModel & { _etag?: string };
-
-const isPreconditionFailed = (error: unknown) =>
-  ((error as { code?: number })?.code ?? (error as { statusCode?: number })?.statusCode) === 412;
-
-/**
- * Reads the persona row, applies `mutate` and writes it back only when the
- * row did not change meanwhile (If-Match etag); on a conflict it reads the
- * row again and retries. `mutate` returns null for "nothing to change".
- * Returns the stored row, or undefined when the agent is gone.
- */
-export async function updatePersonaRow(
-  personaId: string,
-  mutate: (persona: PersonaModel) => PersonaModel | null,
-): Promise<PersonaModel | undefined> {
-  for (let attempt = 0; attempt < 5; attempt++) {
-    const current = (await readPersonaRow(personaId)) as StoredPersona | undefined;
-    if (!current) return undefined;
-    const next = mutate(current);
-    if (!next) return current;
-    try {
-      const { resource } = await HistoryContainer()
-        .item(current.id, current.userId)
-        .replace<PersonaModel>(
-          next,
-          current._etag ? { accessCondition: { type: "IfMatch", condition: current._etag } } : undefined,
-        );
-      return resource ?? next;
-    } catch (error) {
-      if (isPreconditionFailed(error)) continue;
-      throw error;
-    }
-  }
-  throw new Error("The agent changed while saving. Try again.");
-}
 
 type IdList = "personaDocumentIds" | "codeInterpreterDocumentIds";
 
@@ -153,11 +124,6 @@ const withId = (field: IdList, id: string, codeInterpreterOn = false) => (p: Per
 
 const withoutId = (field: IdList, id: string) => (p: PersonaModel) =>
   (p[field] ?? []).includes(id) ? { ...p, [field]: (p[field] ?? []).filter((x) => x !== id) } : null;
-
-const withCodeInterpreterOn = (p: PersonaModel) =>
-  p.defaultTools?.codeInterpreter === true
-    ? null
-    : { ...p, defaultTools: { ...(p.defaultTools ?? {}), codeInterpreter: true } };
 
 // ---------------------------------------------------------------------------
 // Rows of an agent
@@ -432,6 +398,7 @@ const missingItem = (ref: AgentFileRef): AgentFileItem => ({
   allowedUses: [USE_OF_REF_KIND[ref.kind]],
 });
 
+
 // ---------------------------------------------------------------------------
 // Mechanisms: add one SharePoint item with one use
 // ---------------------------------------------------------------------------
@@ -443,6 +410,17 @@ interface ResolvedItem {
   itemId: string;
   info: DriveItemInfo;
 }
+
+/** The agent an item is added to: its id and its owner's partition. */
+interface Target {
+  personaId: string;
+  ownerUserId: string;
+}
+
+const targetOf = (access: SkillAccess): Target => ({
+  personaId: access.persona.id,
+  ownerUserId: access.persona.userId,
+});
 
 const errorsText = (errors: { message: string }[]) =>
   errors.map((e) => e.message).join(" ") || "The file could not be added.";
@@ -471,22 +449,25 @@ async function runMechanism<T>(fn: () => Promise<ServerActionResponse<T>>): Prom
 }
 
 /** Rolls back a mechanism add when the persona row could not follow. */
-async function undoAdd(personaId: string, ref: AgentFileRef): Promise<void> {
+async function undoAdd(target: Target, ref: AgentFileRef): Promise<void> {
+  const { personaId, ownerUserId } = target;
   try {
+    let res: ServerActionResponse<unknown>;
     switch (ref.kind) {
       case "document":
-        await UpdateOrAddPersonaDocuments([], [ref.id]);
+        res = await deleteSearchDocument({ id: ref.id, userId: ownerUserId });
         break;
       case "ci-document":
-        await DeletePersonaCIDocumentById(ref.id);
+        res = await deleteCodeDocument({ id: ref.id, userId: ownerUserId });
         break;
       case "skill":
-        await DeletePersonaSkill(personaId, ref.id);
+        res = await DeletePersonaSkill(personaId, ref.id);
         break;
       case "file-source":
-        await DeletePersonaFileSource(personaId, ref.id);
+        res = await DeletePersonaFileSource(personaId, ref.id);
         break;
     }
+    if (res.status !== "OK") throw new Error(errorsText(res.errors));
   } catch (error) {
     logWarn("agent files: rollback failed", {
       personaId,
@@ -497,11 +478,11 @@ async function undoAdd(personaId: string, ref: AgentFileRef): Promise<void> {
 }
 
 /** Search: index the text (PERSONA_DOCUMENT) and list the row on the persona. */
-async function addAsSearch(personaId: string, item: ResolvedItem, limits: AgentFileLimits): Promise<AddOutcome> {
-  const persona = await readPersonaRow(personaId);
+async function addAsSearch(target: Target, item: ResolvedItem, limits: AgentFileLimits): Promise<AddOutcome> {
+  const persona = await readPersonaRow(target.personaId);
   if (!persona) return { ok: false, message: "Agent not found." };
   if ((persona.personaDocumentIds?.length ?? 0) >= limits.maxSearchFiles) {
-    return { ok: false, message: `An agent can have up to ${limits.maxSearchFiles} Search files.` };
+    return { ok: false, message: limitText("search", limits.maxSearchFiles) };
   }
   if (item.info.size > limits.searchMaxBytes) {
     return {
@@ -511,25 +492,23 @@ async function addAsSearch(personaId: string, item: ResolvedItem, limits: AgentF
   }
   // When the indexing fails, the item is rejected and the persona row is not
   // touched: its stored ids stay as they were.
-  const res = await runMechanism(() => UpdateOrAddPersonaDocuments([asMetadata(item)], []));
-  if (res.status !== "OK" || !res.response[0]) {
+  const res = await runMechanism(() => addSearchDocument(asMetadata(item), target.ownerUserId));
+  if (res.status !== "OK") {
     return {
       ok: false,
-      message: `The file could not be indexed for Search, so it was not added. ${
-        res.status === "OK" ? "Try again." : errorsText(res.errors)
-      }`,
+      message: `The file could not be indexed for Search, so it was not added. ${errorsText(res.errors)}`,
     };
   }
-  const ref: AgentFileRef = { kind: "document", id: res.response[0] };
-  return attachToPersona(personaId, ref, withId("personaDocumentIds", ref.id));
+  const ref: AgentFileRef = { kind: "document", id: res.response };
+  return attachToPersona(target, ref, withId("personaDocumentIds", ref.id));
 }
 
 /** Code: a PERSONA_CI_DOCUMENT row, listed on the persona; code interpreter on. */
-async function addAsCode(personaId: string, item: ResolvedItem, limits: AgentFileLimits): Promise<AddOutcome> {
-  const persona = await readPersonaRow(personaId);
+async function addAsCode(target: Target, item: ResolvedItem, limits: AgentFileLimits): Promise<AddOutcome> {
+  const persona = await readPersonaRow(target.personaId);
   if (!persona) return { ok: false, message: "Agent not found." };
   if ((persona.codeInterpreterDocumentIds?.length ?? 0) >= limits.maxCodeFiles) {
-    return { ok: false, message: `An agent can have up to ${limits.maxCodeFiles} Code files.` };
+    return { ok: false, message: limitText("code", limits.maxCodeFiles) };
   }
   if (item.info.size > limits.codeMaxBytes) {
     return {
@@ -537,41 +516,52 @@ async function addAsCode(personaId: string, item: ResolvedItem, limits: AgentFil
       message: `The file is larger than ${Math.round(limits.codeMaxBytes / 1_048_576)} MB, the limit for Code files.`,
     };
   }
-  const res = await runMechanism(() => UpdateOrAddPersonaCIDocuments([asMetadata(item)], []));
-  if (res.status !== "OK" || !res.response[0]) {
-    return {
-      ok: false,
-      message: `The file could not be added as a Code file. ${
-        res.status === "OK" ? "Try again." : errorsText(res.errors)
-      }`,
-    };
+  const res = await runMechanism(() => addCodeDocument(asMetadata(item), target.ownerUserId));
+  if (res.status !== "OK") {
+    return { ok: false, message: `The file could not be added as a Code file. ${errorsText(res.errors)}` };
   }
-  const ref: AgentFileRef = { kind: "ci-document", id: res.response[0] };
-  return attachToPersona(personaId, ref, withId("codeInterpreterDocumentIds", ref.id, true));
+  const ref: AgentFileRef = { kind: "ci-document", id: res.response };
+  return attachToPersona(target, ref, withId("codeInterpreterDocumentIds", ref.id, true));
 }
 
-/** Skill: a skill linked to the zip; code interpreter on. */
-async function addAsSkill(personaId: string, item: ResolvedItem): Promise<AddOutcome> {
-  const { token } = await getCurrentUser();
-  const fetched = await fetchLinkedSkillZip(token, item.driveId, item.itemId);
-  if (!fetched.ok) {
-    return {
-      ok: false,
-      message: fetched.reason === "invalid" ? `The zip is not a skill: ${fetched.message}` : fetched.message,
-    };
+type SkillZip = Extract<LinkedZipResult, { ok: true }>;
+
+/** Skill: a skill linked to the zip (fetched here unless given); code interpreter on. */
+async function addAsSkill(
+  target: Target,
+  item: ResolvedItem,
+  prefetched?: SkillZip,
+): Promise<AddOutcome> {
+  let fetched = prefetched;
+  if (!fetched) {
+    const { token } = await getCurrentUser();
+    const res = await fetchLinkedSkillZip(token, item.driveId, item.itemId);
+    if (!res.ok) {
+      return {
+        ok: false,
+        message: res.reason === "invalid" ? `The zip is not a skill: ${res.message}` : res.message,
+      };
+    }
+    fetched = res;
   }
-  const res = await linkSharePointSkill({ personaId, driveId: item.driveId, itemId: item.itemId }, fetched);
+  const res = await linkSharePointSkill(
+    { personaId: target.personaId, driveId: item.driveId, itemId: item.itemId },
+    fetched,
+  );
   if (res.status !== "OK") return { ok: false, message: errorsText(res.errors) };
   const ref: AgentFileRef = { kind: "skill", id: res.response.id };
-  return attachToPersona(personaId, ref, withCodeInterpreterOn);
+  return attachToPersona(target, ref, withCodeInterpreterOn);
 }
 
 /** On demand: a SharePoint source row; code interpreter on. */
-async function addAsOnDemand(personaId: string, item: ResolvedItem): Promise<AddOutcome> {
-  const res = await addPersonaFileSource({ personaId, driveId: item.driveId, itemId: item.itemId }, item.info);
+async function addAsOnDemand(target: Target, item: ResolvedItem): Promise<AddOutcome> {
+  const res = await addPersonaFileSource(
+    { personaId: target.personaId, driveId: item.driveId, itemId: item.itemId },
+    item.info,
+  );
   if (res.status !== "OK") return { ok: false, message: errorsText(res.errors) };
   const ref: AgentFileRef = { kind: "file-source", id: res.response.id };
-  return attachToPersona(personaId, ref, withCodeInterpreterOn);
+  return attachToPersona(target, ref, withCodeInterpreterOn);
 }
 
 /**
@@ -579,46 +569,117 @@ async function addAsOnDemand(personaId: string, item: ResolvedItem): Promise<Add
  * that fails, the mechanism add is undone, so the item is not half added.
  */
 async function attachToPersona(
-  personaId: string,
+  target: Target,
   ref: AgentFileRef,
   mutate: (p: PersonaModel) => PersonaModel | null,
 ): Promise<AddOutcome> {
   try {
-    const stored = await updatePersonaRow(personaId, mutate);
+    const stored = await updatePersonaRow(target.personaId, mutate);
     if (!stored) throw new Error("Agent not found.");
     return { ok: true, ref };
   } catch (error) {
     logError("agent files: persona update failed, add undone", {
-      personaId,
+      personaId: target.personaId,
       kind: ref.kind,
       error: error instanceof Error ? error.message : String(error),
     });
-    await undoAdd(personaId, ref);
+    await undoAdd(target, ref);
     return { ok: false, message: "The agent could not be saved. Try again." };
   }
 }
 
 async function addWithUse(
-  personaId: string,
+  target: Target,
   item: ResolvedItem,
   use: AgentFileUse,
   limits: AgentFileLimits,
 ): Promise<AddOutcome> {
   switch (use) {
     case "search":
-      return addAsSearch(personaId, item, limits);
+      return addAsSearch(target, item, limits);
     case "code":
-      return addAsCode(personaId, item, limits);
+      return addAsCode(target, item, limits);
     case "skill":
-      return addAsSkill(personaId, item);
+      return addAsSkill(target, item);
     case "on-demand":
-      return addAsOnDemand(personaId, item);
+      return addAsOnDemand(target, item);
   }
+}
+
+// ---------------------------------------------------------------------------
+// Limits per use (also while several items are added at the same time)
+// ---------------------------------------------------------------------------
+
+type UseCounts = Record<AgentFileUse, number>;
+
+const maxOfUse = (limits: AgentFileLimits): UseCounts => ({
+  search: limits.maxSearchFiles,
+  code: limits.maxCodeFiles,
+  skill: limits.maxSkills,
+  "on-demand": limits.maxOnDemand,
+});
+
+function limitText(use: AgentFileUse, max: number): string {
+  switch (use) {
+    case "search":
+      return `An agent can have up to ${max} Search files.`;
+    case "code":
+      return `An agent can have up to ${max} Code files.`;
+    case "skill":
+      return `An agent can have up to ${max} skills.`;
+    case "on-demand":
+      return `An agent can have up to ${max} SharePoint folders and files.`;
+  }
+}
+
+/**
+ * The slots of each use. An item takes its slot before its add starts and
+ * gives it back when the add fails, so items added at the same time never
+ * take more than the limit together. When every slot is taken but some adds
+ * of that use are still running, an item waits for them: a slot one of them
+ * gives back can still be used.
+ */
+function useSlots(rows: AgentRows, limits: AgentFileLimits) {
+  const max = maxOfUse(limits);
+  const taken: UseCounts = {
+    search: rows.persona.personaDocumentIds?.length ?? 0,
+    code: rows.persona.codeInterpreterDocumentIds?.length ?? 0,
+    skill: rows.skills.length,
+    "on-demand": rows.sources.length,
+  };
+  const running: UseCounts = { search: 0, code: 0, skill: 0, "on-demand": 0 };
+  let wake: () => void = () => {};
+  let settled = new Promise<void>((resolve) => (wake = resolve));
+  return {
+    /** Takes a slot; the limit text when there is none (and none can come back). */
+    async take(use: AgentFileUse): Promise<string | undefined> {
+      for (;;) {
+        if (taken[use] < max[use]) {
+          taken[use]++;
+          running[use]++;
+          return undefined;
+        }
+        if (running[use] === 0) return limitText(use, max[use]);
+        await settled;
+      }
+    },
+    /** The add of an item with a slot ended; a failed add gives the slot back. */
+    done(use: AgentFileUse, added: boolean) {
+      running[use]--;
+      if (!added) taken[use]--;
+      const wakeAll = wake;
+      settled = new Promise<void>((resolve) => (wake = resolve));
+      wakeAll();
+    },
+  };
 }
 
 // ---------------------------------------------------------------------------
 // Add (several items, one pick)
 // ---------------------------------------------------------------------------
+
+/** Items of one pick that are added at the same time. */
+const ADD_PARALLEL = 4;
 
 const rejected = (pick: AgentFilePick, reason: string, name = ""): AddAgentFileResult => ({
   driveId: pick.driveId,
@@ -631,17 +692,19 @@ const rejected = (pick: AgentFilePick, reason: string, name = ""): AddAgentFileR
 /**
  * Adds the picked SharePoint items. Each item gets its use from Graph
  * metadata (agent-file-classifier) and is added on its own: a rejected item
- * does not stop the others.
+ * does not stop the others. Up to 4 items are added at the same time; the
+ * results are in the order of the pick.
  */
 export async function addAgentFiles(
   access: SkillAccess,
   picks: AgentFilePick[],
 ): Promise<AddAgentFileResult[]> {
-  const personaId = access.persona.id;
+  const target = targetOf(access);
   const limits = readAgentFileLimits();
   const { token } = await getCurrentUser();
   const rows = await loadAgentRows(access);
   const used = usedItemKeys(rows);
+  const slots = useSlots(rows, limits);
 
   const infos = await mapLimit(picks, GRAPH_PARALLEL, (p) =>
     isGraphDriveId(p.driveId) && isGraphItemId(p.itemId)
@@ -649,71 +712,84 @@ export async function addAgentFiles(
       : Promise.resolve<InfoResult>({ ok: false, status: "missing", message: "Choose a file or folder from SharePoint." }),
   );
 
-  const results: AddAgentFileResult[] = [];
-  for (let i = 0; i < picks.length; i++) {
+  const addOne = async (i: number): Promise<AddAgentFileResult> => {
     const pick = picks[i];
     const res = infos[i];
-    if (!res.ok) {
-      results.push(rejected(pick, res.message));
-      continue;
-    }
+    if (!res.ok) return rejected(pick, res.message);
     const { info } = res;
     const key = itemKey(pick.driveId, pick.itemId);
-    if (used.has(key)) {
-      results.push(rejected(pick, "The agent already uses this item.", info.name));
-      continue;
-    }
+    if (used.has(key)) return rejected(pick, "The agent already uses this item.", info.name);
     // The item must be in the drive the client named (Graph decides).
     if ((info.parent && info.parent.driveId !== pick.driveId) || (!info.isFile && !info.isFolder)) {
-      results.push(rejected(pick, "Choose a file or folder from SharePoint.", info.name));
-      continue;
+      return rejected(pick, "Choose a file or folder from SharePoint.", info.name);
     }
+    // Taken now, so the same item is not added twice at the same time.
+    used.add(key);
 
     const item: ResolvedItem = { driveId: pick.driveId, itemId: pick.itemId, info };
-    let outcome: AddOutcome;
     let use: AgentFileUse;
+    let skillZip: SkillZip | undefined;
     if (!info.isFolder && /\.zip$/i.test(info.name)) {
       // A zip is a skill when it passes the skill validation, else a Code file.
       const fetched = await fetchLinkedSkillZip(token, pick.driveId, pick.itemId);
       if (fetched.ok) {
         use = "skill";
-        const linked = await linkSharePointSkill({ personaId, ...pick }, fetched);
-        outcome =
-          linked.status === "OK"
-            ? await attachToPersona(personaId, { kind: "skill", id: linked.response.id }, withCodeInterpreterOn)
-            : { ok: false, message: errorsText(linked.errors) };
+        skillZip = fetched;
       } else if (fetched.reason === "invalid") {
         const auto = automaticUse({ ...candidate(info), validSkillZip: false }, limits);
         if ("rejected" in auto) {
-          results.push(rejected(pick, auto.rejected, info.name));
-          continue;
+          used.delete(key);
+          return rejected(pick, auto.rejected, info.name);
         }
         use = auto.use;
-        outcome = await addWithUse(personaId, item, use, limits);
       } else {
-        results.push(rejected(pick, fetched.message, info.name));
-        continue;
+        used.delete(key);
+        return rejected(pick, fetched.message, info.name);
       }
     } else {
       const auto = automaticUse(candidate(info), limits);
       if ("rejected" in auto) {
-        results.push(rejected(pick, auto.rejected, info.name));
-        continue;
+        used.delete(key);
+        return rejected(pick, auto.rejected, info.name);
       }
       use = auto.use;
-      outcome = await addWithUse(personaId, item, use, limits);
     }
 
-    if (outcome.ok) {
-      used.add(key);
-      results.push({ ...pick, status: "added", name: info.name, use, ref: outcome.ref });
-    } else {
-      results.push(rejected(pick, outcome.message, info.name));
+    const full = await slots.take(use);
+    if (full) {
+      used.delete(key);
+      return rejected(pick, full, info.name);
     }
-  }
+    let outcome: AddOutcome = { ok: false, message: "The file could not be added. Try again." };
+    try {
+      outcome = skillZip
+        ? await addAsSkill(target, item, skillZip)
+        : await addWithUse(target, item, use, limits);
+    } finally {
+      slots.done(use, outcome.ok);
+    }
+    if (!outcome.ok) {
+      used.delete(key);
+      return rejected(pick, outcome.message, info.name);
+    }
+    return { ...pick, status: "added", name: info.name, use, ref: outcome.ref };
+  };
+
+  const results = await mapLimit(
+    picks.map((_, i) => i),
+    ADD_PARALLEL,
+    (i) =>
+      addOne(i).catch((error): AddAgentFileResult => {
+        logError("agent files: add of one item failed", {
+          personaId: target.personaId,
+          error: error instanceof Error ? error.message : String(error),
+        });
+        return rejected(picks[i], "The file could not be added. Try again.");
+      }),
+  );
 
   logInfo("agent files: added", {
-    personaId,
+    personaId: target.personaId,
     added: results.filter((r) => r.status === "added").length,
     rejected: results.filter((r) => r.status === "rejected").length,
   });
@@ -724,15 +800,92 @@ export async function addAgentFiles(
 // Remove
 // ---------------------------------------------------------------------------
 
+const PERSONA_LISTED_QUERY: Record<IdList, string> = {
+  personaDocumentIds:
+    "SELECT VALUE COUNT(1) FROM root r WHERE r.type=@type AND r.id!=@personaId AND ARRAY_CONTAINS(r.personaDocumentIds, @id)",
+  codeInterpreterDocumentIds:
+    "SELECT VALUE COUNT(1) FROM root r WHERE r.type=@type AND r.id!=@personaId AND ARRAY_CONTAINS(r.codeInterpreterDocumentIds, @id)",
+};
+
+/** Whether an agent other than `personaId` lists the id (it then keeps the row). */
+async function listedByAnotherAgent(field: IdList, id: string, personaId: string): Promise<boolean> {
+  const { resources } = await HistoryContainer()
+    .items.query<number>({
+      query: PERSONA_LISTED_QUERY[field],
+      parameters: [
+        { name: "@type", value: PERSONA_ATTRIBUTE },
+        { name: "@personaId", value: personaId },
+        { name: "@id", value: id },
+      ],
+    })
+    .fetchAll();
+  return (resources[0] ?? 0) > 0;
+}
+
+/**
+ * The rows with this id and type, in any partition: a row written before
+ * the owner-partition rule (an admin added the file) is in the admin's.
+ */
+async function rowsById(
+  type: typeof PERSONA_DOCUMENT_ATTRIBUTE | typeof PERSONA_CI_DOCUMENT_ATTRIBUTE,
+  id: string,
+): Promise<Array<{ id: string; userId: string }>> {
+  const { resources } = await HistoryContainer()
+    .items.query<{ id: string; userId: string; type: string }>({
+      query: "SELECT r.id, r.userId, r.type FROM root r WHERE r.type=@type AND r.id=@id",
+      parameters: [
+        { name: "@type", value: type },
+        { name: "@id", value: id },
+      ],
+    })
+    .fetchAll();
+  return resources.filter((r) => r?.id === id && r.type === type && typeof r.userId === "string");
+}
+
+/**
+ * Deletes the stored data of a Search or Code file the agent no longer
+ * lists: each row in its own partition, and for Search its index entries.
+ * A row another agent still lists stays. Returns a warning when something
+ * could not be deleted (logged; the file is no longer used either way).
+ */
+async function deleteUnlistedRows(personaId: string, ref: AgentFileRef): Promise<string | undefined> {
+  const isSearch = ref.kind === "document";
+  try {
+    if (await listedByAnotherAgent(isSearch ? "personaDocumentIds" : "codeInterpreterDocumentIds", ref.id, personaId)) {
+      logInfo("agent files: row kept, another agent lists it", { personaId, kind: ref.kind });
+      return undefined;
+    }
+    const rows = await rowsById(isSearch ? PERSONA_DOCUMENT_ATTRIBUTE : PERSONA_CI_DOCUMENT_ATTRIBUTE, ref.id);
+    const results = await Promise.all(
+      rows.map((row) => (isSearch ? deleteSearchDocument(row) : deleteCodeDocument(row))),
+    );
+    const errors = results.flatMap((r) => (r.status === "OK" ? [] : r.errors));
+    if (errors.length === 0) return undefined;
+    logError("agent files: stored data of a removed file not deleted", {
+      personaId,
+      kind: ref.kind,
+      errors: errors.map((e) => e.message),
+    });
+  } catch (error) {
+    logError("agent files: stored data of a removed file not deleted", {
+      personaId,
+      kind: ref.kind,
+      error: error instanceof Error ? error.message : String(error),
+    });
+  }
+  return REMOVED_NOT_CLEANED_WARNING;
+}
+
 /**
  * Removes one item from the agent. For Search and Code the persona list is
  * changed first (then chats no longer use the file), then the row and the
- * index entry go (best effort).
+ * index entries go, in the row's own partition. When that cleanup fails, the
+ * result is OK with a warning.
  */
 export async function removeAgentFile(
   access: SkillAccess,
   ref: AgentFileRef,
-): Promise<ServerActionResponse<true>> {
+): Promise<ServerActionResponse<RemoveAgentFileResult>> {
   const personaId = access.persona.id;
   switch (ref.kind) {
     case "document":
@@ -743,25 +896,16 @@ export async function removeAgentFile(
       }
       const stored = await updatePersonaRow(personaId, withoutId(field, ref.id));
       if (!stored) return { status: "NOT_FOUND", errors: [{ message: "Agent not found." }] };
-      try {
-        if (ref.kind === "document") await UpdateOrAddPersonaDocuments([], [ref.id]);
-        else await DeletePersonaCIDocumentById(ref.id);
-      } catch (error) {
-        logWarn("agent files: row cleanup failed", {
-          personaId,
-          kind: ref.kind,
-          error: error instanceof Error ? error.message : String(error),
-        });
-      }
-      return { status: "OK", response: true };
+      const warning = await deleteUnlistedRows(personaId, ref);
+      return { status: "OK", response: warning ? { warning } : {} };
     }
     case "skill": {
       const res = await DeletePersonaSkill(personaId, ref.id);
-      return res.status === "OK" ? { status: "OK", response: true } : res;
+      return res.status === "OK" ? { status: "OK", response: {} } : res;
     }
     case "file-source": {
       const res = await DeletePersonaFileSource(personaId, ref.id);
-      return res.status === "OK" ? { status: "OK", response: true } : res;
+      return res.status === "OK" ? { status: "OK", response: {} } : res;
     }
   }
 }
@@ -771,11 +915,10 @@ export async function removeAgentFile(
 // ---------------------------------------------------------------------------
 
 /** The SharePoint item behind a ref, from the stored row. */
-async function sharePointItemOf(
-  access: SkillAccess,
+function sharePointItemOf(
+  rows: AgentRows,
   ref: AgentFileRef,
-): Promise<{ driveId: string; itemId: string } | { error: string; notFound?: true }> {
-  const rows = await loadAgentRows(access);
+): { driveId: string; itemId: string } | { error: string; notFound?: true } {
   switch (ref.kind) {
     case "document":
     case "ci-document": {
@@ -797,23 +940,50 @@ async function sharePointItemOf(
   }
 }
 
+/** Whether the agent has this SharePoint item in this use already. */
+function usesItemAs(rows: AgentRows, use: AgentFileUse, driveId: string, itemId: string): boolean {
+  const key = itemKey(driveId, itemId);
+  const docKey = (d: PersonaDocument | PersonaCIDocument) =>
+    itemKey(d.externalFile.parentReference.driveId, d.externalFile.documentId);
+  switch (use) {
+    case "search":
+      return [...rows.documents.values()].some((d) => docKey(d) === key);
+    case "code":
+      return [...rows.ciDocuments.values()].some((d) => docKey(d) === key);
+    case "skill":
+      return rows.skills.some((s) => s.source && itemKey(s.source.driveId, s.source.itemId) === key);
+    case "on-demand":
+      return rows.sources.some((s) => itemKey(s.driveId, s.itemId) === key);
+  }
+}
+
 /**
  * Moves an item to another use: the new mechanism first, then the old one
  * goes. When the add fails, nothing changed; when the removal fails, the
- * new entry is undone, so the item keeps its old use.
+ * new entry is undone, so the item keeps its old use. An item the agent has
+ * in the new use already (an older agent can have one file twice) is
+ * refused.
  */
 export async function changeAgentFileUse(
   access: SkillAccess,
   ref: AgentFileRef,
   use: AgentFileUse,
-): Promise<ServerActionResponse<{ ref: AgentFileRef; use: AgentFileUse }>> {
-  const personaId = access.persona.id;
+): Promise<ServerActionResponse<ChangeAgentFileUseResult>> {
+  const target = targetOf(access);
+  const personaId = target.personaId;
   const current = USE_OF_REF_KIND[ref.kind];
-  const located = await sharePointItemOf(access, ref);
+  const rows = await loadAgentRows(access);
+  const located = sharePointItemOf(rows, ref);
   if ("error" in located) {
     return { status: located.notFound ? "NOT_FOUND" : "ERROR", errors: [{ message: located.error }] };
   }
   if (use === current) return { status: "OK", response: { ref, use } };
+  if (usesItemAs(rows, use, located.driveId, located.itemId)) {
+    return {
+      status: "ERROR",
+      errors: [{ message: `This file is already used as ${AGENT_FILE_USE_TEXT[use].label}.` }],
+    };
+  }
 
   const { token } = await getCurrentUser();
   const res = await readItemInfo(token, located.driveId, located.itemId);
@@ -827,19 +997,19 @@ export async function changeAgentFileUse(
     };
   }
 
-  const added = await addWithUse(personaId, { ...located, info: res.info }, use, limits);
+  const added = await addWithUse(target, { ...located, info: res.info }, use, limits);
   if (!added.ok) return { status: "ERROR", errors: [{ message: added.message }] };
 
   // The old entry goes; the access passed in still lists the old ids.
   const fresh = await readPersonaRow(personaId);
   const removed = fresh
     ? await removeAgentFile({ ...access, persona: fresh }, ref).catch(
-        (error): ServerActionResponse<true> => ({
+        (error): ServerActionResponse<RemoveAgentFileResult> => ({
           status: "ERROR",
           errors: [{ message: error instanceof Error ? error.message : String(error) }],
         }),
       )
-    : ({ status: "NOT_FOUND", errors: [{ message: "Agent not found." }] } as ServerActionResponse<true>);
+    : ({ status: "NOT_FOUND", errors: [{ message: "Agent not found." }] } as ServerActionResponse<RemoveAgentFileResult>);
   if (removed.status !== "OK") {
     logError("agent files: change of use failed, new entry undone", {
       personaId,
@@ -852,6 +1022,8 @@ export async function changeAgentFileUse(
     return { status: "ERROR", errors: [{ message: "The use could not be changed. Try again." }] };
   }
   logInfo("agent files: use changed", { personaId, from: current, to: use });
-  return { status: "OK", response: { ref: added.ref, use } };
+  return {
+    status: "OK",
+    response: { ref: added.ref, use, ...(removed.response.warning ? { warning: removed.response.warning } : {}) },
+  };
 }
-

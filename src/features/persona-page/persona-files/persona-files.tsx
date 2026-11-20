@@ -74,6 +74,7 @@ const filesText = (n: number) => (n === 1 ? "This agent uses 1 file." : `This ag
 export const PersonaFiles: FC<Props> = ({ personaId, onNeedsCodeInterpreterChange }) => {
   const { data: session } = useSession();
   const [list, setList] = useState<AgentFilesList | null>(null);
+  const [loadError, setLoadError] = useState<string | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
   const [notAdded, setNotAdded] = useState<{ name: string; reason: string }[]>([]);
   const fileInput = useRef<HTMLInputElement>(null);
@@ -87,15 +88,30 @@ export const PersonaFiles: FC<Props> = ({ personaId, onNeedsCodeInterpreterChang
       needsCallback.current?.(false);
       return;
     }
-    const res = await ListAgentFiles(personaId);
+    let res: Awaited<ReturnType<typeof ListAgentFiles>>;
+    try {
+      res = await ListAgentFiles(personaId);
+    } catch {
+      res = { status: "ERROR", errors: [{ message: "The files could not be loaded." }] };
+    }
     if (res.status === "OK") {
+      setLoadError(null);
       setList(res.response);
       needsCallback.current?.(res.response.needsCodeInterpreter);
+    } else {
+      setLoadError(res.errors.map((e) => e.message).join(" ") || "The files could not be loaded.");
     }
   }, [personaId]);
 
+  const retryLoad = async () => {
+    setLoadError(null);
+    setList(null);
+    await refresh();
+  };
+
   useEffect(() => {
     setList(null);
+    setLoadError(null);
     setNotAdded([]);
     refresh();
   }, [refresh]);
@@ -106,6 +122,10 @@ export const PersonaFiles: FC<Props> = ({ personaId, onNeedsCodeInterpreterChang
       description: errors.map((e) => e.message).join(" "),
       variant: "destructive",
     });
+
+  const showWarning = (warning: string | undefined) => {
+    if (warning) toast({ title: "Files", description: warning, variant: "destructive" });
+  };
 
   const onPicked = async (files: SharePointFile[]) => {
     if (files.length === 0) return;
@@ -147,6 +167,7 @@ export const PersonaFiles: FC<Props> = ({ personaId, onNeedsCodeInterpreterChang
           title: "Files",
           description: `"${item.name}" now uses ${AGENT_FILE_USE_TEXT[value].label}.`,
         });
+        showWarning(res.response.warning);
         await refresh();
       } else {
         showErrors(res.errors);
@@ -160,8 +181,10 @@ export const PersonaFiles: FC<Props> = ({ personaId, onNeedsCodeInterpreterChang
     setBusy(item.ref.id);
     try {
       const res = await RemoveAgentFile(personaId, item.ref);
-      if (res.status === "OK") await refresh();
-      else showErrors(res.errors);
+      if (res.status === "OK") {
+        showWarning(res.response.warning);
+        await refresh();
+      } else showErrors(res.errors);
     } finally {
       setBusy(null);
     }
@@ -228,6 +251,13 @@ export const PersonaFiles: FC<Props> = ({ personaId, onNeedsCodeInterpreterChang
       <p className="text-xs text-muted-foreground">{FILES_SUBTITLE}</p>
       {!personaId ? (
         <p className="text-xs text-muted-foreground">Save the agent to add files.</p>
+      ) : loadError ? (
+        <div role="alert" className="flex items-center gap-2 text-xs" data-testid="persona-files-load-error">
+          <span className="text-destructive">{loadError}</span>
+          <Button type="button" size="sm" variant="outline" onClick={retryLoad}>
+            Try again
+          </Button>
+        </div>
       ) : !list ? (
         <p className="text-xs text-muted-foreground">Loading files...</p>
       ) : !list.canEdit ? (

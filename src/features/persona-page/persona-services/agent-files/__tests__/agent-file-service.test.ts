@@ -30,6 +30,8 @@ let persona: Row;
 let docRows: Row[];
 let skills: Row[];
 let sources: Row[];
+let otherPersonas: Row[];
+let currentUserId: string;
 let access: { canUse: boolean; canEdit: boolean } | undefined;
 let nextId = 0;
 const newId = (p: string) => `${p}-${++nextId}`;
@@ -46,9 +48,18 @@ const replace = vi.fn(async (doc: Row, options?: { accessCondition?: { condition
 vi.mock("@/features/common/services/cosmos", () => ({
   HistoryContainer: () => ({
     items: {
-      query: (spec: { parameters: { name: string; value: any }[] }) => ({
+      query: (spec: { query: string; parameters: { name: string; value: any }[] }) => ({
         fetchAll: async () => {
           const p = Object.fromEntries(spec.parameters.map((x) => [x.name, x.value]));
+          // Another agent that lists the id (removal keeps the row then).
+          if (spec.query.includes("COUNT(1)")) {
+            const field = spec.query.includes("personaDocumentIds") ? "personaDocumentIds" : "codeInterpreterDocumentIds";
+            return { resources: [otherPersonas.filter((o) => (o[field] ?? []).includes(p["@id"])).length] };
+          }
+          // The rows with an id, in any partition (removal).
+          if (spec.query.includes("r.id=@id")) {
+            return { resources: docRows.filter((r) => r.type === p["@type"] && r.id === p["@id"]) };
+          }
           return {
             resources: docRows.filter(
               (r) =>
@@ -66,7 +77,7 @@ vi.mock("@/features/common/services/cosmos", () => ({
 
 vi.mock("../../skills/persona-skill-store", () => ({
   resolveSkillAccess: vi.fn(async () =>
-    access ? { ...access, persona: { ...persona }, currentUserId: "owner-hash" } : undefined,
+    access ? { ...access, persona: { ...persona }, currentUserId } : undefined,
   ),
   readPersonaRow: vi.fn(async () => ({ ...persona })),
   querySkillsByPersonaId: vi.fn(async () => skills),
@@ -76,43 +87,45 @@ vi.mock("../../sharepoint-files/sharepoint-file-store", () => ({
 }));
 
 // ── the four mechanisms ──────────────────────────────────────────────────────
-const docRow = (type: string, f: { documentId: string; parentReference: { driveId: string }; name: string }) => ({
+const docRow = (
+  type: string,
+  f: { documentId: string; parentReference: { driveId: string }; name: string },
+  userId: string,
+) => ({
   id: newId(type === "PERSONA_DOCUMENT" ? "doc" : "ci"),
   type,
-  userId: "owner-hash",
+  userId,
   source: "SHAREPOINT",
   externalFile: { documentId: f.documentId, parentReference: f.parentReference },
   ...(type === "PERSONA_CI_DOCUMENT" ? { fileName: f.name } : {}),
 });
 
-const UpdateOrAddPersonaDocuments = vi.fn(async (files: any[], current: string[]) => {
-  docRows = docRows.filter((r) => !current.includes(r.id));
-  const ids = files.map((f) => {
-    const row = docRow("PERSONA_DOCUMENT", f);
-    docRows.push(row);
-    return row.id;
-  });
-  return { status: "OK", response: ids };
-});
-vi.mock("../../persona-documents-service", () => ({
-  UpdateOrAddPersonaDocuments: (...a: [any[], string[]]) => UpdateOrAddPersonaDocuments(...a),
+const dropRow = (row: { id: string; userId: string }) => {
+  docRows = docRows.filter((r) => !(r.id === row.id && r.userId === row.userId));
+  return { status: "OK", response: true };
+};
+
+const addSearchImpl = async (f: any, ownerUserId: string): Promise<any> => {
+  const row = docRow("PERSONA_DOCUMENT", f, ownerUserId);
+  docRows.push(row);
+  return { status: "OK", response: row.id };
+};
+const addSearchDocument = vi.fn(addSearchImpl);
+const deleteSearchDocument = vi.fn(async (row: { id: string; userId: string }): Promise<any> => dropRow(row));
+vi.mock("../../persona-documents-store", () => ({
+  addSearchDocument: (f: any, owner: string) => addSearchDocument(f, owner),
+  deleteSearchDocument: (row: any) => deleteSearchDocument(row),
 }));
 
-const UpdateOrAddPersonaCIDocuments = vi.fn(async (files: any[], _current: string[]) => ({
-  status: "OK",
-  response: files.map((f) => {
-    const row = docRow("PERSONA_CI_DOCUMENT", f);
-    docRows.push(row);
-    return row.id;
-  }),
-}));
-const DeletePersonaCIDocumentById = vi.fn(async (id: string) => {
-  docRows = docRows.filter((r) => r.id !== id);
-  return { status: "OK", response: true };
+const addCodeDocument = vi.fn(async (f: any, ownerUserId: string): Promise<any> => {
+  const row = docRow("PERSONA_CI_DOCUMENT", f, ownerUserId);
+  docRows.push(row);
+  return { status: "OK", response: row.id };
 });
-vi.mock("../../persona-ci-documents-service", () => ({
-  UpdateOrAddPersonaCIDocuments: (...a: [any[], string[]]) => UpdateOrAddPersonaCIDocuments(...a),
-  DeletePersonaCIDocumentById: (id: string) => DeletePersonaCIDocumentById(id),
+const deleteCodeDocument = vi.fn(async (row: { id: string; userId: string }): Promise<any> => dropRow(row));
+vi.mock("../../persona-ci-documents-store", () => ({
+  addCodeDocument: (f: any, owner: string) => addCodeDocument(f, owner),
+  deleteCodeDocument: (row: any) => deleteCodeDocument(row),
 }));
 
 const fetchLinkedSkillZip = vi.fn(async (_t: string, _d: string, itemId: string) =>
@@ -178,6 +191,8 @@ import {
   ListAgentFiles,
   RemoveAgentFile,
 } from "../agent-file-service";
+import { readAgentFileLimits } from "../agent-file-store";
+import { readCodeInterpreterMaxFileBytes } from "@/features/chat-page/chat-services/code-interpreter-constants";
 
 let graph: FakeGraph;
 
@@ -193,7 +208,10 @@ beforeEach(() => {
     defaultTools: { webSearch: true },
     _etag: "v0",
   };
+  addSearchDocument.mockImplementation(addSearchImpl);
   docRows = [];
+  otherPersonas = [];
+  currentUserId = "owner-hash";
   skills = [];
   sources = [];
   access = { canUse: true, canEdit: true };
@@ -231,7 +249,7 @@ describe("permission check first (decision 11)", () => {
     access = { canUse: true, canEdit: false };
     expect((await call()).status).toBe(status);
     expect(graph.calls).toEqual([]);
-    expect(UpdateOrAddPersonaDocuments).not.toHaveBeenCalled();
+    expect(addSearchDocument).not.toHaveBeenCalled();
     expect(replace).not.toHaveBeenCalled();
   });
 
@@ -266,10 +284,11 @@ describe("AddAgentFiles: one pick, per-item result (decisions 2, 4, 11)", () => 
     // The persona lists the new Search and Code rows.
     expect(persona.personaDocumentIds).toHaveLength(1);
     expect(persona.codeInterpreterDocumentIds).toHaveLength(2);
-    // The mechanisms got the ids from Graph, not from the client.
-    expect(UpdateOrAddPersonaDocuments).toHaveBeenCalledWith(
-      [expect.objectContaining({ documentId: "PDF1", parentReference: { driveId: DRIVE }, name: "Handbook.pdf" })],
-      [],
+    // The mechanisms got the ids from Graph, not from the client, and write
+    // in the owner's partition.
+    expect(addSearchDocument).toHaveBeenCalledWith(
+      expect.objectContaining({ documentId: "PDF1", parentReference: { driveId: DRIVE }, name: "Handbook.pdf" }),
+      "owner-hash",
     );
   });
 
@@ -320,13 +339,13 @@ describe("AddAgentFiles: one pick, per-item result (decisions 2, 4, 11)", () => 
     replace.mockRejectedValueOnce(new Error("cosmos down"));
     const [res] = await add("CSV1");
     expect(res).toMatchObject({ status: "rejected", reason: expect.stringMatching(/could not be saved/) });
-    expect(DeletePersonaCIDocumentById).toHaveBeenCalled();
+    expect(deleteCodeDocument).toHaveBeenCalledWith(expect.objectContaining({ userId: "owner-hash" }));
     expect(docRows).toEqual([]);
   });
 
   it("rejects a Search file whose indexing fails and keeps the stored ids", async () => {
     persona.personaDocumentIds = ["doc-old"];
-    UpdateOrAddPersonaDocuments.mockResolvedValueOnce({ status: "ERROR", errors: [{ message: "indexing failed" }] } as any);
+    addSearchDocument.mockResolvedValueOnce({ status: "ERROR", errors: [{ message: "indexing failed" }] });
     const [first, second] = await add("PDF1", "PDF2");
     expect(first).toMatchObject({
       status: "rejected",
@@ -340,7 +359,7 @@ describe("AddAgentFiles: one pick, per-item result (decisions 2, 4, 11)", () => 
 
   it("rejects a Search file whose indexing throws and does not write the persona row", async () => {
     persona.personaDocumentIds = ["doc-old"];
-    UpdateOrAddPersonaDocuments.mockRejectedValueOnce(new Error("search service down"));
+    addSearchDocument.mockRejectedValueOnce(new Error("search service down"));
     const [res] = await add("PDF1");
     expect(res).toMatchObject({ status: "rejected", reason: expect.stringMatching(/could not be indexed for Search/) });
     expect(JSON.stringify(res)).not.toMatch(/search service down/);
@@ -445,7 +464,7 @@ describe("ListAgentFiles: one list over all four row types (decision 10)", () =>
     graph.add(DRIVE, { id: "BUSY", name: "Busy.pdf", parent: "ROOT", status: 503 });
     const [res] = await add("BUSY");
     expect(res).toMatchObject({ status: "rejected", reason: "SharePoint did not answer. Try again in a moment." });
-    expect(UpdateOrAddPersonaDocuments).not.toHaveBeenCalled();
+    expect(addSearchDocument).not.toHaveBeenCalled();
   });
 
   it("a viewer gets the count only: no names, no links, no Graph call (decision 9)", async () => {
@@ -473,12 +492,15 @@ describe("RemoveAgentFile", () => {
     const res = await RemoveAgentFile("p1", added.ref);
     expect(res.status).toBe("OK");
     expect(persona.personaDocumentIds).toEqual([]);
-    expect(UpdateOrAddPersonaDocuments).toHaveBeenLastCalledWith([], [added.ref.id]);
+    expect(deleteSearchDocument).toHaveBeenLastCalledWith(
+      expect.objectContaining({ id: added.ref.id, userId: "owner-hash" }),
+    );
+    expect(res.status === "OK" && res.response).toEqual({});
   });
 
   it("refuses an id the agent does not list", async () => {
     expect((await RemoveAgentFile("p1", { kind: "document", id: "other" })).status).toBe("NOT_FOUND");
-    expect(UpdateOrAddPersonaDocuments).not.toHaveBeenCalled();
+    expect(addSearchDocument).not.toHaveBeenCalled();
   });
 
   it("removes skills and On-demand sources through their services", async () => {
@@ -527,7 +549,7 @@ describe("ChangeAgentFileUse (decision 5)", () => {
     if (folder.status !== "added") throw new Error("not added");
     const res = await ChangeAgentFileUse("p1", folder.ref, "search");
     expect(res.status === "ERROR" && res.errors[0].message).toMatch(/cannot be used as Search/);
-    expect(UpdateOrAddPersonaDocuments).not.toHaveBeenCalled();
+    expect(addSearchDocument).not.toHaveBeenCalled();
   });
 
   it("refuses to move an uploaded skill", async () => {
@@ -539,7 +561,7 @@ describe("ChangeAgentFileUse (decision 5)", () => {
   it("leaves the item in its old use when adding to the new one fails", async () => {
     const [added] = await add("PDF1");
     if (added.status !== "added") throw new Error("not added");
-    UpdateOrAddPersonaCIDocuments.mockResolvedValueOnce({ status: "ERROR", errors: [{ message: "store down" }] } as any);
+    addCodeDocument.mockResolvedValueOnce({ status: "ERROR", errors: [{ message: "store down" }] });
     const res = await ChangeAgentFileUse("p1", added.ref, "code");
     expect(res.status).toBe("ERROR");
     expect(persona.personaDocumentIds).toEqual([added.ref.id]);
@@ -549,7 +571,7 @@ describe("ChangeAgentFileUse (decision 5)", () => {
   it("keeps a Code file in Code when its indexing for Search fails", async () => {
     const [added] = await add("CSV1");
     if (added.status !== "added") throw new Error("not added");
-    UpdateOrAddPersonaDocuments.mockResolvedValueOnce({ status: "ERROR", errors: [{ message: "indexing failed" }] } as any);
+    addSearchDocument.mockResolvedValueOnce({ status: "ERROR", errors: [{ message: "indexing failed" }] });
     const res = await ChangeAgentFileUse("p1", added.ref, "search");
     expect(res.status === "ERROR" && res.errors[0].message).toMatch(/could not be indexed for Search.*indexing failed/);
     expect(persona.codeInterpreterDocumentIds).toEqual([added.ref.id]);
@@ -564,5 +586,155 @@ describe("ChangeAgentFileUse (decision 5)", () => {
     expect(res.status).toBe("ERROR");
     expect(persona.personaDocumentIds).toEqual([]);
     expect(sources.map((s) => s.id)).toEqual([folder.ref.id]);
+  });
+});
+
+describe("rows of an admin's add go to the owner's partition (finding: owner partition)", () => {
+  it("an admin adds Search and Code files: both rows are written with the owner's id", async () => {
+    currentUserId = "admin-hash";
+    const results = await add("PDF1", "CSV1");
+    expect(results.map((r) => r.status)).toEqual(["added", "added"]);
+    expect(addSearchDocument).toHaveBeenCalledWith(expect.anything(), "owner-hash");
+    expect(addCodeDocument).toHaveBeenCalledWith(expect.anything(), "owner-hash");
+    expect(docRows.map((r) => r.userId)).toEqual(["owner-hash", "owner-hash"]);
+  });
+});
+
+describe("AddAgentFiles adds up to 4 items at the same time", () => {
+  const morePdfs = (n: number) => {
+    const ids = Array.from({ length: n }, (_, i) => `PDFX${i}`);
+    for (const id of ids) graph.add(DRIVE, { id, name: `${id}.pdf`, parent: "ROOT", size: 2000 });
+    return ids;
+  };
+
+  const trackParallel = () => {
+    const state = { inFlight: 0, max: 0 };
+    addSearchDocument.mockImplementation(async (f: any, owner: string) => {
+      state.inFlight++;
+      state.max = Math.max(state.max, state.inFlight);
+      await new Promise((r) => setTimeout(r, 5));
+      state.inFlight--;
+      const row = docRow("PERSONA_DOCUMENT", f, owner);
+      docRows.push(row);
+      return { status: "OK", response: row.id };
+    });
+    return state;
+  };
+
+  it("runs at most 4 adds at once and keeps the results in pick order", async () => {
+    const state = trackParallel();
+    const ids = morePdfs(9);
+    const results = await add(...ids);
+    expect(results.map((r) => r.itemId)).toEqual(ids);
+    expect(results.every((r) => r.status === "added")).toBe(true);
+    expect(state.max).toBeGreaterThan(1);
+    expect(state.max).toBeLessThanOrEqual(4);
+    expect(persona.personaDocumentIds).toHaveLength(9);
+  });
+
+  it("never exceeds a limit near its edge: 2 free Search slots, 5 picked", async () => {
+    trackParallel();
+    process.env.MAX_PERSONA_DOCUMENT_LIMIT = "3";
+    persona.personaDocumentIds = ["doc-old"];
+    const ids = morePdfs(5);
+    const results = await add(...ids);
+    expect(results.map((r) => r.status)).toEqual(["added", "added", "rejected", "rejected", "rejected"]);
+    for (const r of results.slice(2)) {
+      expect(r).toMatchObject({ reason: "An agent can have up to 3 Search files." });
+    }
+    expect(persona.personaDocumentIds).toHaveLength(3);
+    expect(addSearchDocument).toHaveBeenCalledTimes(2);
+  });
+
+  it("gives a slot back when an add fails, so a later item of the pick can take it", async () => {
+    process.env.MAX_PERSONA_DOCUMENT_LIMIT = "1";
+    addSearchDocument.mockResolvedValueOnce({ status: "ERROR", errors: [{ message: "indexing failed" }] });
+    const ids = morePdfs(2);
+    const results = await add(...ids);
+    expect(results[0]).toMatchObject({ status: "rejected", reason: expect.stringMatching(/indexing failed/) });
+    expect(results[1]).toMatchObject({ status: "added" });
+    expect(persona.personaDocumentIds).toHaveLength(1);
+  });
+
+  it("keeps the Code limit at the edge: 19 of 20 taken, 3 picked", async () => {
+    persona.codeInterpreterDocumentIds = Array.from({ length: 19 }, (_, i) => `ci-old-${i}`);
+    const ids = ["CSVA", "CSVB", "CSVC"];
+    for (const id of ids) graph.add(DRIVE, { id, name: `${id}.csv`, parent: "ROOT", size: 100 });
+    const results = await add(...ids);
+    expect(results.filter((r) => r.status === "added")).toHaveLength(1);
+    expect(results.filter((r) => r.status === "rejected").map((r) => (r as any).reason)).toEqual([
+      "An agent can have up to 20 Code files.",
+      "An agent can have up to 20 Code files.",
+    ]);
+    expect(persona.codeInterpreterDocumentIds).toHaveLength(20);
+  });
+});
+
+describe("RemoveAgentFile reports a cleanup that failed", () => {
+  it("Code row delete fails: OK with a warning, the id is off the agent", async () => {
+    const [added] = await add("CSV1");
+    if (added.status !== "added") throw new Error("not added");
+    deleteCodeDocument.mockResolvedValueOnce({ status: "ERROR", errors: [{ message: "cosmos down" }] });
+    const res = await RemoveAgentFile("p1", added.ref);
+    expect(res.status).toBe("OK");
+    expect(res.status === "OK" && res.response.warning).toMatch(/no longer used/);
+    expect(persona.codeInterpreterDocumentIds).toEqual([]);
+  });
+
+  it("a row another agent still lists is kept, without a warning", async () => {
+    const [added] = await add("PDF1");
+    if (added.status !== "added") throw new Error("not added");
+    otherPersonas.push({ id: "p2", personaDocumentIds: [added.ref.id] });
+    const res = await RemoveAgentFile("p1", added.ref);
+    expect(res).toEqual({ status: "OK", response: {} });
+    expect(deleteSearchDocument).not.toHaveBeenCalled();
+    expect(docRows).toHaveLength(1);
+  });
+
+  it("change of use passes the warning on when the old row stays", async () => {
+    const [added] = await add("PDF1");
+    if (added.status !== "added") throw new Error("not added");
+    deleteSearchDocument.mockResolvedValueOnce({ status: "ERROR", errors: [{ message: "search down" }] });
+    const res = await ChangeAgentFileUse("p1", added.ref, "code");
+    expect(res.status).toBe("OK");
+    expect(res.status === "OK" && res.response).toMatchObject({ use: "code", warning: expect.stringMatching(/no longer used/) });
+    expect(persona.personaDocumentIds).toEqual([]);
+  });
+});
+
+describe("ChangeAgentFileUse refuses a use the item has already", () => {
+  it("an older agent with the same file in Search and Code: Code -> Search is refused", async () => {
+    docRows.push(
+      { id: "doc-a", type: "PERSONA_DOCUMENT", userId: "owner-hash", externalFile: { documentId: "PDF1", parentReference: { driveId: DRIVE } } },
+      { id: "ci-a", type: "PERSONA_CI_DOCUMENT", userId: "owner-hash", fileName: "Handbook.pdf", externalFile: { documentId: "PDF1", parentReference: { driveId: DRIVE } } },
+    );
+    persona.personaDocumentIds = ["doc-a"];
+    persona.codeInterpreterDocumentIds = ["ci-a"];
+    const res = await ChangeAgentFileUse("p1", { kind: "ci-document", id: "ci-a" }, "search");
+    expect(res).toEqual({ status: "ERROR", errors: [{ message: "This file is already used as Search." }] });
+    expect(addSearchDocument).not.toHaveBeenCalled();
+    expect(graph.calls).toEqual([]);
+    expect(persona.codeInterpreterDocumentIds).toEqual(["ci-a"]);
+  });
+
+  it("a file in Code and On demand: Code -> On demand is refused", async () => {
+    docRows.push({ id: "ci-b", type: "PERSONA_CI_DOCUMENT", userId: "owner-hash", fileName: "sales.csv", externalFile: { documentId: "CSV1", parentReference: { driveId: DRIVE } } });
+    persona.codeInterpreterDocumentIds = ["ci-b"];
+    sources.push({ id: "src-b", driveId: DRIVE, itemId: "CSV1", name: "sales.csv", webUrl: "", kind: "file" });
+    const res = await ChangeAgentFileUse("p1", { kind: "ci-document", id: "ci-b" }, "on-demand");
+    expect(res.status === "ERROR" && res.errors[0].message).toBe("This file is already used as On demand.");
+    expect(addPersonaFileSource).not.toHaveBeenCalled();
+  });
+});
+
+describe("Code size limit: one reader for the editor and the chat start", () => {
+  it.each([
+    [{}],
+    [{ MAX_PERSONA_CI_DOCUMENT_SIZE: "1000" }],
+    [{ NEXT_PUBLIC_MAX_PERSONA_CI_DOCUMENT_SIZE: "2000" }],
+    [{ MAX_PERSONA_CI_DOCUMENT_SIZE: "", NEXT_PUBLIC_MAX_PERSONA_CI_DOCUMENT_SIZE: "2000" }],
+    [{ MAX_PERSONA_CI_DOCUMENT_SIZE: "1000", NEXT_PUBLIC_MAX_PERSONA_CI_DOCUMENT_SIZE: "2000" }],
+  ])("readAgentFileLimits(%j).codeMaxBytes equals the preload limit", (env) => {
+    expect(readAgentFileLimits(env).codeMaxBytes).toBe(readCodeInterpreterMaxFileBytes(env));
   });
 });

@@ -1213,6 +1213,12 @@ export interface ChatThreadModel {
    * route tells the model about them (unavailable-agent-files.ts).
    */
   unavailableAgentFiles?: string[];
+  /**
+   * Number of the agent's code interpreter files whose stored entry could not
+   * be found when the chat started (no name is known). Set by the server
+   * only; the chat route tells the model the number.
+   */
+  notFoundAgentFileCount?: number;
 }
 
 export interface UserPrompt {

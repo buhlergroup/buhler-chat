@@ -50,11 +50,14 @@ vi.mock("@/features/common/services/microsoft-graph-client", () => ({
 
 import {
   PersonaCIDocumentsByIds,
-  DeletePersonaCIDocumentById,
   DeletePersonaCIDocumentsByPersonaId,
-  UpdateOrAddPersonaCIDocuments,
-  DownloadSharePointFile,
 } from "./persona-ci-documents-service";
+import {
+  addCodeDocument,
+  deleteCodeDocument,
+  downloadCodeInterpreterFile,
+} from "./persona-ci-documents-store";
+import * as ciActions from "./persona-ci-documents-service";
 
 const makeCIDoc = (id: string) => ({
   id,
@@ -120,32 +123,38 @@ describe("persona-ci-documents-service.ts", () => {
     }
   });
 
-  // 004 – DeletePersonaCIDocumentById deletes via partition key
-  it("004 DeletePersonaCIDocumentById deletes the doc", async () => {
-    historyItems.push(makeCIDoc("ci-del"));
-
+  // 004 – deleteCodeDocument deletes in the row's own partition
+  it("004 deleteCodeDocument deletes the row in its own partition, not the caller's", async () => {
     const deleteSpy = vi.fn().mockResolvedValue({ resource: undefined });
     historyContainer.item.mockImplementationOnce((_id: string) => ({
       read: vi.fn(),
       delete: deleteSpy,
     }));
 
-    const result = await DeletePersonaCIDocumentById("ci-del");
+    const result = await deleteCodeDocument({ id: "ci-del", userId: "owner-hash" });
     expect(result.status).toBe("OK");
     expect(deleteSpy).toHaveBeenCalledTimes(1);
-    // The delete runs in the caller's own partition, so only own docs go.
-    expect(historyContainer.item).toHaveBeenCalledWith("ci-del", USER_HASH);
+    expect(historyContainer.item).toHaveBeenCalledWith("ci-del", "owner-hash");
   });
 
-  // 005 – DeletePersonaCIDocumentById ERROR on Cosmos throw
-  it("005 DeletePersonaCIDocumentById returns ERROR on Cosmos throw", async () => {
+  // 005 – deleteCodeDocument ERROR on Cosmos throw, OK when already gone
+  it("005 deleteCodeDocument returns ERROR on a Cosmos error", async () => {
     historyContainer.item.mockImplementationOnce(() => ({
       read: vi.fn(),
       delete: vi.fn().mockRejectedValue(new Error("cosmos boom")),
     }));
 
-    const result = await DeletePersonaCIDocumentById("ci-err");
+    const result = await deleteCodeDocument({ id: "ci-err", userId: "owner-hash" });
     expect(result.status).toBe("ERROR");
+  });
+
+  it("005b deleteCodeDocument: a row that is already gone is OK", async () => {
+    historyContainer.item.mockImplementationOnce(() => ({
+      read: vi.fn(),
+      delete: vi.fn().mockRejectedValue(Object.assign(new Error("Not found"), { code: 404 })),
+    }));
+
+    expect((await deleteCodeDocument({ id: "ci-gone", userId: "owner-hash" })).status).toBe("OK");
   });
 
   // 006 – DeletePersonaCIDocumentsByPersonaId deletes every owned CI doc
@@ -207,9 +216,9 @@ describe("persona-ci-documents-service.ts", () => {
     expect(historyContainer.item).not.toHaveBeenCalledWith("ci-foreign", expect.anything());
   });
 
-  // 007 – UpdateOrAddPersonaCIDocuments upserts each doc
-  it("007 UpdateOrAddPersonaCIDocuments upserts each input doc", async () => {
-    const files = [
+  // 007 – addCodeDocument writes one row in the agent owner's partition
+  it("007 addCodeDocument writes the row with the owner's id, not the caller's", async () => {
+    const result = await addCodeDocument(
       {
         documentId: "sp-1",
         name: "file1.csv",
@@ -217,58 +226,36 @@ describe("persona-ci-documents-service.ts", () => {
         createdDateTime: "2024-01-01",
         parentReference: { driveId: "d1" },
       },
-      {
-        documentId: "sp-2",
-        name: "file2.csv",
-        createdBy: "user",
-        createdDateTime: "2024-01-01",
-        parentReference: { driveId: "d1" },
-      },
-    ];
-
-    const result = await UpdateOrAddPersonaCIDocuments(files as any, []);
+      "owner-hash"
+    );
     expect(result.status).toBe("OK");
-    expect(historyContainer.items.upsert).toHaveBeenCalledTimes(2);
-
-    const firstUpserted = historyContainer.items.upsert.mock.calls[0][0];
-    expect(firstUpserted.userId).toBe(USER_HASH);
-    expect(firstUpserted.type).toBe("PERSONA_CI_DOCUMENT");
+    expect(historyContainer.items.upsert).toHaveBeenCalledTimes(1);
+    const row = historyContainer.items.upsert.mock.calls[0][0];
+    expect(row).toMatchObject({
+      id: result.status === "OK" ? result.response : "",
+      userId: "owner-hash",
+      type: "PERSONA_CI_DOCUMENT",
+      fileName: "file1.csv",
+      externalFile: { documentId: "sp-1", parentReference: { driveId: "d1" } },
+    });
+    expect(row.userId).not.toBe(USER_HASH);
   });
 
-  it("008 accepts exactly 20 Code Interpreter documents", async () => {
-    const files = Array.from({ length: 20 }, (_, index) => ({
-      documentId: `sp-${index}`,
-      name: `file${index}.csv`,
-      createdBy: "user",
-      createdDateTime: "2024-01-01",
-      parentReference: { driveId: "d1" },
-    }));
-
-    const result = await UpdateOrAddPersonaCIDocuments(files as any, []);
-    expect(result.status).toBe("OK");
-    expect(historyContainer.items.upsert).toHaveBeenCalledTimes(20);
-  });
-
-  it("009 rejects more than 20 Code Interpreter documents", async () => {
-    const files = Array.from({ length: 21 }, (_, index) => ({
-      documentId: `sp-${index}`,
-      name: `file${index}.csv`,
-      createdBy: "user",
-      createdDateTime: "2024-01-01",
-      parentReference: { driveId: "d1" },
-    }));
-
-    const result = await UpdateOrAddPersonaCIDocuments(files as any, []);
-    expect(result.status).toBe("ERROR");
-    if (result.status === "ERROR") {
-      expect(result.errors[0].message).toMatch(/maximum is 20/i);
+  it("008 the add, the single delete and the download are no Server Actions", () => {
+    const exported = ciActions as Record<string, unknown>;
+    for (const name of [
+      "UpdateOrAddPersonaCIDocuments",
+      "DeletePersonaCIDocumentById",
+      "DownloadSharePointFile",
+      "DownloadCIDocumentsFromSharePoint",
+    ]) {
+      expect(exported[name]).toBeUndefined();
     }
-    expect(historyContainer.items.upsert).not.toHaveBeenCalled();
   });
 });
 
-// ── DownloadSharePointFile: bounded download (size limit + timeout) ─────────
-describe("DownloadSharePointFile bounds the download", () => {
+// ── downloadCodeInterpreterFile: bounded download (size limit + timeout) ────
+describe("downloadCodeInterpreterFile bounds the download", () => {
   const MB = 1024 * 1024;
   let meta: { status?: number; size: number; mimeType?: string };
   let content: { status?: number; body: Uint8Array; hang?: boolean };
@@ -305,6 +292,7 @@ describe("DownloadSharePointFile bounds the download", () => {
     meta = { size: 4, mimeType: "text/csv" };
     content = { body: new Uint8Array([1, 2, 3, 4]) };
     delete process.env.NEXT_PUBLIC_MAX_PERSONA_CI_DOCUMENT_SIZE;
+    delete process.env.MAX_PERSONA_CI_DOCUMENT_SIZE;
   });
   afterEach(() => {
     vi.unstubAllGlobals();
@@ -312,7 +300,7 @@ describe("DownloadSharePointFile bounds the download", () => {
   });
 
   it("downloads a file with its name and MIME type", async () => {
-    const res = await DownloadSharePointFile("b!drive_1", "01ITEM");
+    const res = await downloadCodeInterpreterFile("b!drive_1", "01ITEM");
     expect(res.status).toBe("OK");
     if (res.status === "OK") {
       expect(res.response.name).toBe("data.csv");
@@ -324,7 +312,7 @@ describe("DownloadSharePointFile bounds the download", () => {
 
   it("refuses a file above 512 MB from its metadata, before any download", async () => {
     meta.size = 512 * MB + 1;
-    const res = await DownloadSharePointFile("b!drive_1", "01ITEM");
+    const res = await downloadCodeInterpreterFile("b!drive_1", "01ITEM");
     expect(res.status).toBe("ERROR");
     if (res.status === "ERROR") expect(res.errors[0].message).toMatch(/larger than 512 MB/);
     expect(contentCalls()).toHaveLength(0);
@@ -332,14 +320,23 @@ describe("DownloadSharePointFile bounds the download", () => {
 
   it("accepts a file of exactly 512 MB by its metadata", async () => {
     meta.size = 512 * MB;
-    const res = await DownloadSharePointFile("b!drive_1", "01ITEM");
+    const res = await downloadCodeInterpreterFile("b!drive_1", "01ITEM");
     expect(res.status).toBe("OK");
+  });
+
+  it("takes the size limit from MAX_PERSONA_CI_DOCUMENT_SIZE first, like the editor", async () => {
+    process.env.MAX_PERSONA_CI_DOCUMENT_SIZE = String(2 * MB);
+    process.env.NEXT_PUBLIC_MAX_PERSONA_CI_DOCUMENT_SIZE = String(600 * MB);
+    meta.size = 3 * MB;
+    const res = await downloadCodeInterpreterFile("b!drive_1", "01ITEM");
+    expect(res.status === "ERROR" && res.errors[0].message).toMatch(/larger than 2 MB/);
+    expect(contentCalls()).toHaveLength(0);
   });
 
   it("stops a download that is larger than its metadata said", async () => {
     process.env.NEXT_PUBLIC_MAX_PERSONA_CI_DOCUMENT_SIZE = "3";
     meta.size = 2;
-    const res = await DownloadSharePointFile("b!drive_1", "01ITEM");
+    const res = await downloadCodeInterpreterFile("b!drive_1", "01ITEM");
     expect(res.status).toBe("ERROR");
   });
 
@@ -351,9 +348,10 @@ describe("DownloadSharePointFile bounds the download", () => {
       return c.signal;
     });
     content.hang = true;
-    const pending = DownloadSharePointFile("b!drive_1", "01ITEM");
+    const pending = downloadCodeInterpreterFile("b!drive_1", "01ITEM");
     await vi.waitFor(() => expect(contentCalls()).toHaveLength(1));
-    expect(timeoutSpy).toHaveBeenLastCalledWith(60_000);
+    // Metadata 5 s, download 60 s.
+    expect(timeoutSpy.mock.calls.map((c) => c[0])).toEqual([5_000, 60_000]);
     controllers[controllers.length - 1].abort();
     const res = await pending;
     expect(res.status).toBe("ERROR");
@@ -361,6 +359,6 @@ describe("DownloadSharePointFile bounds the download", () => {
 
   it.each([403, 404, 500])("fails on Graph %i", async (status) => {
     meta.status = status;
-    expect((await DownloadSharePointFile("b!drive_1", "01ITEM")).status).toBe("ERROR");
+    expect((await downloadCodeInterpreterFile("b!drive_1", "01ITEM")).status).toBe("ERROR");
   });
 });

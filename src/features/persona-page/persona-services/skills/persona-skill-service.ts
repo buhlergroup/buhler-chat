@@ -34,6 +34,7 @@ import {
   skillBlobName,
 } from "./persona-skill-store";
 import { syncLinkedSkill } from "./linked-skill-sync";
+import { updatePersonaRow, withCodeInterpreterOn } from "../persona-row";
 
 const notAllowed = <T,>(): ServerActionResponse<T> => ({
   status: "UNAUTHORIZED",
@@ -110,6 +111,11 @@ export async function UploadPersonaSkill(
         errors: [{ message: `The agent already has the skill "${pkg.name}". Use Replace on it.` }],
       };
     }
+
+    // A skill runs in the code interpreter: switch it on first (the
+    // etag-checked write of the agent files), so a stored skill is never on
+    // an agent without it. When this fails, nothing is stored.
+    if (!(await updatePersonaRow(personaId, withCodeInterpreterOn))) return notFound();
 
     const skillId = replaced?.id ?? uniqueId();
     const blobName = skillBlobName(personaId, skillId);

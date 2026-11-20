@@ -358,3 +358,59 @@ describe("chat-page.unit.search.015 — search and index functions are not Serve
     expect(source).toMatch(/import "server-only";/);
   });
 });
+
+describe("chat-page.unit.search.016 — persona document chunks carry the agent owner's id", () => {
+  it("IndexDocuments sets user = ownerUserId when given", async () => {
+    let uploadedDocs: any[] = [];
+    mockUpload.mockImplementationOnce(async (docs: any[]) => {
+      uploadedDocs = docs;
+      return { results: docs.map(() => ({ succeeded: true })) };
+    });
+    await IndexDocuments(["a", "b"], "f.txt", undefined, "pd-1", "owner-hash");
+    expect(uploadedDocs.map((d) => [d.user, d.personaDocumentId])).toEqual([
+      ["owner-hash", "pd-1"],
+      ["owner-hash", "pd-1"],
+    ]);
+  });
+
+  it("DeleteSearchDocumentByPersonaDocumentId filters by the given owner and deletes by key", async () => {
+    let capturedOptions: any;
+    mockSearch.mockImplementationOnce(async (_t: any, opts: any) => {
+      capturedOptions = opts;
+      return { results: makeSearchResultsGen([{ score: 1, document: { id: "c1" } }, { score: 1, document: { id: "c2" } }]) };
+    });
+    mockDelete.mockResolvedValueOnce({ results: [{ succeeded: true }, { succeeded: true }] } as any);
+    const res = await DeleteSearchDocumentByPersonaDocumentId("pd-1", "owner-hash");
+    expect(res.status).toBe("OK");
+    expect(capturedOptions.filter).toBe("personaDocumentId eq 'pd-1' and user eq 'owner-hash'");
+    expect(mockDelete).toHaveBeenCalledWith("id", ["c1", "c2"]);
+  });
+
+  it("deletes every chunk, also beyond the first page of a search", async () => {
+    const page = (from: number, n: number) =>
+      Array.from({ length: n }, (_, i) => ({ score: 1, document: { id: `c${from + i}` } }));
+    const skips: number[] = [];
+    mockSearch.mockImplementation(async (_t: any, opts: any) => {
+      skips.push(opts.skip);
+      return { results: makeSearchResultsGen(opts.skip === 0 ? page(0, 1000) : page(1000, 5)) };
+    });
+    mockDelete.mockImplementation((async (_key: string, ids: string[]) => ({
+      results: ids.map(() => ({ succeeded: true })),
+    })) as any);
+    const res = await DeleteSearchDocumentByPersonaDocumentId("pd-big", "owner-hash");
+    expect(res.status).toBe("OK");
+    expect(skips).toEqual([0, 1000]);
+    const deleted = (mockDelete.mock.calls as unknown as Array<[string, string[]]>).flatMap((c) => c[1]);
+    expect(deleted).toHaveLength(1005);
+  });
+
+  it("no chunk left is OK; a failed delete is an ERROR", async () => {
+    expect((await DeleteSearchDocumentByPersonaDocumentId("pd-none", "owner-hash")).status).toBe("OK");
+    mockSearch.mockImplementationOnce(async () => ({
+      results: makeSearchResultsGen([{ score: 1, document: { id: "c1" } }]),
+    }));
+    mockDelete.mockResolvedValueOnce({ results: [{ succeeded: false, errorMessage: "busy" }] } as any);
+    const res = await DeleteSearchDocumentByPersonaDocumentId("pd-1", "owner-hash");
+    expect(res).toEqual({ status: "ERROR", errors: [{ message: "busy" }] });
+  });
+});

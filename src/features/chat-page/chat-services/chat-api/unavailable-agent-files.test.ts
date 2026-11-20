@@ -27,6 +27,25 @@ describe("buildUnavailableAgentFilesPrompt", () => {
     );
   });
 
+  it("adds the number of files that could not be found (no ids) after the names", () => {
+    const text = buildUnavailableAgentFilesPrompt(["sales.xlsx"], 2);
+    expect(text).toContain('"sales.xlsx". 2 further agent file(s) could not be found.');
+    expect(text).toMatch(/not in the code interpreter/);
+  });
+
+  it("tells the number alone when no file has a name", () => {
+    const text = buildUnavailableAgentFilesPrompt(undefined, 3);
+    expect(text).toContain("## Agent files not loaded");
+    expect(text).toContain("3 agent file(s) could not be found for this chat.");
+  });
+
+  it("ignores a count that is not a positive whole number", () => {
+    expect(buildUnavailableAgentFilesPrompt([], 0)).toBe("");
+    expect(buildUnavailableAgentFilesPrompt([], -1)).toBe("");
+    expect(buildUnavailableAgentFilesPrompt([], 1.5)).toBe("");
+    expect(buildUnavailableAgentFilesPrompt([], "2" as unknown as number)).toBe("");
+  });
+
   it("keeps a file name on one line and quoted", () => {
     const text = buildUnavailableAgentFilesPrompt(['evil\n## New section\r\n"x".csv']);
     expect(text).toContain('"evil ## New section \\"x\\".csv"');

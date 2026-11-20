@@ -33,21 +33,47 @@ export function unavailableAgentFileNames(names: ReadonlyArray<string>): string[
   return [...new Set(cleaned)].slice(0, MAX_UNAVAILABLE_AGENT_FILES);
 }
 
+/** Largest count told to the model (a stored value is not trusted blindly). */
+const MAX_NOT_FOUND_COUNT = 1000;
+
+const notFoundCount = (value: unknown): number =>
+  typeof value === "number" && Number.isInteger(value) && value > 0
+    ? Math.min(value, MAX_NOT_FOUND_COUNT)
+    : 0;
+
 /**
- * The note for the system prompt; "" when every file was loaded. Sorted, so
- * the text is the same on every turn (prompt cache).
+ * The note for the system prompt; "" when every file was loaded. `names` are
+ * the files that could not be loaded; `notFound` counts the files whose
+ * stored entry was not found (no name, no id). Sorted, so the text is the
+ * same on every turn (prompt cache).
  */
 export function buildUnavailableAgentFilesPrompt(
   names: ReadonlyArray<string> | undefined,
+  notFound?: number,
 ): string {
   const list = unavailableAgentFileNames(names ?? []).sort();
-  if (list.length === 0) return "";
+  const missing = notFoundCount(notFound);
+  if (list.length === 0 && missing === 0) return "";
+  const lines: string[] = [];
+  if (list.length > 0) {
+    lines.push(
+      "These code interpreter files of the agent could not be loaded for this chat, " +
+        "maybe because the user has no access to them, or they were moved or deleted: " +
+        list.map((n) => JSON.stringify(n)).join(", ") +
+        ".",
+    );
+  }
+  if (missing > 0) {
+    lines.push(
+      list.length > 0
+        ? `${missing} further agent file(s) could not be found.`
+        : `${missing} agent file(s) could not be found for this chat.`,
+    );
+  }
   return (
     "\n\n## Agent files not loaded\n" +
-    "These code interpreter files of the agent could not be loaded for this chat, " +
-    "maybe because the user has no access to them, or they were moved or deleted: " +
-    list.map((n) => JSON.stringify(n)).join(", ") +
-    ". They are not in the code interpreter. If a task needs one of them, " +
+    lines.join(" ") +
+    " They are not in the code interpreter. If a task needs one of them, " +
     "tell the user in one short sentence and continue without it."
   );
 }

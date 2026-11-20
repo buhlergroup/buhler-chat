@@ -7,7 +7,7 @@ import "server-only";
  *
  * Always with the token of the CURRENT user (delegated, Files.Read.All), so
  * SharePoint decides who can read the file — the same model as the agent's
- * code interpreter documents (DownloadSharePointFile).
+ * code interpreter documents (downloadCodeInterpreterFile).
  *
  * Only graph.microsoft.com is called: the base URL is fixed here and the ids
  * are checked against the Graph id patterns before they go into the path.

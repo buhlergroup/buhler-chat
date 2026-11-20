@@ -40,13 +40,17 @@ vi.mock("@/features/auth-page/auth-api", () => ({ options: {}, authOptions: {} }
 // ── persona-documents-service mock ──────────────────────────────────────────
 vi.mock("@/features/persona-page/persona-services/persona-documents-service", () => ({
   DeletePersonaDocumentsByPersonaId: vi.fn(async () => ({ status: "OK", response: undefined })),
-  UpdateOrAddPersonaDocuments: vi.fn(async () => ({ status: "OK", response: [] })),
+}));
+vi.mock("@/features/persona-page/persona-services/persona-documents-store", () => ({
+  addSearchDocument: vi.fn(async () => ({ status: "OK", response: "doc" })),
 }));
 
-// ── persona-ci-documents-service mock ───────────────────────────────────────
+// ── persona-ci-documents-service / -store mocks ─────────────────────────────
 vi.mock("@/features/persona-page/persona-services/persona-ci-documents-service", () => ({
   PersonaCIDocumentsByIds: vi.fn(async () => ({ status: "OK", response: [] })),
-  DownloadSharePointFile: vi.fn(async () => ({
+}));
+vi.mock("@/features/persona-page/persona-services/persona-ci-documents-store", () => ({
+  downloadCodeInterpreterFile: vi.fn(async () => ({
     status: "OK",
     response: { buffer: Buffer.from("data"), name: "file.csv", contentType: "text/csv" },
   })),
@@ -81,6 +85,7 @@ vi.mock("@/features/common/services/logger", () => ({
   logInfo: vi.fn(),
   logError: vi.fn(),
   logDebug: vi.fn(),
+  logWarn: vi.fn(),
 }));
 
 // ── imports after mocks ──────────────────────────────────────────────────────
@@ -94,15 +99,11 @@ import {
   CreatePersonaChat,
 } from "./persona-service";
 
-import {
-  DeletePersonaDocumentsByPersonaId,
-  UpdateOrAddPersonaDocuments,
-} from "./persona-documents-service";
+import { DeletePersonaDocumentsByPersonaId } from "./persona-documents-service";
+import { addSearchDocument } from "./persona-documents-store";
 
-import {
-  PersonaCIDocumentsByIds,
-  DownloadSharePointFile,
-} from "./persona-ci-documents-service";
+import { PersonaCIDocumentsByIds } from "./persona-ci-documents-service";
+import { downloadCodeInterpreterFile } from "./persona-ci-documents-store";
 
 import { UploadFileForCodeInterpreter } from "@/features/chat-page/chat-services/code-interpreter-service";
 import { createChatThreadWithServerFiles } from "@/features/chat-page/chat-services/code-interpreter-file-access";
@@ -144,12 +145,11 @@ beforeEach(() => {
   setSession(defaultSession);
 
   // restore default mock implementations after clearAllMocks
-  vi.mocked(UpdateOrAddPersonaDocuments).mockResolvedValue({ status: "OK", response: [] });
   vi.mocked(DeletePersonaDocumentsByPersonaId).mockResolvedValue({ status: "OK", response: undefined });
   vi.mocked(AccessGroupById).mockResolvedValue({ status: "OK", response: { id: "g1", name: "G", description: "" } });
   vi.mocked(UserAccessGroups).mockResolvedValue({ status: "OK", response: [] });
   vi.mocked(PersonaCIDocumentsByIds).mockResolvedValue({ status: "OK", response: [] });
-  vi.mocked(DownloadSharePointFile).mockResolvedValue({
+  vi.mocked(downloadCodeInterpreterFile).mockResolvedValue({
     status: "OK",
     response: { buffer: Buffer.from("data"), name: "file.csv", contentType: "text/csv" },
   });
@@ -222,7 +222,7 @@ describe("persona-service.ts", () => {
     const saved = historyContainer.items.create.mock.calls[0][0];
     expect(saved.personaDocumentIds).toEqual([]);
     expect(saved.codeInterpreterDocumentIds).toEqual([]);
-    expect(UpdateOrAddPersonaDocuments).not.toHaveBeenCalled();
+    expect(addSearchDocument).not.toHaveBeenCalled();
   });
 
   // 005 – FindPersonaByID returns NOT_FOUND when no rows
@@ -399,7 +399,7 @@ describe("persona-service.ts", () => {
     const saved = itemReplace.mock.calls[0][0];
     expect(saved.personaDocumentIds).toEqual(["own-doc"]);
     expect(saved.codeInterpreterDocumentIds).toEqual(["own-ci"]);
-    expect(UpdateOrAddPersonaDocuments).not.toHaveBeenCalled();
+    expect(addSearchDocument).not.toHaveBeenCalled();
   });
 
   it("009d UpsertPersona writes with the etag and, on a conflict, re-reads so a file added meanwhile stays", async () => {
@@ -685,7 +685,7 @@ describe("persona-service.ts", () => {
       ],
     });
 
-    vi.mocked(DownloadSharePointFile)
+    vi.mocked(downloadCodeInterpreterFile)
       .mockResolvedValueOnce({ status: "ERROR", errors: [{ message: "download failed" }] })
       .mockResolvedValueOnce({
         status: "OK",
@@ -724,7 +724,7 @@ describe("persona-service.ts", () => {
         ciDoc("d4", "throws.csv"),
       ],
     });
-    vi.mocked(DownloadSharePointFile)
+    vi.mocked(downloadCodeInterpreterFile)
       .mockResolvedValueOnce({ status: "ERROR", errors: [{ message: "Graph returned 403." }] })
       .mockResolvedValueOnce({
         status: "OK",
@@ -771,6 +771,39 @@ describe("persona-service.ts", () => {
     await CreatePersonaChat("p-chat-ci-all");
     const callArg = vi.mocked(createChatThreadWithServerFiles).mock.calls[0][0] as any;
     expect(callArg.unavailableAgentFiles).toBeUndefined();
+    expect(callArg.notFoundAgentFileCount).toBeUndefined();
+  });
+
+  it("015d CreatePersonaChat counts listed CI ids whose row it cannot get (no ids stored)", async () => {
+    seedPersona({ id: "p-chat-ci-gone", codeInterpreterDocumentIds: ["d1", "gone-1", "gone-2", "gone-1"] });
+    vi.mocked(PersonaCIDocumentsByIds).mockResolvedValueOnce({
+      status: "OK",
+      response: [
+        {
+          id: "d1",
+          fileName: "ok.csv",
+          userId: USER_HASH,
+          source: "SHAREPOINT",
+          type: "PERSONA_CI_DOCUMENT",
+          externalFile: { documentId: "sp-ok", parentReference: { driveId: "drive-1" } },
+        },
+      ],
+    });
+
+    await CreatePersonaChat("p-chat-ci-gone");
+    const callArg = vi.mocked(createChatThreadWithServerFiles).mock.calls[0][0] as any;
+    expect(callArg.notFoundAgentFileCount).toBe(2);
+    expect(callArg.unavailableAgentFiles).toBeUndefined();
+    expect(JSON.stringify(callArg)).not.toMatch(/gone-/);
+  });
+
+  it("015e CreatePersonaChat counts every CI id as not found when the lookup fails", async () => {
+    seedPersona({ id: "p-chat-ci-err", codeInterpreterDocumentIds: ["d1", "d2"] });
+    vi.mocked(PersonaCIDocumentsByIds).mockResolvedValueOnce({ status: "ERROR", errors: [{ message: "x" }] });
+
+    await CreatePersonaChat("p-chat-ci-err");
+    const callArg = vi.mocked(createChatThreadWithServerFiles).mock.calls[0][0] as any;
+    expect(callArg.notFoundAgentFileCount).toBe(2);
   });
 
   // 016 – DeletePersona UNAUTHORIZED when not owner

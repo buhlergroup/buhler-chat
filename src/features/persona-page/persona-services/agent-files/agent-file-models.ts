@@ -155,3 +155,22 @@ export type AddAgentFileResult =
 
 /** Most items one AddAgentFiles call takes (the limits of all uses together). */
 export const MAX_ITEMS_PER_ADD = 70;
+
+/**
+ * RemoveAgentFile: the file is off the agent. `warning` when its stored data
+ * (row, index entries) could not be deleted; the file is no longer used.
+ */
+export interface RemoveAgentFileResult {
+  warning?: string;
+}
+
+/** ChangeAgentFileUse: the new entry, and a warning as for a removal. */
+export interface ChangeAgentFileUseResult {
+  ref: AgentFileRef;
+  use: AgentFileUse;
+  warning?: string;
+}
+
+/** The warning text when the stored data of a removed file stays. */
+export const REMOVED_NOT_CLEANED_WARNING =
+  "The file is removed from the agent and is no longer used. Its stored copy could not be deleted.";

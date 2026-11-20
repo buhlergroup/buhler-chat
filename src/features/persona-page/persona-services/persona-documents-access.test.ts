@@ -72,10 +72,7 @@ vi.mock("@/features/chat-page/chat-services/chat-document-service", () => ({
   ChunkDocumentWithOverlap: vi.fn(),
 }));
 
-import {
-  DeletePersonaDocumentsByPersonaId,
-  UpdateOrAddPersonaDocuments,
-} from "./persona-documents-service";
+import { DeletePersonaDocumentsByPersonaId } from "./persona-documents-service";
 import { DeleteSearchDocumentByPersonaDocumentId } from "@/features/chat-page/chat-services/azure-ai-search/azure-ai-search";
 
 const seedPersona = (overrides: Record<string, any> = {}) => {
@@ -136,22 +133,5 @@ describe("persona documents: DeletePersonaDocumentsByPersonaId needs edit rights
     const result = await DeletePersonaDocumentsByPersonaId("p1");
     expect(result.status).toBe("OK");
     expect(DeleteSearchDocumentByPersonaDocumentId).toHaveBeenCalledTimes(2);
-  });
-});
-
-describe("persona documents: UpdateOrAddPersonaDocuments removes only own documents", () => {
-  it("allowed: an own document is removed from Cosmos and from the search index", async () => {
-    historyItems.push({ id: "own-doc", type: "PERSONA_DOCUMENT", userId: USER_HASH });
-    const result = await UpdateOrAddPersonaDocuments([], ["own-doc"]);
-    expect(result.status).toBe("OK");
-    expect(DeleteSearchDocumentByPersonaDocumentId).toHaveBeenCalledWith("own-doc");
-  });
-
-  it("denied: a document id of another user's agent is skipped, its search entries stay", async () => {
-    historyItems.push({ id: "foreign-doc", type: "PERSONA_DOCUMENT", userId: "owner-hash" });
-    const result = await UpdateOrAddPersonaDocuments([], ["foreign-doc"]);
-    expect(result.status).toBe("OK");
-    expect(deleteCalls).toEqual([["foreign-doc", USER_HASH]]);
-    expect(DeleteSearchDocumentByPersonaDocumentId).not.toHaveBeenCalled();
   });
 });

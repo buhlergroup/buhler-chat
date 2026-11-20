@@ -27,6 +27,8 @@ import {
   type AgentFileRef,
   type AgentFilesList,
   type AgentFileUse,
+  type ChangeAgentFileUseResult,
+  type RemoveAgentFileResult,
 } from "./agent-file-models";
 import {
   addAgentFiles,
@@ -120,13 +122,16 @@ export async function AddAgentFiles(
   }
 }
 
-/** Removes one file or folder from the agent. */
+/**
+ * Removes one file or folder from the agent. OK with a warning when the file
+ * is off the agent but its stored data could not be deleted.
+ */
 export async function RemoveAgentFile(
   personaId: string,
   ref: AgentFileRef,
-): Promise<ServerActionResponse<true>> {
+): Promise<ServerActionResponse<RemoveAgentFileResult>> {
   try {
-    const access = await editAccess<true>(personaId);
+    const access = await editAccess<RemoveAgentFileResult>(personaId);
     if (!isAccess(access)) return access;
     if (!isAgentFileRef(ref)) return failed("Choose a file of this agent.");
     const res = await removeAgentFile(access, { kind: ref.kind, id: ref.id });
@@ -146,9 +151,9 @@ export async function ChangeAgentFileUse(
   personaId: string,
   ref: AgentFileRef,
   use: AgentFileUse,
-): Promise<ServerActionResponse<{ ref: AgentFileRef; use: AgentFileUse }>> {
+): Promise<ServerActionResponse<ChangeAgentFileUseResult>> {
   try {
-    const access = await editAccess<{ ref: AgentFileRef; use: AgentFileUse }>(personaId);
+    const access = await editAccess<ChangeAgentFileUseResult>(personaId);
     if (!isAccess(access)) return access;
     if (!isAgentFileRef(ref)) return failed("Choose a file of this agent.");
     if (!isAgentFileUse(use)) return failed("Choose a use.");
