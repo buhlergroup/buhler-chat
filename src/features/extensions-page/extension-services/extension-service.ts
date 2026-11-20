@@ -11,7 +11,6 @@ import {
   userSession,
 } from "@/features/auth-page/helpers";
 import { saveChatThread } from "@/features/chat-page/chat-services/chat-thread-write";
-import { canUseExtension } from "./extension-access";
 import {
   CHAT_THREAD_ATTRIBUTE,
   ChatThreadModel,
@@ -594,11 +593,12 @@ export const CreateChatWithExtension = async (
 
   if (
     extensionResponse.status === "OK" &&
-    !canUseExtension(await userHashedId(), extensionResponse.response)
+    !(await findUsableExtension({ extensionId, userId: await userHashedId() }))
   ) {
-    // Same answer as for an unknown id (see below): a private extension of
-    // another user stays hidden, and its header secrets never reach this
-    // user's chat.
+    // The extension access rule (decideExtensionAccess) without an agent:
+    // owner or published. Same answer as for an unknown id (see below): a
+    // private extension of another user stays hidden (also for admins), and
+    // its header secrets never reach this user's chat.
     return {
       status: "ERROR",
       errors: [{ message: `Extension not found with id: ${extensionId}` }],

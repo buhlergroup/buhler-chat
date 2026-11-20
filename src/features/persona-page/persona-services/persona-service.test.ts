@@ -529,6 +529,28 @@ describe("persona-service.ts", () => {
     expect(callArg.attachedFiles![0].source).toBe("agent-document");
   });
 
+  // 014b – CreatePersonaChat stores only the agent extensions the chatting
+  // user may use (decideExtensionAccess, integration wiring #203 + #205/#206)
+  it("014b CreatePersonaChat checks the agent's extensions against the chatting user", async () => {
+    seedPersona({
+      id: "p-chat-ext",
+      userId: "agent-owner-hash",
+      isPublished: true,
+      extensionIds: ["e-agent-owner", "e-third-private", "e-third-published"],
+    });
+    historyItems.push(
+      { id: "e-agent-owner", type: "EXTENSION", userId: "agent-owner-hash", isPublished: false },
+      { id: "e-third-private", type: "EXTENSION", userId: "third-hash", isPublished: false },
+      { id: "e-third-published", type: "EXTENSION", userId: "third-hash", isPublished: true },
+    );
+
+    const result = await CreatePersonaChat("p-chat-ext");
+
+    expect(result.status).toBe("OK");
+    const callArg = vi.mocked(UpsertChatThread).mock.calls[0][0] as any;
+    expect(callArg.extension).toEqual(["e-agent-owner", "e-third-published"]);
+  });
+
   // 015 – CreatePersonaChat continues after a single CI doc fails to download
   it("015 CreatePersonaChat continues after a single CI doc fails to download", async () => {
     seedPersona({ id: "p-chat-ci-partial", codeInterpreterDocumentIds: ["d1", "d2"] });

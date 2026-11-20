@@ -55,6 +55,7 @@ import {
 } from "./skills/persona-skill-store";
 import { deleteFileSourcesForPersona } from "./sharepoint-files/sharepoint-file-store";
 import { getCodeInterpreterFileLimit } from "@/features/chat-page/chat-services/code-interpreter-constants";
+import { usableExtensionIdsForAgent } from "@/features/extensions-page/extension-services/extension-runtime";
 
 interface PersonaInput {
   name: string;
@@ -548,13 +549,19 @@ export const CreatePersonaChat = async (
       attachedFiles = [...attachedFiles, ...skillFiles];
     }
 
+    // The agent's extensions, checked against the chatting user with the
+    // extension access rule (decideExtensionAccess): only ids this user may
+    // use enter the thread.
+    const chatUserId = await userHashedId();
+    const extensionIds = await usableExtensionIdsForAgent(persona, chatUserId);
+
     // The attached files are built here on the server (agent documents and
     // skill archives), so the thread is created directly; the UpsertChatThread
     // action would drop code interpreter files it did not record itself.
     const created = await createChatThreadWithServerFiles({
       name: persona.name,
       useName: user.name,
-      userId: await userHashedId(),
+      userId: chatUserId,
       id: uniqueId(),
       createdAt: new Date(),
       lastMessageAt: new Date(),
@@ -564,7 +571,7 @@ export const CreatePersonaChat = async (
       personaMessage: persona.personaMessage,
       personaMessageTitle: persona.name,
       personaId: persona.id,
-      extension: persona.extensionIds || [],
+      extension: extensionIds,
       personaDocumentIds: persona.personaDocumentIds || [],
       attachedFiles: attachedFiles.length > 0 ? attachedFiles : undefined,
       selectedModel: persona.selectedModel as ChatModel | undefined,

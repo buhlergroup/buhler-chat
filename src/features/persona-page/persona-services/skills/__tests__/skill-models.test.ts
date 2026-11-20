@@ -2,8 +2,6 @@ import { describe, it, expect } from "vitest";
 import {
   PersonaSkillModelSchema,
   buildSkillCatalogPrompt,
-  canEditPersonaSkills,
-  canUsePersonaSkills,
   isGraphDriveId,
   isGraphItemId,
   resolveSkillCodeInterpreterFiles,
@@ -12,52 +10,6 @@ import {
   type PersonaSkillModel,
 } from "../skill-models";
 
-const OWNER = "owner-hash";
-const OTHER = "other-hash";
-
-describe("canUsePersonaSkills — same rule as opening the agent", () => {
-  it("owner can always use the skills", () => {
-    expect(canUsePersonaSkills({ userId: OWNER, isPublished: false }, OWNER, false)).toBe(true);
-    expect(
-      canUsePersonaSkills({ userId: OWNER, isPublished: false, accessGroup: { id: "g1" } }, OWNER, false),
-    ).toBe(true);
-  });
-
-  it("other users can use the skills of a published agent", () => {
-    expect(canUsePersonaSkills({ userId: OWNER, isPublished: true }, OTHER, false)).toBe(true);
-  });
-
-  it("other users cannot use the skills of a private agent", () => {
-    expect(canUsePersonaSkills({ userId: OWNER, isPublished: false }, OTHER, false)).toBe(false);
-  });
-
-  it("group-shared agent: members yes, non-members no (even when published)", () => {
-    const shared = { userId: OWNER, isPublished: true, accessGroup: { id: "g1" } };
-    expect(canUsePersonaSkills(shared, OTHER, true)).toBe(true);
-    expect(canUsePersonaSkills(shared, OTHER, false)).toBe(false);
-    expect(canUsePersonaSkills({ ...shared, isPublished: false }, OTHER, true)).toBe(true);
-  });
-
-  it("an empty access group id counts as no group", () => {
-    expect(
-      canUsePersonaSkills({ userId: OWNER, isPublished: true, accessGroup: { id: "" } }, OTHER, false),
-    ).toBe(true);
-  });
-});
-
-describe("canEditPersonaSkills — owner or admin", () => {
-  it("the owner may change skills", () => {
-    expect(canEditPersonaSkills({ userId: OWNER }, OWNER, false)).toBe(true);
-  });
-
-  it("an admin may change skills of any agent", () => {
-    expect(canEditPersonaSkills({ userId: OWNER }, OTHER, true)).toBe(true);
-  });
-
-  it("other users may not", () => {
-    expect(canEditPersonaSkills({ userId: OWNER }, OTHER, false)).toBe(false);
-  });
-});
 
 describe("resolveSkillCodeInterpreterFiles", () => {
   const attached = [
@@ -165,7 +117,7 @@ describe("linked skills (SharePoint)", () => {
   const linked: PersonaSkillModel = {
     id: "s1",
     type: "PERSONA_SKILL",
-    userId: OWNER,
+    userId: "owner-hash",
     personaId: "p1",
     name: "demo",
     description: "Demo.",

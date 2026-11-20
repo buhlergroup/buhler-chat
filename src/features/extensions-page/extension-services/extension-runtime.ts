@@ -171,3 +171,33 @@ export async function findUsableExtension(
   });
   return decision.granted[0]?.extension;
 }
+
+/**
+ * The extension ids of an agent that `userId` may use in a chat with that
+ * agent, in the agent's order: decideExtensionAccess with the agent as the
+ * granting agent (owner, published, or rule 3 "the agent's owner owns it").
+ * CreatePersonaChat stores only these ids on the new thread, so a thread
+ * never carries an extension id the chatting user may not use.
+ */
+export async function usableExtensionIdsForAgent(
+  agent: AgentForAccess,
+  userId: string,
+  deps: Pick<ResolveExtensionsDeps, "findExtensions" | "isGroupMember"> = defaultDeps
+): Promise<string[]> {
+  const extensionIds = agent.extensionIds ?? [];
+  if (extensionIds.length === 0) return [];
+  const decision = await decideExtensionAccess({
+    extensionIds,
+    extensions: await deps.findExtensions(extensionIds),
+    agent,
+    userId,
+    isGroupMember: deps.isGroupMember,
+  });
+  if (decision.denied.length > 0) {
+    logInfo("usableExtensionIdsForAgent: agent extensions left out", {
+      personaId: agent.id,
+      denied: decision.denied,
+    });
+  }
+  return decision.granted.map(({ extension }) => extension.id);
+}

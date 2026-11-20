@@ -5,7 +5,6 @@ import "server-only";
 // code only and must never become a browser-callable action.
 
 import { SqlQuerySpec } from "@azure/cosmos";
-import { userHashedId } from "@/features/auth-page/helpers";
 import { HistoryContainer } from "@/features/common/services/cosmos";
 import { PERSONA_ATTRIBUTE } from "@/features/persona-page/persona-services/models";
 import { EXTENSION_ATTRIBUTE, type ExtensionModel } from "./models";
@@ -41,10 +40,13 @@ export interface ExtensionAccessInput<E> {
 }
 
 /**
- * Can `userId` open this agent? Same gate as the agent list and
- * FindPersonaByID: the owner always; a group-shared agent only for members
- * of that group (also when it is published, as in the agent list); any other
- * agent only when it is published to the whole organization.
+ * Can `userId` open this agent, for rule 3 below? canOpenPersona
+ * (persona-access.ts) without its admin clause: the owner always; a
+ * group-shared agent only for members of that group (also when it is
+ * published, as in the agent list); any other agent only when it is
+ * published to the whole organization. An admin may open any agent, but that
+ * does not give the admin the agent owner's private extensions (and their
+ * secrets) in a chat.
  */
 export async function canOpenAgent(
   agent: AgentForAccess,
@@ -140,32 +142,3 @@ export async function findAgentUnchecked(id: string): Promise<AgentForAccess | n
   const { resources } = await HistoryContainer().items.query<AgentForAccess>(querySpec).fetchAll();
   return resources[0] ?? null;
 }
-
-// ---------------------------------------------------------------------------
-// From PR #206 (fix/access-gaps-followup): the minimal thread rule, kept here
-// so both PRs compile after the merge. The integration wiring commit replaces
-// it with decideExtensionAccess (TODO(#203)).
-// ---------------------------------------------------------------------------
-
-export const canUseExtension = (
-  viewerUserId: string,
-  extension: Pick<ExtensionModel, "userId" | "isPublished">
-): boolean =>
-  extension.isPublished === true || extension.userId === viewerUserId;
-
-/**
- * The extension with this id when the current user may use it, otherwise
- * undefined (also for an unknown id, so the answer does not tell that a
- * private extension exists).
- *
- * TODO(#203): replace with decideExtensionAccess.
- */
-export const findUsableExtension = async (
-  id: string
-): Promise<ExtensionModel | undefined> => {
-  const [extension] = await findExtensionsByIdsUnchecked([id]);
-  if (!extension) return undefined;
-  return canUseExtension(await userHashedId(), extension)
-    ? extension
-    : undefined;
-};

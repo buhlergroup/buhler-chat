@@ -384,6 +384,21 @@ describe("chat-page.unit.thread-service.014 — AddExtensionToChatThread appends
     expect(historyContainer.items.upsert).not.toHaveBeenCalled();
   });
 
+  it("allowed: an extension the thread's agent grants (decideExtensionAccess rule 3)", async () => {
+    // findAgentUnchecked reads the first query result: the agent goes first.
+    historyItems = [
+      { id: "agent-1", type: "PERSONA", userId: "agent-owner", isPublished: true, extensionIds: ["ext-agent"] },
+      { id: "ext-agent", type: "EXTENSION", userId: "agent-owner", isPublished: false },
+    ];
+    historyContainer.item.mockImplementation(() => ({
+      read: vi.fn(async () => ({ resource: makeThread({ extension: [], personaId: "agent-1" }) })),
+    }));
+    const result = await AddExtensionToChatThread({ chatThreadId: "t1", extensionId: "ext-agent" });
+    expect(result.status).toBe("OK");
+    const doc = historyContainer.items.upsert.mock.calls[0][0];
+    expect(doc.extension).toContain("ext-agent");
+  });
+
   it("denied: an unknown extension id is NOT_FOUND", async () => {
     historyItems = [];
     historyContainer.item.mockImplementation(() => ({

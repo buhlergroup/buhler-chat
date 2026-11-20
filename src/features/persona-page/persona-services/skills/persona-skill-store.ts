@@ -23,7 +23,6 @@ import "server-only";
  */
 
 import { SqlQuerySpec } from "@azure/cosmos";
-import { getCurrentUser, userHashedId } from "@/features/auth-page/helpers";
 import { OpenAIV1Instance } from "@/features/common/services/openai";
 import { HistoryContainer } from "@/features/common/services/cosmos";
 import {
@@ -31,14 +30,18 @@ import {
   GetBlob,
 } from "@/features/common/services/azure-storage";
 import { logError, logInfo, logWarn } from "@/features/common/services/logger";
-import { AccessGroupById } from "../access-group-service";
+import {
+  canEditPersona,
+  canOpenPersona,
+  currentPersonaViewer,
+  type PersonaAccessFields,
+  type PersonaViewer,
+} from "../persona-access";
 import { PERSONA_ATTRIBUTE, type PersonaModel } from "../models";
 import type { AttachedFileModel } from "@/features/chat-page/chat-services/models";
 import { UploadFileForCodeInterpreter } from "@/features/chat-page/chat-services/code-interpreter-service";
 import {
   PERSONA_SKILL_ATTRIBUTE,
-  canEditPersonaSkills,
-  canUsePersonaSkills,
   skillArchiveFileName,
   type PersonaSkillModel,
 } from "./skill-models";
@@ -81,6 +84,26 @@ export async function readPersonaRow(personaId: string): Promise<PersonaModel | 
   return resources[0];
 }
 
+/**
+ * Who may USE an agent's skills: everyone who can open the agent. The one
+ * agent rule, canOpenPersona (owner, admin, share-group member, or everyone
+ * for a published agent without a share group).
+ */
+export const canUsePersonaSkills = (
+  viewer: PersonaViewer,
+  persona: PersonaAccessFields,
+  isGroupMember?: (groupId: string) => Promise<boolean>,
+): Promise<boolean> => canOpenPersona(viewer, persona, isGroupMember);
+
+/**
+ * Who may ADD, REPLACE or DELETE skills: the same rule as editing the agent
+ * itself, canEditPersona (owner or admin).
+ */
+export const canEditPersonaSkills = (
+  viewer: PersonaViewer,
+  persona: Pick<PersonaAccessFields, "userId">,
+): boolean => canEditPersona(viewer, persona);
+
 export interface SkillAccess {
   persona: PersonaModel;
   currentUserId: string;
@@ -92,22 +115,12 @@ export interface SkillAccess {
 export async function resolveSkillAccess(personaId: string): Promise<SkillAccess | undefined> {
   const persona = await readPersonaRow(personaId);
   if (!persona) return undefined;
-  const currentUserId = await userHashedId();
-  const { isAdmin } = await getCurrentUser();
-  let isMember = false;
-  if (
-    persona.userId !== currentUserId &&
-    persona.accessGroup &&
-    persona.accessGroup.id !== ""
-  ) {
-    const group = await AccessGroupById(persona.accessGroup.id);
-    isMember = group.status === "OK";
-  }
+  const viewer = await currentPersonaViewer();
   return {
     persona,
-    currentUserId,
-    canUse: canUsePersonaSkills(persona, currentUserId, isMember),
-    canEdit: canEditPersonaSkills(persona, currentUserId, Boolean(isAdmin)),
+    currentUserId: viewer.userId,
+    canUse: await canUsePersonaSkills(viewer, persona),
+    canEdit: canEditPersonaSkills(viewer, persona),
   };
 }
 
