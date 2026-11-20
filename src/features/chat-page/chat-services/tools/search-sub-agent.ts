@@ -4,7 +4,7 @@ import { z } from "zod";
 import { tool } from "ai";
 import { logInfo, logError } from "@/features/common/services/logger";
 import { FindAllPersonaForCurrentUser } from "@/features/persona-page/persona-services/persona-service";
-import { allowedSubAgentIds, type ToolContext } from "./tool-context";
+import type { ToolContext } from "./tool-context";
 
 /**
  * AI SDK v5 tool for searching available sub-agents by keyword.
@@ -12,10 +12,10 @@ import { allowedSubAgentIds, type ToolContext } from "./tool-context";
  * JSON Schema matches function-registry.ts `search_sub_agent` definition
  * exactly for prompt-cache stability.
  */
-export function searchSubAgentTool(ctx: ToolContext) {
+export function searchSubAgentTool(_ctx: ToolContext) {
   return tool({
     description:
-      "Search the specialized agents (personas) configured as sub-agents of this chat. " +
+      "Search for available specialized agents (personas) the user has access to. " +
       "Pass a topic keyword (e.g. 'python', 'docs', 'kubernetes') to narrow results, " +
       "or pass an empty string / '*' / 'all' to list every available agent. " +
       "Returns matching agents with their id, name, and description. " +
@@ -38,10 +38,6 @@ export function searchSubAgentTool(ctx: ToolContext) {
         throw new Error("Failed to search for agents. Please try again.");
       }
 
-      // Lists only what call_sub_agent accepts: the configured sub-agents
-      // that the user may open.
-      const allowed = allowedSubAgentIds(ctx);
-
       const rawQuery = args.query?.trim() ?? "";
       const isListAll =
         rawQuery === "" ||
@@ -50,7 +46,6 @@ export function searchSubAgentTool(ctx: ToolContext) {
       const query = rawQuery.toLowerCase();
 
       const matchingAgents = allPersonasResponse.response
-        .filter((persona) => allowed.has(persona.id))
         .filter((persona) => {
           if (isListAll) return true;
           const nameMatch = persona.name.toLowerCase().includes(query);

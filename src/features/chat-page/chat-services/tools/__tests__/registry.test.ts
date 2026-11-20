@@ -182,21 +182,18 @@ describe("buildToolset – conditional tool inclusion", () => {
     expect(Object.keys(toolset)).toContain("search_sub_agent");
   });
 
-  // Pinned: the model may delegate only to configured sub-agents. Without
-  // any, neither sub-agent tool exists, so no agent id the model picks (or
-  // that tool output suggests) can be called.
-  it("excludes sub-agent tools when subAgentIds is empty", async () => {
+  it("ALSO includes sub-agent tools when subAgentIds is empty — any persona can be called", async () => {
     const ctx = makeCtx({ defaultTools: {}, subAgentIds: [], depth: 0 });
     const toolset = await buildToolset(ctx);
-    expect(Object.keys(toolset)).not.toContain("call_sub_agent");
-    expect(Object.keys(toolset)).not.toContain("search_sub_agent");
+    expect(Object.keys(toolset)).toContain("call_sub_agent");
+    expect(Object.keys(toolset)).toContain("search_sub_agent");
   });
 
-  it("excludes sub-agent tools when subAgentIds is undefined", async () => {
+  it("ALSO includes sub-agent tools when subAgentIds is undefined — discovery via search_sub_agent", async () => {
     const ctx = makeCtx({ defaultTools: {}, depth: 0 });
     const toolset = await buildToolset(ctx);
-    expect(Object.keys(toolset)).not.toContain("call_sub_agent");
-    expect(Object.keys(toolset)).not.toContain("search_sub_agent");
+    expect(Object.keys(toolset)).toContain("call_sub_agent");
+    expect(Object.keys(toolset)).toContain("search_sub_agent");
   });
 
   it("excludes sub-agent tools at depth >= 2 (recursion guard)", async () => {

@@ -11,7 +11,7 @@ import { getCurrentTimeTool } from "./get-current-time";
 import { extensionTool } from "./extension-tool";
 import { buildExtensionToolKey } from "./tool-key";
 import { mcpExtensionTools } from "./mcp-tool";
-import { allowedSubAgentIds, type ToolContext } from "./tool-context";
+import type { ToolContext } from "./tool-context";
 import { compareByCodepoint } from "./stabilize-toolset";
 
 export { buildExtensionToolKey } from "./tool-key";
@@ -50,15 +50,17 @@ export async function buildToolset(
   // datetime on demand instead of baking it into the (cache-sensitive) prompt.
   entries.push(["get_current_time", getCurrentTimeTool(ctx)]);
 
-  // Sub-agent tools only for the configured sub-agents (subject to the
-  // recursion guard). The model chooses `agent_id`, and tool output (for
-  // example from a Remote MCP server) can steer that choice; a sub-agent runs
-  // with its own extensions. So `call_sub_agent` accepts only ids in
-  // `ctx.subAgentIds` (FindPersonaByID still checks access), and
-  // `search_sub_agent` lists only those. Without configured sub-agents
-  // neither tool is registered.
-  const includeSubAgentTools =
-    (ctx.depth ?? 0) < 2 && allowedSubAgentIds(ctx).size > 0;
+  // Sub-agent tools are always available (subject to the recursion
+  // guard). There is no "fixed assignment" — any persona the user has
+  // access to can be called as a sub-agent. `search_sub_agent` lets
+  // the model discover candidates via `FindAllPersonaForCurrentUser`;
+  // `call_sub_agent` resolves the chosen id via `FindPersonaByID`,
+  // which enforces access control. Hiding the tools when the thread
+  // doesn't pre-declare `subAgentIds` was a #37 regression — it
+  // prevented discovery entirely. The #37 root cause was a test-fake
+  // race (inline-emitted tool result fighting a local `execute`); in
+  // production these are pure custom tools owned only by us.
+  const includeSubAgentTools = (ctx.depth ?? 0) < 2;
 
   if (includeSubAgentTools) {
     entries.push(["call_sub_agent", callSubAgentTool(ctx)]);

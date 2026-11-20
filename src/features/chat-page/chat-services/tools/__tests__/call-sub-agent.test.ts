@@ -260,7 +260,7 @@ describe("callSubAgentTool – execute", () => {
       errors: [{ message: "not found" }],
     });
 
-    const t = callSubAgentTool(makeCtx({ subAgentIds: ["nonexistent"] }));
+    const t = callSubAgentTool(makeCtx());
     await expect(
       (t as any).execute(
         { agent_id: "nonexistent", task: "task" },
@@ -332,37 +332,54 @@ describe("callSubAgentTool — the sub-agent's own extensions", () => {
 });
 
 // Pinned: the model chooses agent_id, and tool output (for example from a
-// Remote MCP server) can steer it. Only the configured sub-agents may run,
-// because a sub-agent runs with its own extensions.
-describe("callSubAgentTool — only configured sub-agents", () => {
+// Remote MCP server) can steer it. Any agent the user can open may still be
+// called (discovery), but only a configured sub-agent runs with its own
+// extensions; below a discovered agent no extensions are resolved either.
+describe("callSubAgentTool — extensions only for configured sub-agents", () => {
   beforeEach(() => {
     vi.clearAllMocks();
-    mockFindPersonaByID.mockResolvedValue({ status: "OK", response: { ...FAKE_PERSONA, id: "other-agent" } });
+    mockFindPersonaByID.mockResolvedValue({
+      status: "OK",
+      response: { ...FAKE_PERSONA, id: "other-agent", extensionIds: ["mcp-1"], subAgentIds: ["grandchild"] },
+    });
     mockGenerateText.mockResolvedValue({ text: "ok", usage: {} });
+    mockResolveExtensions.mockResolvedValue([{ extension: { id: "mcp-1" }, headerSecrets: {} }]);
   });
 
   it.each([
     ["an id outside the list", ["agent-1"]],
     ["an empty list", []],
     ["no list", undefined],
-  ])("refuses an agent the user can open but that is not configured (%s)", async (_label, subAgentIds) => {
+  ])("runs a discovered agent (%s) without extensions and without configured sub-agents", async (_label, subAgentIds) => {
+    const { buildToolset } = await import("../registry");
     const t = callSubAgentTool(makeCtx({ subAgentIds: subAgentIds as string[] | undefined }));
-    await expect(
-      (t as any).execute({ agent_id: "other-agent", task: "task" }, { abortSignal: undefined })
-    ).rejects.toThrow(/is not a sub-agent of this chat/);
+    const result = await (t as any).execute({ agent_id: "other-agent", task: "task" }, { abortSignal: undefined });
 
-    expect(mockFindPersonaByID).not.toHaveBeenCalled();
+    expect(result.response).toBe("ok");
+    expect(mockFindPersonaByID).toHaveBeenCalledWith("other-agent");
     expect(mockResolveExtensions).not.toHaveBeenCalled();
-    expect(mockGenerateText).not.toHaveBeenCalled();
+    const subCtx = vi.mocked(buildToolset).mock.calls.at(-1)![0];
+    expect(subCtx.extensions).toEqual([]);
+    expect(subCtx.subAgentIds).toEqual([]);
   });
 
-  it("runs an agent from the configured list", async () => {
+  it("runs a configured sub-agent with its own extensions and sub-agents", async () => {
+    const { buildToolset } = await import("../registry");
     const t = callSubAgentTool(makeCtx({ subAgentIds: ["agent-1", "other-agent"] }));
-    const result = await (t as any).execute(
-      { agent_id: "other-agent", task: "task" },
-      { abortSignal: undefined }
-    );
-    expect(mockFindPersonaByID).toHaveBeenCalledWith("other-agent");
-    expect(result.response).toBe("ok");
+    await (t as any).execute({ agent_id: "other-agent", task: "task" }, { abortSignal: undefined });
+
+    expect(mockResolveExtensions).toHaveBeenCalledWith({ extensionIds: ["mcp-1"], personaId: "other-agent" });
+    const subCtx = vi.mocked(buildToolset).mock.calls.at(-1)![0];
+    expect(subCtx.extensions).toEqual([{ extension: { id: "mcp-1" }, headerSecrets: {} }]);
+    expect(subCtx.subAgentIds).toEqual(["grandchild"]);
+  });
+
+  it("still refuses an agent the user cannot open", async () => {
+    mockFindPersonaByID.mockResolvedValue({ status: "NOT_FOUND", errors: [{ message: "not found" }] });
+    const t = callSubAgentTool(makeCtx({ subAgentIds: [] }));
+    await expect(
+      (t as any).execute({ agent_id: "hidden-agent", task: "task" }, { abortSignal: undefined })
+    ).rejects.toThrow(/not found or you do not have access/);
+    expect(mockResolveExtensions).not.toHaveBeenCalled();
   });
 });

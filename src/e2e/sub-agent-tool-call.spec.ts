@@ -12,12 +12,25 @@ const FINAL_ANSWER =
 const TOOL_LABEL = "Call sub agent";
 
 test.describe("sub-agent-tool-call", () => {
-  // `call_sub_agent` is registered only on a thread with configured
-  // sub-agents (see `includeSubAgentTools` in chat-services/tools/registry.ts).
-  // This bare thread has none, so no local `execute` exists and the inline
-  // `providerExecuted` tool-result the fake provider emits is what renders, the
-  // same path as tool-call.spec.ts. The model cannot reach a real sub-agent
-  // from a thread without configured sub-agents.
+  // Why this spec asserts the widget and not a scripted success payload:
+  //
+  // `call_sub_agent` is registered on EVERY thread (see the `includeSubAgentTools`
+  // block in chat-services/tools/registry.ts — hiding it behind `subAgentIds` was
+  // the #37 regression). Because a real `execute` exists, the AI SDK runs it and
+  // its result wins over the inline `providerExecuted` tool-result the fake
+  // provider emits — the "inline-emitted tool result fighting a local execute"
+  // race that registry.ts documents. Scripting a fake success body for this tool
+  // therefore cannot work; the real tool runs, calls FindPersonaByID(agent-123),
+  // finds nothing and throws.
+  //
+  // That is genuine product behaviour worth pinning: delegating to an agent the
+  // user cannot see must surface as a finished Error widget, never as an
+  // eternally-running one (the state mapping in tool-part-view.tsx).
+  //
+  // Tools that are only registered conditionally (e.g. `search_documents`) have
+  // no local execute on a bare thread, so their inline result survives — that is
+  // where scripted tool OUTPUT rendering is covered, in
+  // tool-execution-error.spec.ts. The two specs together cover both paths.
   test("call_sub_agent renders the tool widget and the parent's final answer", async ({
     page,
   }) => {
@@ -25,7 +38,8 @@ test.describe("sub-agent-tool-call", () => {
     await scriptToolCall(page, {
       toolName: "call_sub_agent",
       args: { agent_id: SUB_AGENT_ID, task: TASK },
-      result: { response: "Q3 sales grew.", summary: "Done" },
+      // Ignored: the real call_sub_agent execute wins the race (see above).
+      result: { note: "superseded by the real tool execution" },
       finalText: FINAL_ANSWER,
     });
 
@@ -43,10 +57,11 @@ test.describe("sub-agent-tool-call", () => {
     // Tool widget header renders exactly once, under the user-facing label.
     await expect(page.getByText(TOOL_LABEL, { exact: true })).toHaveCount(1);
 
-    // No local execute ran: the widget does not settle into the Error state.
+    // The failed delegation settles into the Error state rather than hanging
+    // in "Running" forever.
     await expect(
       page.getByRole("button", { name: `${TOOL_LABEL} Error` }),
-    ).toHaveCount(0);
+    ).toBeVisible({ timeout: 5_000 });
 
     // Exactly one assistant bubble — no orphan from tool-role messages.
     await expect(page.locator(".is-assistant")).toHaveCount(1, {

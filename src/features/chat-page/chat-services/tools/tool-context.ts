@@ -40,9 +40,9 @@ export interface ToolContext {
     personaId?: string;
   }>;
   /**
-   * IDs of sub-agents (child personas) this thread can invoke: the only ids
-   * `call_sub_agent` accepts and `search_sub_agent` lists. When empty or
-   * undefined the sub-agent tools are NOT registered.
+   * IDs of the sub-agents (child personas) configured on this thread or
+   * agent. `call_sub_agent` can reach any agent the user can open, but only
+   * these run with their own extensions.
    */
   subAgentIds?: string[];
   /**
@@ -54,10 +54,10 @@ export interface ToolContext {
 }
 
 /**
- * The agent ids a context may delegate to: the sub-agents configured on the
- * thread (or, one level down, on the calling agent). The model picks
- * `agent_id`, and tool output can steer the model, so an id outside this set
- * is refused even when the user could open that agent.
+ * The configured sub-agents of a context: those on the thread (or, one level
+ * down, on the calling agent). The model picks `agent_id`, and tool output
+ * can steer the model, so an agent outside this set runs without extensions
+ * even when the user can open it.
  */
 export function allowedSubAgentIds(ctx: Pick<ToolContext, "subAgentIds">): ReadonlySet<string> {
   return new Set((ctx.subAgentIds ?? []).filter((id) => typeof id === "string" && id.length > 0));
