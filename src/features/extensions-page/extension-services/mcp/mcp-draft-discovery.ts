@@ -117,7 +117,8 @@ export async function discoverDraftMcpTools(
   }
 
   // Value rules of save: a mask only on a row this extension stores, with
-  // the same placement; every other row needs a typed value.
+  // the same placement and the same URL origin; every other row needs a
+  // typed value.
   const { config, plan } = planMcpConfig(
     stored?.id ?? "draft",
     { url: url.data, transport: transport.data, secrets, toolAllowList: [], auth: "none" },

@@ -44,11 +44,21 @@ export function planHeaders(
   return { headers, plan };
 }
 
+/** True when both values parse as URLs with the same scheme, host and port. */
+function sameOrigin(a: string, b: string): boolean {
+  try {
+    return new URL(a).origin === new URL(b).origin;
+  } catch {
+    return false;
+  }
+}
+
 /**
  * Remote MCP settings. Header rows follow the header rules above. The
  * discovered tool list is server-managed: taken from the stored extension,
  * never from the browser, and cleared when URL, transport or auth mode
- * change. OAuth tokens need no reset here: they are stored per user with
+ * change. A kept (masked) header value or OAuth client secret is refused
+ * when the URL origin changes. OAuth tokens need no reset here: they are stored per user with
  * the server URL they were issued for and are ignored for another URL.
  */
 export function planMcpConfig(
@@ -59,6 +69,10 @@ export function planMcpConfig(
 ): { config: McpConfigModel; plan: SecretPlan; connectionChanged: boolean } {
   const plan = emptyPlan();
   const storedSecrets = new Map((stored?.secrets ?? []).map((s) => [s.id, s]));
+  // A kept (masked) secret was entered for the stored server. When the URL
+  // points to another origin it must be entered again; otherwise anyone who
+  // may edit the extension could send it to a host of their choice.
+  const originChanged = !!stored && !sameOrigin(stored.url, input.url);
 
   const secrets = input.secrets.map((s) => {
     const previous = s.id ? storedSecrets.get(s.id) : undefined;
@@ -73,6 +87,7 @@ export function planMcpConfig(
     if (s.value === KEY_VAULT_MASK) {
       if (!previous) plan.errors.push(`Enter a value for header ${label}`);
       else if (previous.placement !== s.placement) plan.errors.push(`Enter a new value for header ${label}`);
+      else if (originChanged) plan.errors.push(`The server address changed. Enter the value for header ${label} again.`);
     } else if (!s.value) {
       plan.errors.push(`Enter a value for header ${label}`);
     } else {
@@ -96,6 +111,9 @@ export function planMcpConfig(
     const clientSecretInput = input.oauth?.clientSecret ?? "";
     let clientSecret: string | undefined;
     if (clientSecretInput === KEY_VAULT_MASK) {
+      if (stored?.oauth?.clientSecret && originChanged) {
+        plan.errors.push("The server address changed. Enter the OAuth client secret again.");
+      }
       clientSecret = stored?.oauth?.clientSecret ? KEY_VAULT_MASK : undefined;
     } else if (clientSecretInput) {
       plan.writes.push({ name: names.clientSecret, value: clientSecretInput });

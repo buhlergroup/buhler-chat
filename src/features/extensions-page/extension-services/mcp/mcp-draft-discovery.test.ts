@@ -130,7 +130,7 @@ describe("discoverDraftMcpTools", () => {
     const result = await discoverDraftMcpTools(
       draft({
         extensionId: "ext1",
-        url: "https://other.example.test/mcp",
+        url: "https://mcp.example.test/v2/mcp",
         secrets: [
           { id: "row1", name: "X-Team-Renamed", target: "X-Team-Renamed", placement: "header", value: KEY_VAULT_MASK },
           { id: "new1", name: "X-Extra", target: "X-Extra", placement: "header", value: "fake-extra" },
@@ -141,9 +141,29 @@ describe("discoverDraftMcpTools", () => {
     expect(result.status).toBe("OK");
     expect(load).toHaveBeenCalledWith("ext1");
     expect(fakeStore.get).toHaveBeenCalledWith("row1");
-    expect(seen[0].url).toBe("https://other.example.test/mcp");
+    expect(seen[0].url).toBe("https://mcp.example.test/v2/mcp");
     expect(seen[0].headers).toEqual({ "X-Team-Renamed": FAKE_SAVED, "X-Extra": "fake-extra" });
     expect(JSON.stringify(result)).not.toContain(FAKE_SAVED);
+  });
+
+  // Pinned: a saved value is used only for the origin it was saved for. With
+  // another origin the row must be typed again, before any Key Vault read or
+  // request.
+  it("refuses a masked row when the URL origin changes", async () => {
+    const result = await discoverDraftMcpTools(
+      draft({
+        extensionId: "ext1",
+        url: "https://other.example.test/mcp",
+        secrets: [{ id: "row1", name: "X-Team", target: "X-Team", placement: "header", value: KEY_VAULT_MASK }],
+      }),
+      deps()
+    );
+    expect(result).toEqual({
+      status: "ERROR",
+      errors: [{ message: "The server address changed. Enter the value for header X-Team again." }],
+    });
+    expect(fakeStore.get).not.toHaveBeenCalled();
+    expect(seen).toHaveLength(0);
   });
 
   it("refuses a user who may not edit the extension, before any request", async () => {

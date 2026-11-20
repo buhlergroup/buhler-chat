@@ -177,6 +177,76 @@ describe("planMcpConfig", () => {
   });
 });
 
+// Pinned: a kept (masked) secret was entered for the stored server. When the
+// URL origin changes it must be typed again, so an editor cannot send it to
+// another host.
+describe("planMcpConfig — kept secrets and a new URL origin", () => {
+  const stored = () =>
+    baseMcp({
+      secrets: [{ id: "s1", name: "X-Api-Key", target: "X-Api-Key", value: MASK, placement: "header" }],
+      auth: "oauth",
+      oauth: { clientId: "cid", clientSecret: MASK },
+    });
+
+  it.each([
+    "https://other.example.com/mcp",
+    "https://mcp.example.com:8443/mcp",
+    "http://mcp.example.com/mcp",
+  ])("refuses a masked header and a masked client secret for %s", (url) => {
+    const { plan } = planMcpConfig(
+      "ext1",
+      baseMcp({
+        url,
+        secrets: [{ id: "s1", name: "X-Api-Key", target: "X-Api-Key", value: MASK, placement: "header" }],
+        auth: "oauth",
+        oauth: { clientId: "cid", clientSecret: MASK },
+      }),
+      stored(),
+      newId
+    );
+    expect(plan.errors).toEqual([
+      "The server address changed. Enter the value for header X-Api-Key again.",
+      "The server address changed. Enter the OAuth client secret again.",
+    ]);
+  });
+
+  it("keeps masked values when only the path changes", () => {
+    const { plan, config } = planMcpConfig(
+      "ext1",
+      baseMcp({
+        url: "https://mcp.example.com/v2/mcp",
+        secrets: [{ id: "s1", name: "X-Api-Key", target: "X-Api-Key", value: MASK, placement: "header" }],
+        auth: "oauth",
+        oauth: { clientId: "cid", clientSecret: MASK },
+      }),
+      stored(),
+      newId
+    );
+    expect(plan.errors).toEqual([]);
+    expect(plan.writes).toEqual([]);
+    expect(config.oauth?.clientSecret).toBe(MASK);
+  });
+
+  it("accepts values typed again for the new origin", () => {
+    const { plan } = planMcpConfig(
+      "ext1",
+      baseMcp({
+        url: "https://other.example.com/mcp",
+        secrets: [{ id: "s1", name: "X-Api-Key", target: "X-Api-Key", value: "fake-new", placement: "header" }],
+        auth: "oauth",
+        oauth: { clientId: "cid", clientSecret: "fake-cs-new" },
+      }),
+      stored(),
+      newId
+    );
+    expect(plan.errors).toEqual([]);
+    expect(plan.writes).toEqual([
+      { name: "s1", value: "fake-new" },
+      { name: "ext1-mcp-oauth-cs", value: "fake-cs-new" },
+    ]);
+  });
+});
+
 describe("extensionSecretNames", () => {
   it("lists header, MCP secret and OAuth entries for delete", () => {
     expect(
