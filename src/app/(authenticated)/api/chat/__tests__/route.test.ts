@@ -5,6 +5,7 @@ vi.mock("server-only", () => ({}));
 // Agent skills: no skills in these tests (the store would reach Cosmos).
 vi.mock("@/features/persona-page/persona-services/skills/persona-skill-store", () => ({
   loadUsableSkills: vi.fn(async () => []),
+  loadUsableSkillsWithStatus: vi.fn(async () => ({ skills: [], unavailable: [] })),
   readSkillFile: vi.fn(),
 }));
 vi.mock("@/features/common/services/logger", () => ({

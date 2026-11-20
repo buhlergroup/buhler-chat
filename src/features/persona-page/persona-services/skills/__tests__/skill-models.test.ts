@@ -1,10 +1,15 @@
 import { describe, it, expect } from "vitest";
 import {
+  PersonaSkillModelSchema,
   buildSkillCatalogPrompt,
   canEditPersonaSkills,
   canUsePersonaSkills,
+  isGraphDriveId,
+  isGraphItemId,
   resolveSkillCodeInterpreterFiles,
   skillArchiveFileName,
+  toSkillSummary,
+  type PersonaSkillModel,
 } from "../skill-models";
 
 const OWNER = "owner-hash";
@@ -144,5 +149,75 @@ describe("buildSkillCatalogPrompt", () => {
 
   it("names the code interpreter archive after the skill", () => {
     expect(skillArchiveFileName("example-skill")).toBe("skill-example-skill.zip");
+  });
+
+  it("names skills the user cannot read in SharePoint, without their description", () => {
+    const text = buildSkillCatalogPrompt([{ name: "alpha", description: "First" }], ["secret-skill"]);
+    expect(text).toContain("- alpha: First");
+    expect(text).toMatch(/not available in this chat.*secret-skill/);
+    const only = buildSkillCatalogPrompt([], ["secret-skill"]);
+    expect(only).toContain("## Skills");
+    expect(only).not.toContain("load_skill");
+  });
+});
+
+describe("linked skills (SharePoint)", () => {
+  const linked: PersonaSkillModel = {
+    id: "s1",
+    type: "PERSONA_SKILL",
+    userId: OWNER,
+    personaId: "p1",
+    name: "demo",
+    description: "Demo.",
+    skillMd: "x",
+    rootPrefix: "",
+    files: [],
+    zipFileName: "demo.zip",
+    zipBytes: 1,
+    uncompressedBytes: 1,
+    blobName: "b",
+    source: {
+      kind: "sharepoint",
+      driveId: "b!AbC_d-1",
+      itemId: "01ABCDEF",
+      webUrl: "https://example.sharepoint.com/sites/x/demo.zip",
+      name: "demo.zip",
+      version: "c1",
+      lastModifiedDateTime: "2026-11-18T09:00:00Z",
+      size: 1,
+      syncError: { version: "c2", message: "SKILL.md is missing.", at: "2026-11-18T10:00:00Z" },
+    },
+    createdAt: new Date(),
+    updatedAt: new Date(),
+  };
+
+  it("accepts Graph-shaped ids and refuses anything that could change the URL", () => {
+    expect(isGraphDriveId("b!AbC_d-1")).toBe(true);
+    expect(isGraphItemId("01ABCDEF")).toBe(true);
+    expect(isGraphItemId("D4648F06C91D9D3D!54927")).toBe(true);
+    for (const bad of ["", "a/b", "../x", "a?b", "a%2Fb", "a.b", "a b", "x".repeat(300)]) {
+      expect(isGraphDriveId(bad)).toBe(false);
+      expect(isGraphItemId(bad)).toBe(false);
+    }
+  });
+
+  it("the row schema refuses a non-https link", () => {
+    expect(PersonaSkillModelSchema.safeParse(linked).success).toBe(true);
+    const bad = { ...linked, source: { ...linked.source!, webUrl: "javascript:alert(1)" } };
+    expect(PersonaSkillModelSchema.safeParse(bad).success).toBe(false);
+  });
+
+  it("the editor summary shows source, link, date and the sync error, but no ids", () => {
+    const summary = toSkillSummary(linked);
+    expect(summary.source).toEqual({
+      kind: "sharepoint",
+      fileName: "demo.zip",
+      webUrl: "https://example.sharepoint.com/sites/x/demo.zip",
+      lastModifiedDateTime: "2026-11-18T09:00:00Z",
+      syncError: "SKILL.md is missing.",
+    });
+    expect(JSON.stringify(summary)).not.toContain("b!AbC_d-1");
+    const { source: _s, ...uploaded } = linked;
+    expect(toSkillSummary(uploaded).source).toBeUndefined();
   });
 });

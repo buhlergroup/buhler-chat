@@ -17,6 +17,9 @@ import "server-only";
  *     default "agent-skills"; infra/resources.bicep creates it).
  *   - Azure OpenAI files: one copy of each skill version's zip for the code
  *     interpreter, uploaded on first use; its id is cached on the row.
+ *   - Linked skills (SharePoint) are stored the same way; each chat request
+ *     checks their file once and stores a new version when it changed
+ *     (linked-skill-sync.ts).
  */
 
 import { SqlQuerySpec } from "@azure/cosmos";
@@ -40,6 +43,11 @@ import {
   type PersonaSkillModel,
 } from "./skill-models";
 import { readSkillZipFile } from "./skill-zip";
+import {
+  syncLinkedSkills,
+  type LinkedSkillDeps,
+  type SyncedSkills,
+} from "./linked-skill-sync";
 
 /**
  * Private blob container for skill packages (no public access). The name
@@ -125,29 +133,49 @@ export async function querySkillsByPersonaId(personaId: string): Promise<Persona
   return [...resources].sort(byName);
 }
 
+/** Storage helpers the SharePoint sync needs (passed in, no import cycle). */
+export const linkedSkillDeps = (): LinkedSkillDeps => ({
+  blobContainer: skillBlobContainer(),
+  newBlobName: skillBlobName,
+  deleteOpenAiFile: deleteSkillOpenAiFile,
+});
+
 /**
  * The skills the CURRENT user may use on this agent: all of them when the
- * user can open the agent, none otherwise. Never throws: a failure means
- * "no skills", so a broken skill store cannot break a chat.
+ * user can open the agent, none otherwise. Skills linked to SharePoint are
+ * checked here, once per call, with the user's token: brought to the newest
+ * version, or left out (and named in `unavailable`) when SharePoint does not
+ * let this user read the file. Never throws: a failure means "no skills", so
+ * a broken skill store cannot break a chat.
  */
-export async function loadUsableSkills(personaId: string | undefined): Promise<PersonaSkillModel[]> {
-  if (!personaId) return [];
+export async function loadUsableSkillsWithStatus(
+  personaId: string | undefined,
+): Promise<SyncedSkills> {
+  const none: SyncedSkills = { skills: [], unavailable: [] };
+  if (!personaId) return none;
   try {
     const skills = await querySkillsByPersonaId(personaId);
-    if (skills.length === 0) return [];
+    if (skills.length === 0) return none;
     const access = await resolveSkillAccess(personaId);
     if (!access?.canUse) {
       logWarn("agent skills: user may not use this agent's skills", { personaId });
-      return [];
+      return none;
     }
-    return skills;
+    if (!skills.some((s) => s.source)) return { skills, unavailable: [] };
+    const { token } = await getCurrentUser();
+    return await syncLinkedSkills(skills, token, linkedSkillDeps(), access.currentUserId);
   } catch (error) {
     logError("agent skills: failed to load skills", {
       personaId,
       error: error instanceof Error ? error.message : String(error),
     });
-    return [];
+    return none;
   }
+}
+
+/** loadUsableSkillsWithStatus without the names of unavailable skills. */
+export async function loadUsableSkills(personaId: string | undefined): Promise<PersonaSkillModel[]> {
+  return (await loadUsableSkillsWithStatus(personaId)).skills;
 }
 
 /** Deletes every skill (rows and blobs) of an agent. Best effort. */
@@ -269,11 +297,13 @@ export async function deleteSkillOpenAiFile(fileId: string | undefined): Promise
 }
 
 /** Reads the current row, so a concurrent writer's file id is seen. */
-async function readSkillRow(skill: PersonaSkillModel): Promise<PersonaSkillModel | undefined> {
+async function readSkillRow(
+  skill: PersonaSkillModel,
+): Promise<(PersonaSkillModel & { _etag?: string }) | undefined> {
   try {
     const { resource } = await HistoryContainer()
       .item(skill.id, skill.userId)
-      .read<PersonaSkillModel>();
+      .read<PersonaSkillModel & { _etag?: string }>();
     return resource ?? undefined;
   } catch {
     return undefined;
@@ -326,10 +356,45 @@ export async function ensureSkillOpenAiFile(
     skill.openAiFileId = current.openAiFileId;
     return current.openAiFileId;
   }
-  await HistoryContainer().items.upsert<PersonaSkillModel>({
-    ...current,
-    openAiFileId: newId,
-  });
+  // Only when the row is still the one read above: a linked skill can get a
+  // new version from a parallel chat, which this write must not undo.
+  let base = current;
+  for (let attempt = 0; ; attempt++) {
+    try {
+      await HistoryContainer()
+        .item(base.id, base.userId)
+        .replace<PersonaSkillModel>(
+          { ...base, openAiFileId: newId },
+          base._etag
+            ? { accessCondition: { type: "IfMatch", condition: base._etag } }
+            : undefined,
+        );
+      break;
+    } catch (error) {
+      const code =
+        (error as { code?: number })?.code ?? (error as { statusCode?: number })?.statusCode;
+      if (code !== 412 && code !== 404) throw error;
+      const latest = code === 412 ? await readSkillRow(skill) : undefined;
+      // Same version, still no file id (another field changed, e.g. a sync
+      // note): store this upload on the newer row.
+      if (
+        latest &&
+        attempt === 0 &&
+        latest.blobName === skill.blobName &&
+        !latest.openAiFileId
+      ) {
+        base = latest;
+        continue;
+      }
+      await deleteSkillOpenAiFile(newId);
+      if (!latest) return undefined;
+      if (latest.blobName === skill.blobName && latest.openAiFileId) {
+        skill.openAiFileId = latest.openAiFileId;
+        return latest.openAiFileId;
+      }
+      return ensureSkillOpenAiFile(latest);
+    }
+  }
   skill.openAiFileId = newId;
   logInfo("agent skills: archive uploaded for code interpreter", {
     skill: skill.name,
