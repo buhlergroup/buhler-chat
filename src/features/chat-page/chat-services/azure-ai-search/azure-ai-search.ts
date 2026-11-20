@@ -1,5 +1,8 @@
-"use server";
 import "server-only";
+
+// Server code only. Not a "use server" module: the functions here take raw
+// filters and ids, so none of them may be a Server Action. The client indexes
+// chat documents through IndexChatDocuments in chat-document-service.
 
 import { userHashedId } from "@/features/auth-page/helpers";
 import { ServerActionResponse } from "@/features/common/server-action-response";

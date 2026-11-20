@@ -339,3 +339,22 @@ describe("chat-page.unit.search.014 — filters quote the values they contain", 
     );
   });
 });
+
+describe("chat-page.unit.search.015 — search and index functions are not Server Actions", () => {
+  it("azure-ai-search.ts has no \"use server\" directive", async () => {
+    const { readFileSync } = await import("node:fs");
+    const { resolve } = await import("node:path");
+    // vitest runs from src/ (vitest.config.ts).
+    const source = readFileSync(
+      resolve(
+        process.cwd(),
+        "features/chat-page/chat-services/azure-ai-search/azure-ai-search.ts"
+      ),
+      "utf8"
+    );
+    // Every export of a "use server" module is a Server Action that any
+    // signed-in browser can call with its own arguments.
+    expect(source).not.toMatch(/^\s*(\/\/[^\n]*\n\s*)*["']use server["']/);
+    expect(source).toMatch(/import "server-only";/);
+  });
+});

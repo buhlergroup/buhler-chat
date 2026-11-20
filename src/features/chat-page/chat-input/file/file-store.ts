@@ -6,10 +6,10 @@ import {
   showSuccess,
 } from "@/features/globals/global-message-store";
 import { proxy, useSnapshot } from "valtio";
-import { IndexDocuments } from "../../chat-services/azure-ai-search/azure-ai-search";
 import {
   CrackDocument,
   CreateChatDocument,
+  IndexChatDocuments,
 } from "../../chat-services/chat-document-service";
 import { SupportedFileExtensionsInputImages, AttachedFileModel } from "../../chat-services/models";
 import {
@@ -183,7 +183,7 @@ class FileStore {
           }`;
 
           // index one document at a time
-          const indexResponses = await IndexDocuments(
+          const indexResponses = await IndexChatDocuments(
             [doc],
             file.name,
             chatThreadId
