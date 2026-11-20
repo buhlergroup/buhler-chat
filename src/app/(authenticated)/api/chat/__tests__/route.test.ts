@@ -463,12 +463,13 @@ describe("/api/chat route (AI SDK v6)", () => {
     });
 
     it("in an agent chat keeps the current skill file and drops other ids", async () => {
-      const { loadUsableSkills } = await import(
+      const { loadUsableSkillsWithStatus } = await import(
         "@/features/persona-page/persona-services/skills/persona-skill-store"
       );
-      (loadUsableSkills as unknown as ReturnType<typeof vi.fn>).mockResolvedValueOnce([
-        { name: "demo", description: "d", openAiFileId: "file-skill-v2" },
-      ]);
+      (loadUsableSkillsWithStatus as unknown as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
+        skills: [{ name: "demo", description: "d", openAiFileId: "file-skill-v2" }],
+        unavailable: [],
+      });
       mockLoadThreadContext.mockResolvedValue({
         ...structuredClone(ciCtx),
         thread: { ...ciCtx.thread, personaId: "p1" },

@@ -103,7 +103,7 @@ export async function fetchLinkedSkillZip(
     }
     const buf = await downloadDriveItem(token, driveId, itemId, SKILL_LIMITS.maxZipBytes);
     try {
-      return { ok: true, meta, buf, pkg: validateSkillZip(buf) };
+      return { ok: true, meta, buf, pkg: await validateSkillZip(buf) };
     } catch (error) {
       if (error instanceof SkillZipError) {
         return { ok: false, reason: "invalid", message: error.message, meta };

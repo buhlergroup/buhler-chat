@@ -23,6 +23,7 @@ import "server-only";
  */
 
 import { SqlQuerySpec } from "@azure/cosmos";
+import { getCurrentUser } from "@/features/auth-page/helpers";
 import { OpenAIV1Instance } from "@/features/common/services/openai";
 import { HistoryContainer } from "@/features/common/services/cosmos";
 import {

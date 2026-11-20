@@ -547,7 +547,7 @@ describe("persona-service.ts", () => {
     const result = await CreatePersonaChat("p-chat-ext");
 
     expect(result.status).toBe("OK");
-    const callArg = vi.mocked(UpsertChatThread).mock.calls[0][0] as any;
+    const callArg = vi.mocked(createChatThreadWithServerFiles).mock.calls[0][0] as any;
     expect(callArg.extension).toEqual(["e-agent-owner", "e-third-published"]);
   });
 
