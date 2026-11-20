@@ -6,6 +6,10 @@ import {
   zodErrorsToServerActionErrors,
 } from "@/features/common/server-action-response";
 import { getGraphClient } from "../../common/services/microsoft-graph-client";
+import {
+  GraphBatchRequest,
+  postGraphBatches,
+} from "@/features/common/services/microsoft-graph-batch";
 import { getCurrentUser, userHashedId } from "@/features/auth-page/helpers";
 import {
   DocumentMetadata,
@@ -82,7 +86,7 @@ export async function DocumentDetails(
 
     const { token } = await getCurrentUser();
     const client = getGraphClient(token);
-    const body = CreateDocumentDetailBody(documents, [
+    const requests = CreateDocumentDetailRequests(documents, [
       "id",
       "name",
       "createdBy",
@@ -90,10 +94,17 @@ export async function DocumentDetails(
       "parentReference",
       "size",
     ]);
-    const response = await client.api("/$batch").post(body);
+    // Graph takes at most 20 requests per batch: sent in chunks.
+    const batch = await postGraphBatches(client, requests);
+    if (requests.length > 0 && batch.failedIds.length === requests.length) {
+      throw batch.errors[0];
+    }
 
     let successful: DocumentMetadata[] = [];
-    let unsuccessful: { documentId: string }[] = [];
+    // A document of a failed chunk has no answer: it counts as unsuccessful.
+    let unsuccessful: { documentId: string }[] = batch.failedIds.map(
+      (documentId) => ({ documentId })
+    );
     let sizeToBig: DocumentMetadata[] = [];
 
     // Create a map to look up the original document by SharePoint documentId
@@ -102,7 +113,7 @@ export async function DocumentDetails(
       documentIdMap.set(doc.documentId, doc);
     }
 
-    for (const responseItem of response.responses) {
+    for (const responseItem of batch.responses) {
       if (responseItem.status === 200) {
         const document = responseItem.body;
         // Get the original document to preserve its id
@@ -369,11 +380,16 @@ export const AuthorizedDocuments = async (
   try {
     const { token } = await getCurrentUser();
     const client = getGraphClient(token);
-    const body = CreateDocumentDetailBody(documents, ["id"]);
-    const response = await client.api("/$batch").post(body);
+    // Graph takes at most 20 requests per batch: sent in chunks. Only a 200
+    // answer allows a document; a document of a failed chunk is not allowed,
+    // the documents of the other chunks still are.
+    const batch = await postGraphBatches(
+      client,
+      CreateDocumentDetailRequests(documents, ["id"])
+    );
 
     let allowed: string[] = [];
-    response.responses.map((responseItem: any) => {
+    batch.responses.forEach((responseItem) => {
       if (responseItem.status === 200) {
         allowed.push(
           documents.find((doc) => doc.documentId === responseItem.id)?.id || ""
@@ -419,20 +435,17 @@ export const AllowedPersonaDocumentIds = async (
   }
 };
 
-const CreateDocumentDetailBody = (
+const CreateDocumentDetailRequests = (
   documents: SharePointFile[],
   filters: string[]
-) => {
-  return {
-    requests: documents.map((document) => ({
-      id: document.documentId,
-      method: "GET",
-      url: `/drives/${document.parentReference.driveId}/items/${
-        document.documentId
-      }?$select=${filters.join(",")}`,
-    })),
-  };
-};
+): GraphBatchRequest[] =>
+  documents.map((document) => ({
+    id: document.documentId,
+    method: "GET",
+    url: `/drives/${document.parentReference.driveId}/items/${
+      document.documentId
+    }?$select=${filters.join(",")}`,
+  }));
 
 const AddOrUpdatePersonaDocuments = async (
   sharePointFiles: SharePointFile[],
