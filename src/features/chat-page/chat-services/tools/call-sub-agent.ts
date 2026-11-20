@@ -4,7 +4,7 @@ import { z } from "zod";
 import { tool, generateText, isStepCount } from "ai";
 import { logInfo, logDebug, logError } from "@/features/common/services/logger";
 import { FindPersonaByID } from "@/features/persona-page/persona-services/persona-service";
-import { MODEL_CONFIGS, DEFAULT_MODEL, type ChatModel } from "../models";
+import { MODEL_CONFIGS, DEFAULT_MODEL, normalizeChatModelId, type ChatModel } from "../models";
 import { resolveProvider } from "../models/provider-seam";
 import { resolveMaxOutputTokens } from "../models/max-output-tokens";
 import { resolveReasoningEffort } from "../models/reasoning-effort";
@@ -68,7 +68,8 @@ export function callSubAgentTool(ctx: ToolContext) {
 
       // Resolve model
       const modelId =
-        (persona.selectedModel as ChatModel | undefined) ?? DEFAULT_MODEL;
+        (normalizeChatModelId(persona.selectedModel) as ChatModel | undefined) ??
+        DEFAULT_MODEL;
       const modelConfig = MODEL_CONFIGS[modelId];
       if (!modelConfig?.deploymentName) {
         throw new Error(
