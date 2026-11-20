@@ -92,7 +92,6 @@ import {
   UpdateOrAddPersonaDocuments,
 } from "./persona-documents-service";
 import {
-  PersonaCIDocumentById,
   PersonaCIDocumentsByIds,
   UpdateOrAddPersonaCIDocuments,
 } from "./persona-ci-documents-service";
@@ -196,16 +195,16 @@ describe("PersonaDocumentById checks type and access", () => {
   });
 });
 
-describe("PersonaCIDocumentById checks type and access", () => {
+describe("PersonaCIDocumentsByIds checks type and access", () => {
   it("returns NOT_FOUND for a document of another type with that id", async () => {
     store.push({ id: "ext1", userId: OTHER, type: "EXTENSION" });
-    expect((await PersonaCIDocumentById("ext1")).status).toBe("NOT_FOUND");
+    expect(await PersonaCIDocumentsByIds(["ext1"])).toEqual({ status: "OK", response: [] });
   });
 
   it("returns NOT_FOUND for a document of an agent the caller cannot open", async () => {
     store.push(ciDoc("ci1", OTHER));
     store.push(persona("p1", OTHER, { codeInterpreterDocumentIds: ["ci1"] }));
-    expect((await PersonaCIDocumentById("ci1")).status).toBe("NOT_FOUND");
+    expect(await PersonaCIDocumentsByIds(["ci1"])).toEqual({ status: "OK", response: [] });
   });
 
   it("PersonaCIDocumentsByIds returns only documents of agents the caller can open", async () => {

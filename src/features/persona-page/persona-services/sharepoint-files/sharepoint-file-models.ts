@@ -134,10 +134,3 @@ export const supportedExtensionsText = (): string =>
     .map((e) => `.${e.toLowerCase()}`)
     .join(", ");
 
-/** File extensions for the SharePoint picker ("Add file"). */
-export const pickerFileFilters = (): string[] =>
-  [
-    ...CODE_INTERPRETER_SUPPORTED_EXTENSIONS,
-    ...CONVERTED_TO_JPEG_EXTENSIONS,
-    ...PREVIEW_ONLY_EXTENSIONS,
-  ].map((e) => `.${e.toLowerCase()}`);

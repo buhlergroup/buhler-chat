@@ -43,13 +43,22 @@ vi.mock("../chat-page/chat-header/extension-detail", () => ({
   ExtensionDetail: () => <div data-testid="extension-detail" />,
 }));
 
-vi.mock("./persona-documents/persona-documents", () => ({
-  PersonaDocuments: () => <div data-testid="persona-documents" />,
+// The Files section reports whether the agent's files need the code
+// interpreter; the test decides the answer.
+const { filesNeedCodeInterpreter } = vi.hoisted(() => ({
+  filesNeedCodeInterpreter: { value: false },
 }));
-
-vi.mock("./persona-documents/code-interpreter-documents", () => ({
-  CodeInterpreterDocuments: () => <div data-testid="ci-documents" />,
-}));
+vi.mock("./persona-files/persona-files", async () => {
+  const React = await import("react");
+  return {
+    PersonaFiles: (props: any) => {
+      React.useEffect(() => {
+        props.onNeedsCodeInterpreterChange?.(filesNeedCodeInterpreter.value);
+      }, [props.personaId]);
+      return <div data-testid="persona-files" data-persona-id={props.personaId} />;
+    },
+  };
+});
 
 vi.mock("./persona-access-group/persona-access-group", () => ({
   PersonaAccessGroup: (props: any) => (
@@ -86,7 +95,66 @@ import { usePersonaState } from "./persona-store";
 describe("persona-page.unit.components.001/002 — AddNewPersona", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    filesNeedCodeInterpreter.value = false;
     (usePersonaState as any).mockReturnValue({ ...mockPersonaState });
+  });
+
+  it("shows one Files section instead of the four old file sections (decision 1)", () => {
+    (usePersonaState as any).mockReturnValue({
+      ...mockPersonaState,
+      persona: { ...mockPersonaState.persona, id: "p1" },
+    });
+    render(<AddNewPersona extensions={[]} personas={[]} />);
+    expect(screen.getByTestId("persona-files").dataset.personaId).toBe("p1");
+    expect(screen.queryByText("Agent Documents")).not.toBeInTheDocument();
+    expect(screen.queryByText("Code Interpreter Documents")).not.toBeInTheDocument();
+    expect(screen.queryByText("Skills")).not.toBeInTheDocument();
+    expect(screen.queryByText("SharePoint files for the model")).not.toBeInTheDocument();
+  });
+
+  it("sends no file ids with the form (decision 8)", () => {
+    const { container } = render(<AddNewPersona extensions={[]} personas={[]} />);
+    const names = Array.from(container.ownerDocument.querySelectorAll("input[type=hidden]")).map(
+      (i) => (i as HTMLInputElement).name,
+    );
+    expect(names).not.toContain("personaDocumentIds");
+    expect(names).not.toContain("ciDocumentIds");
+    expect(names).not.toContain("selectedSharePointDocumentIds");
+    expect(names).not.toContain("selectedCIDocumentIds");
+  });
+
+  it("keeps the code interpreter on and locked while the files need it (decision 6)", async () => {
+    filesNeedCodeInterpreter.value = true;
+    (usePersonaState as any).mockReturnValue({
+      ...mockPersonaState,
+      persona: { ...mockPersonaState.persona, id: "p1", defaultTools: { codeInterpreter: false } },
+    });
+    render(<AddNewPersona extensions={[]} personas={[]} />);
+    const box = screen.getByRole("checkbox", { name: "Code Interpreter" }) as HTMLInputElement;
+    await waitFor(() => expect(box.checked).toBe(true));
+    expect(box.disabled).toBe(true);
+    expect(screen.getByText("The files of this agent need the code interpreter.")).toBeInTheDocument();
+    const hidden = document.querySelector("input[name=defaultTools]") as HTMLInputElement;
+    expect(JSON.parse(hidden.value)).toMatchObject({ codeInterpreter: true });
+  });
+
+  it("leaves the code interpreter free when no file needs it", () => {
+    render(<AddNewPersona extensions={[]} personas={[]} />);
+    const box = screen.getByRole("checkbox", { name: "Code Interpreter" }) as HTMLInputElement;
+    expect(box.disabled).toBe(false);
+    expect(screen.queryByText("The files of this agent need the code interpreter.")).not.toBeInTheDocument();
+  });
+
+  it("the hidden id follows the agent in the store (the editor stays open after the first save)", () => {
+    const { rerender } = render(<AddNewPersona extensions={[]} personas={[]} />);
+    const id = () => (document.querySelector("input[name=id]") as HTMLInputElement).value;
+    expect(id()).toBe("");
+    (usePersonaState as any).mockReturnValue({
+      ...mockPersonaState,
+      persona: { ...mockPersonaState.persona, id: "new-id" },
+    });
+    rerender(<AddNewPersona extensions={[]} personas={[]} />);
+    expect(id()).toBe("new-id");
   });
 
   it("renders the Agent sheet when isOpened is true", () => {

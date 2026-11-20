@@ -33,15 +33,6 @@ import {
 } from "@/features/common/services/sharepoint/graph-drive";
 import { checkPersonaEdit } from "./persona-access";
 
-/**
- * Get a Code Interpreter persona document by ID
- */
-export const PersonaCIDocumentById = async (
-  id: string
-): Promise<ServerActionResponse<PersonaCIDocument>> => {
-  return FindCIDocumentForCurrentUser(id);
-};
-
 const FindCIDocumentForCurrentUser = async (
   id: string,
   cache?: PersonaAccessCache
