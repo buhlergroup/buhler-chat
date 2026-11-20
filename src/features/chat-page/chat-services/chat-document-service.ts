@@ -9,12 +9,18 @@ import { ServerActionResponse } from "@/features/common/server-action-response";
 import { DocumentIntelligenceInstance } from "@/features/common/services/document-intelligence";
 import { uniqueId } from "@/features/common/util";
 import { SqlQuerySpec } from "@azure/cosmos";
-import { EnsureIndexIsCreated } from "./azure-ai-search/azure-ai-search";
+import {
+  EnsureIndexIsCreated,
+  IndexDocuments,
+} from "./azure-ai-search/azure-ai-search";
+import { isValidId } from "@/features/common/odata-filter";
 import { logDebug, logError } from "@/features/common/services/logger";
 import { RestError } from "@azure/storage-blob";
 import {
   CHAT_DOCUMENT_ATTRIBUTE,
+  CHAT_THREAD_ATTRIBUTE,
   ChatDocumentModel,
+  ChatThreadModel,
   SupportedFileExtensionsDocumentIntellicence,
   SupportedFileExtensionsTextFiles,
 } from "./models";
@@ -293,6 +299,51 @@ export const CreateChatDocument = async (
       ],
     };
   }
+};
+
+/**
+ * Indexes the text chunks of a file the user attached to one of their own
+ * chat threads. The chunks are stored for the current user and that thread
+ * only; they never belong to a persona document.
+ */
+export const IndexChatDocuments = async (
+  docs: string[],
+  fileName: string,
+  chatThreadId: string
+): Promise<Array<ServerActionResponse<boolean>>> => {
+  const invalid = (message: string): Array<ServerActionResponse<boolean>> => [
+    { status: "ERROR", errors: [{ message }] },
+  ];
+
+  if (
+    !Array.isArray(docs) ||
+    !docs.every((doc) => typeof doc === "string") ||
+    typeof fileName !== "string"
+  ) {
+    return invalid("Invalid document");
+  }
+
+  if (!isValidId(chatThreadId)) {
+    return invalid("Chat thread not found");
+  }
+
+  try {
+    const { resource } = await HistoryContainer()
+      .item(chatThreadId, await userHashedId())
+      .read<ChatThreadModel>();
+
+    if (
+      !resource ||
+      resource.type !== CHAT_THREAD_ATTRIBUTE ||
+      resource.isDeleted
+    ) {
+      return invalid("Chat thread not found");
+    }
+  } catch (e) {
+    return invalid(`${e}`);
+  }
+
+  return IndexDocuments(docs, fileName, chatThreadId);
 };
 
 export async function ChunkDocumentWithOverlap(

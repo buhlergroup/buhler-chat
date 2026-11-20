@@ -1,5 +1,8 @@
-"use server";
 import "server-only";
+
+// Server code only. Not a "use server" module: the functions here take raw
+// filters and ids, so none of them may be a Server Action. The client indexes
+// chat documents through IndexChatDocuments in chat-document-service.
 
 import { userHashedId } from "@/features/auth-page/helpers";
 import { ServerActionResponse } from "@/features/common/server-action-response";
@@ -11,6 +14,7 @@ import { OpenAIEmbeddingInstance } from "@/features/common/services/openai";
 import { uniqueId } from "@/features/common/util";
 import { AzureKeyCredential, SearchClient, SearchIndex } from "@azure/search-documents";
 import { logDebug, logError } from "@/features/common/services/logger";
+import { odataEq } from "@/features/common/odata-filter";
 
 export interface AzureSearchDocumentIndex {
   id: string;
@@ -138,7 +142,7 @@ export const PersonaDocumentExistsInIndex = async (
 ): Promise<ServerActionResponse<AzureSearchDocumentIndex>> => {
   const result = await SimpleSearch(
     personaDocumentId,
-    `personaDocumentId eq '${personaDocumentId}'`
+    odataEq("personaDocumentId", personaDocumentId)
   );
 
   if (result.status === "OK") {
@@ -413,7 +417,7 @@ export const DeleteDocumentsOfChatThread = async (
     // find all documents for chat thread
     const documentsInChatResponse = await SimpleSearch(
       undefined,
-      `chatThreadId eq '${chatThreadId} and userid eq '${await userHashedId()}'`
+      `${odataEq("chatThreadId", chatThreadId)} and ${odataEq("user", await userHashedId())}`
     );
 
     if (documentsInChatResponse.status === "OK") {
@@ -465,7 +469,7 @@ export const DeleteSearchDocumentByPersonaDocumentId = async (
     // Find the document using personaDocumentId
     const documentResponse = await SimpleSearch(
       undefined,
-      `personaDocumentId eq '${personaDocumentId}' and user eq '${await userHashedId()}'`
+      `${odataEq("personaDocumentId", personaDocumentId)} and ${odataEq("user", await userHashedId())}`
     );
 
     if (

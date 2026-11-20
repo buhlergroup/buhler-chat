@@ -403,16 +403,18 @@ export const UpsertChatThread = async (
 };
 
 export const CreateChatThread = async (options?: {
-  id?: string;
   name?: string;
   temporary?: boolean;
 }): Promise<ServerActionResponse<ChatThreadModel>> => {
   try {
+    const userId = await userHashedId();
     const modelToSave: ChatThreadModel = {
       name: options?.name ?? NEW_CHAT_NAME,
       useName: (await userSession())!.name,
-      userId: await userHashedId(),
-      id: options?.id ?? uniqueId(),
+      userId,
+      // The server chooses the id. The temporary chat of a user has one fixed
+      // id: the user id.
+      id: options?.temporary ? userId : uniqueId(),
       createdAt: new Date(),
       lastMessageAt: new Date(),
       bookmarked: false,

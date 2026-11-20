@@ -2,6 +2,7 @@
 import "server-only";
 import { getGraphClient } from "../../common/services/microsoft-graph-client";
 import { getCurrentUser } from "@/features/auth-page/helpers";
+import { odataEq } from "@/features/common/odata-filter";
 import { AccessGroup } from "@/features/persona-page/persona-services/models";
 import { ServerActionResponse } from "@/features/common/server-action-response";
 import { SESSION_EXPIRED_ERROR_CODE } from "@/features/common/error-codes";
@@ -126,7 +127,7 @@ export async function AccessGroupById(
 
     const response = await client
       .api(`/me/memberOf/`)
-      .filter(`id eq '${accessGroupId}'`)
+      .filter(odataEq("id", accessGroupId))
       .select("id,displayName,description")
       .get();
 
