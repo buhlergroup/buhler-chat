@@ -133,6 +133,8 @@ describe("persona-ci-documents-service.ts", () => {
     const result = await DeletePersonaCIDocumentById("ci-del");
     expect(result.status).toBe("OK");
     expect(deleteSpy).toHaveBeenCalledTimes(1);
+    // The delete runs in the caller's own partition, so only own docs go.
+    expect(historyContainer.item).toHaveBeenCalledWith("ci-del", USER_HASH);
   });
 
   // 005 – DeletePersonaCIDocumentById ERROR on Cosmos throw

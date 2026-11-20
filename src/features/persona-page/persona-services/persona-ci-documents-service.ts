@@ -95,13 +95,17 @@ export const PersonaCIDocumentsByIds = async (
 };
 
 /**
- * Delete a Code Interpreter persona document by ID
+ * Delete a Code Interpreter persona document by ID.
+ *
+ * The delete runs in the caller's partition (/userId), so a user can delete
+ * only CI documents that the user created. An id of another user's document
+ * is not found there and the delete fails.
  */
 export const DeletePersonaCIDocumentById = async (
   id: string
 ): Promise<ServerActionResponse<boolean>> => {
   try {
-    await HistoryContainer().item(id, id).delete();
+    await HistoryContainer().item(id, await userHashedId()).delete();
     return { status: "OK", response: true };
   } catch (error) {
     return {
