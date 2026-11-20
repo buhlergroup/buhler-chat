@@ -2,7 +2,8 @@
 import "server-only";
 
 /**
- * Server actions for agent skills (the agent editor calls these).
+ * Server actions for agent skills (the Files section of the agent editor
+ * calls these; linking a SharePoint zip is in link-sharepoint-skill.ts).
  *
  * Rules for this file: every export is an async function and nothing is
  * re-exported (a re-export in a "use server" file resolves to undefined in
@@ -19,9 +20,6 @@ import {
   PERSONA_SKILL_ATTRIBUTE,
   PersonaSkillModelSchema,
   SKILL_LIMITS,
-  isGraphDriveId,
-  isGraphItemId,
-  toNoAccessSkillSummary,
   toSkillSummary,
   type PersonaSkillModel,
   type PersonaSkillSummary,
@@ -35,14 +33,7 @@ import {
   skillBlobContainer,
   skillBlobName,
 } from "./persona-skill-store";
-import {
-  buildSharePointSource,
-  canReadLinkedSkill,
-  fetchLinkedSkillZip,
-  packageFields,
-  syncLinkedSkill,
-} from "./linked-skill-sync";
-import { rememberDriveItemVersion } from "@/features/common/services/sharepoint/drive-item-check-cache";
+import { syncLinkedSkill } from "./linked-skill-sync";
 
 const notAllowed = <T,>(): ServerActionResponse<T> => ({
   status: "UNAUTHORIZED",
@@ -53,49 +44,6 @@ const notFound = <T,>(): ServerActionResponse<T> => ({
   status: "NOT_FOUND",
   errors: [{ message: "Agent not found." }],
 });
-
-/**
- * Lists the skills of an agent for everyone who can open the agent, and
- * tells the editor whether the current user may change them. A viewer who
- * is not owner or admin sees a linked skill whose SharePoint file they
- * cannot read with its name only (checked with the viewer's token, through
- * the same cached check as chats).
- */
-export async function FindPersonaSkills(
-  personaId: string,
-): Promise<ServerActionResponse<{ skills: PersonaSkillSummary[]; canEdit: boolean }>> {
-  try {
-    const access = await resolveSkillAccess(personaId);
-    if (!access) return notFound();
-    if (!access.canUse) {
-      return { status: "UNAUTHORIZED", errors: [{ message: "You do not have access to this agent." }] };
-    }
-    const skills = await querySkillsByPersonaId(personaId);
-    if (access.canEdit || !skills.some((s) => s.source)) {
-      return {
-        status: "OK",
-        response: { skills: skills.map(toSkillSummary), canEdit: access.canEdit },
-      };
-    }
-    const { token } = await getCurrentUser();
-    const readable = await Promise.all(
-      skills.map((s) => canReadLinkedSkill(s, token, access.currentUserId)),
-    );
-    return {
-      status: "OK",
-      response: {
-        skills: skills.map((s, i) => (readable[i] ? toSkillSummary(s) : toNoAccessSkillSummary(s))),
-        canEdit: false,
-      },
-    };
-  } catch (error) {
-    logError("agent skills: list failed", {
-      personaId,
-      error: error instanceof Error ? error.message : String(error),
-    });
-    return { status: "ERROR", errors: [{ message: "Could not load the skills." }] };
-  }
-}
 
 /**
  * Adds a skill from a .zip, or replaces one (`replaceSkillId`).
@@ -216,102 +164,6 @@ export async function UploadPersonaSkill(
     return { status: "OK", response: toSkillSummary(model) };
   } catch (error) {
     logError("agent skills: upload failed", {
-      personaId,
-      error: error instanceof Error ? error.message : String(error),
-    });
-    return { status: "ERROR", errors: [{ message: "The skill could not be saved." }] };
-  }
-}
-
-/**
- * Adds a skill linked to a .zip in SharePoint / OneDrive. Chats then use the
- * newest version of that file (see linked-skill-sync.ts). Owner/admin only.
- * The file is read with the current user's token and validated like an
- * upload; the client sends only the drive and item id, everything else
- * (name, link, version) comes from Graph.
- */
-export async function LinkPersonaSkillFromSharePoint(input: {
-  personaId: string;
-  driveId: string;
-  itemId: string;
-}): Promise<ServerActionResponse<PersonaSkillSummary>> {
-  const personaId = typeof input?.personaId === "string" ? input.personaId : "";
-  if (!personaId) return { status: "ERROR", errors: [{ message: "Save the agent first." }] };
-  if (!isGraphDriveId(input.driveId) || !isGraphItemId(input.itemId)) {
-    return { status: "ERROR", errors: [{ message: "Choose a .zip file from SharePoint." }] };
-  }
-  const { driveId, itemId } = input;
-
-  try {
-    const access = await resolveSkillAccess(personaId);
-    if (!access) return notFound();
-    if (!access.canEdit) return notAllowed();
-
-    const existing = await querySkillsByPersonaId(personaId);
-    if (existing.length >= SKILL_LIMITS.maxSkillsPerAgent) {
-      return {
-        status: "ERROR",
-        errors: [{ message: `An agent can have up to ${SKILL_LIMITS.maxSkillsPerAgent} skills.` }],
-      };
-    }
-    if (existing.some((s) => s.source?.driveId === driveId && s.source.itemId === itemId)) {
-      return { status: "ERROR", errors: [{ message: "The agent already uses this file." }] };
-    }
-
-    const { token } = await getCurrentUser();
-    const fetched = await fetchLinkedSkillZip(token, driveId, itemId);
-    if (!fetched.ok) {
-      return { status: "ERROR", errors: [{ message: fetched.message }] };
-    }
-    const { meta, buf, pkg } = fetched;
-
-    if (existing.some((s) => s.name === pkg.name)) {
-      return {
-        status: "ERROR",
-        errors: [{ message: `The agent already has the skill "${pkg.name}".` }],
-      };
-    }
-
-    const skillId = uniqueId();
-    const blobName = skillBlobName(personaId, skillId);
-    const stored = await UploadBlob(skillBlobContainer(), blobName, buf, {
-      contentType: "application/zip",
-      metadata: { personaid: personaId, skillname: pkg.name },
-    });
-    if (stored.status !== "OK") {
-      return { status: "ERROR", errors: [{ message: "The skill could not be saved." }] };
-    }
-
-    const now = new Date();
-    const model: PersonaSkillModel = {
-      id: skillId,
-      type: PERSONA_SKILL_ATTRIBUTE,
-      userId: access.persona.userId,
-      personaId,
-      ...packageFields(pkg),
-      zipFileName: meta.name.slice(0, 255),
-      blobName,
-      source: buildSharePointSource(meta, driveId, itemId),
-      createdAt: now,
-      updatedAt: now,
-    };
-    if (!PersonaSkillModelSchema.safeParse(model).success) {
-      await DeleteBlob(skillBlobContainer(), blobName);
-      return { status: "ERROR", errors: [{ message: "The skill could not be saved." }] };
-    }
-    await HistoryContainer().items.upsert<PersonaSkillModel>(model);
-    rememberDriveItemVersion(driveId, itemId, meta, access.currentUserId);
-
-    logInfo("agent skills: SharePoint skill linked", {
-      personaId,
-      skillId,
-      name: pkg.name,
-      files: pkg.files.length,
-      zipBytes: pkg.zipBytes,
-    });
-    return { status: "OK", response: toSkillSummary(model) };
-  } catch (error) {
-    logError("agent skills: link from SharePoint failed", {
       personaId,
       error: error instanceof Error ? error.message : String(error),
     });

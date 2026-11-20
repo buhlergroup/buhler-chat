@@ -42,7 +42,6 @@ vi.mock("../persona-skill-store", () => ({
 
 import {
   DeletePersonaSkill,
-  FindPersonaSkills,
   UploadPersonaSkill,
 } from "../persona-skill-service";
 
@@ -126,7 +125,7 @@ describe("UploadPersonaSkill — server-side owner/admin check", () => {
   });
 });
 
-describe("DeletePersonaSkill / FindPersonaSkills", () => {
+describe("DeletePersonaSkill", () => {
   it("refuses delete for a non-owner", async () => {
     access = { canUse: true, canEdit: false };
     existing = [{ id: "s1", name: "demo-skill", blobName: "b", userId: "owner-hash" }];
@@ -140,10 +139,5 @@ describe("DeletePersonaSkill / FindPersonaSkills", () => {
     expect(itemDelete).toHaveBeenCalled();
     expect(DeleteBlob).toHaveBeenCalledWith("agent-skills", "b");
     expect(deleteSkillOpenAiFile).toHaveBeenCalledWith("file-1");
-  });
-
-  it("lists skills only for users who can open the agent", async () => {
-    access = { canUse: false, canEdit: false };
-    expect((await FindPersonaSkills("p1")).status).toBe("UNAUTHORIZED");
   });
 });

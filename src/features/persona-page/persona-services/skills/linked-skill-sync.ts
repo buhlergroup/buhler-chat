@@ -480,22 +480,3 @@ export async function syncLinkedSkills(
     unavailable: results.filter((r) => r.status === "denied").map((r) => r.skill.name),
   };
 }
-
-/**
- * Can this user read the file of a linked skill? Uses the same cached check
- * as chats. Only a clear 401/403/404 says no; a timeout or 5xx says yes, as
- * chats then use the stored copy too. Uploaded skills: always yes.
- */
-export async function canReadLinkedSkill(
-  skill: PersonaSkillModel,
-  token: string,
-  userId: string,
-): Promise<boolean> {
-  if (!skill.source) return true;
-  try {
-    await checkDriveItem(token, userId, skill.source.driveId, skill.source.itemId);
-    return true;
-  } catch (error) {
-    return !isFileAccessDenied(error);
-  }
-}
