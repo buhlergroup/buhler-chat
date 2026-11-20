@@ -73,6 +73,9 @@ export const AddNewPersona: FC<Props> = (props) => {
   // Code, Skill and On-demand files need the code interpreter: while the
   // agent has one, the tool stays on and locked (the server enforces it too).
   const [filesNeedCodeInterpreter, setFilesNeedCodeInterpreter] = useState(false);
+  // A file action (add, change of use, remove) is running: the editor stays
+  // open (Escape, a click outside and the close button are ignored).
+  const [filesBusy, setFilesBusy] = useState(false);
   const savedDefaultTools: NonNullable<DefaultTools> = filesNeedCodeInterpreter
     ? { ...defaultTools, codeInterpreter: true }
     : defaultTools;
@@ -157,7 +160,7 @@ export const AddNewPersona: FC<Props> = (props) => {
     <Sheet
       open={isOpened}
       onOpenChange={(value) => {
-        if (!isLoading) {
+        if (!isLoading && !filesBusy) {
           personaStore.updateOpened(value);
           startTransition(() => {
             reset();
@@ -408,6 +411,7 @@ export const AddNewPersona: FC<Props> = (props) => {
                 <PersonaFiles
                   personaId={persona.id}
                   onNeedsCodeInterpreterChange={setFilesNeedCodeInterpreter}
+                  onBusyChange={setFilesBusy}
                 />
               </div>
             </ScrollArea>

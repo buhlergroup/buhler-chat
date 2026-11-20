@@ -286,4 +286,76 @@ describe("PersonaFiles", () => {
       ),
     );
   });
+  it("shows 'Copying text…' on the item while it moves to Search, with its menu disabled", async () => {
+    let finish: (v: unknown) => void = () => {};
+    actions.ListAgentFiles.mockResolvedValue(
+      editorList([item({ ref: { kind: "ci-document", id: "ci-1" }, use: "code", allowedUses: ["search", "code"] })]),
+    );
+    actions.ChangeAgentFileUse.mockReturnValue(new Promise((r) => (finish = r)));
+    const onBusy = vi.fn();
+    render(<PersonaFiles personaId="p1" onBusyChange={onBusy} />);
+    await userEvent.click(await screen.findByTestId("persona-file-use"));
+    await userEvent.click(within(await screen.findByRole("menu")).getByText("Search"));
+    const busy = await screen.findByTestId("persona-file-busy");
+    expect(busy).toHaveTextContent("Copying text…");
+    expect(screen.getByTestId("persona-file-use")).toBeDisabled();
+    expect(onBusy).toHaveBeenLastCalledWith(true);
+    finish({ status: "OK", response: { ref: { kind: "document", id: "d1" }, use: "search" } });
+    await waitFor(() => expect(screen.queryByTestId("persona-file-busy")).not.toBeInTheDocument());
+    expect(onBusy).toHaveBeenLastCalledWith(false);
+  });
+
+  it("shows 'Working…' on the item while it is removed", async () => {
+    let finish: (v: unknown) => void = () => {};
+    actions.RemoveAgentFile.mockReturnValue(new Promise((r) => (finish = r)));
+    render(<PersonaFiles personaId="p1" />);
+    await userEvent.click(await screen.findByTestId("persona-file-use"));
+    await userEvent.click(await screen.findByText("Remove"));
+    expect(await screen.findByTestId("persona-file-busy")).toHaveTextContent("Working…");
+    finish({ status: "OK", response: {} });
+    await waitFor(() => expect(screen.queryByTestId("persona-file-busy")).not.toBeInTheDocument());
+  });
+
+  it("asks before removing an uploaded skill; Cancel keeps it", async () => {
+    actions.ListAgentFiles.mockResolvedValue(
+      editorList([item({ ref: { kind: "skill", id: "s-up" }, name: "notes.zip", use: "skill", allowedUses: ["skill"], uploadedSkill: true, webUrl: undefined })]),
+    );
+    actions.RemoveAgentFile.mockResolvedValue({ status: "OK", response: {} });
+    render(<PersonaFiles personaId="p1" />);
+    await userEvent.click(await screen.findByTestId("persona-file-use"));
+    await userEvent.click(await screen.findByText("Remove"));
+    const dialog = await screen.findByTestId("persona-files-confirm-remove");
+    expect(dialog).toHaveTextContent(
+      'Remove the skill "notes.zip"? An uploaded skill cannot be added again from SharePoint. You must upload the zip again.',
+    );
+    expect(actions.RemoveAgentFile).not.toHaveBeenCalled();
+    await userEvent.click(within(dialog).getByRole("button", { name: "Cancel" }));
+    await waitFor(() => expect(screen.queryByTestId("persona-files-confirm-remove")).not.toBeInTheDocument());
+    expect(actions.RemoveAgentFile).not.toHaveBeenCalled();
+  });
+
+  it("removes an uploaded skill after the confirmation", async () => {
+    actions.ListAgentFiles.mockResolvedValue(
+      editorList([item({ ref: { kind: "skill", id: "s-up" }, name: "notes.zip", use: "skill", allowedUses: ["skill"], uploadedSkill: true, webUrl: undefined })]),
+    );
+    actions.RemoveAgentFile.mockResolvedValue({ status: "OK", response: {} });
+    render(<PersonaFiles personaId="p1" />);
+    await userEvent.click(await screen.findByTestId("persona-file-use"));
+    await userEvent.click(await screen.findByText("Remove"));
+    const dialog = await screen.findByTestId("persona-files-confirm-remove");
+    await userEvent.click(within(dialog).getByRole("button", { name: "Remove" }));
+    await waitFor(() => expect(actions.RemoveAgentFile).toHaveBeenCalledWith("p1", { kind: "skill", id: "s-up" }));
+  });
+
+  it("removes a linked skill and other items without a confirmation", async () => {
+    actions.ListAgentFiles.mockResolvedValue(
+      editorList([item({ ref: { kind: "skill", id: "s-link" }, name: "brand.zip", use: "skill", allowedUses: ["skill", "code"], linkedSkill: true })]),
+    );
+    actions.RemoveAgentFile.mockResolvedValue({ status: "OK", response: {} });
+    render(<PersonaFiles personaId="p1" />);
+    await userEvent.click(await screen.findByTestId("persona-file-use"));
+    await userEvent.click(await screen.findByText("Remove"));
+    await waitFor(() => expect(actions.RemoveAgentFile).toHaveBeenCalledWith("p1", { kind: "skill", id: "s-link" }));
+    expect(screen.queryByTestId("persona-files-confirm-remove")).not.toBeInTheDocument();
+  });
 });

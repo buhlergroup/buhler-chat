@@ -39,6 +39,15 @@ import {
   UploadPersonaSkill,
 } from "../persona-services/skills/persona-skill-service";
 import { SKILL_LIMITS } from "../persona-services/skills/skill-models";
+import {
+  Dialog,
+  DialogClose,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/features/ui/dialog";
 
 interface Props {
   /** Empty for an agent that is not saved yet. */
@@ -48,6 +57,11 @@ interface Props {
    * (Code, Skill, On demand); the editor then keeps that tool on.
    */
   onNeedsCodeInterpreterChange?: (needs: boolean) => void;
+  /**
+   * Told whether a file action (add, change of use, remove, upload) is
+   * running; the editor then stays open until it ends.
+   */
+  onBusyChange?: (busy: boolean) => void;
 }
 
 const SHAREPOINT_URL = process.env.NEXT_PUBLIC_SHAREPOINT_URL ?? "";
@@ -71,16 +85,34 @@ const filesText = (n: number) => (n === 1 ? "This agent uses 1 file." : `This ag
  * independent of the agent's Save button. The server decides who may see
  * and change the list; users who can only use the agent see the count.
  */
-export const PersonaFiles: FC<Props> = ({ personaId, onNeedsCodeInterpreterChange }) => {
+/** Text next to an item while its use changes or it is removed. */
+export const busyTextFor = (use?: string) => (use === "search" ? "Copying text…" : "Working…");
+
+/** The confirmation text before an uploaded skill is removed. */
+export const removeUploadedSkillText = (name: string) =>
+  `Remove the skill "${name}"? An uploaded skill cannot be added again from SharePoint. You must upload the zip again.`;
+
+export const PersonaFiles: FC<Props> = ({ personaId, onNeedsCodeInterpreterChange, onBusyChange }) => {
   const { data: session } = useSession();
   const [list, setList] = useState<AgentFilesList | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
+  const [busyText, setBusyText] = useState<string>("");
+  const [confirmRemove, setConfirmRemove] = useState<AgentFileItem | null>(null);
   const [notAdded, setNotAdded] = useState<{ name: string; reason: string }[]>([]);
   const fileInput = useRef<HTMLInputElement>(null);
   const replaceTarget = useRef<string | undefined>(undefined);
   const needsCallback = useRef(onNeedsCodeInterpreterChange);
   needsCallback.current = onNeedsCodeInterpreterChange;
+  const busyCallback = useRef(onBusyChange);
+  busyCallback.current = onBusyChange;
+
+  useEffect(() => {
+    busyCallback.current?.(busy !== null);
+  }, [busy]);
+
+  // Unmounted while an action runs (the editor closed): it is not busy then.
+  useEffect(() => () => busyCallback.current?.(false), []);
 
   const refresh = useCallback(async () => {
     if (!personaId) {
@@ -159,6 +191,7 @@ export const PersonaFiles: FC<Props> = ({ personaId, onNeedsCodeInterpreterChang
 
   const onChangeUse = async (item: AgentFileItem, value: string) => {
     if (!isAgentFileUse(value) || value === item.use) return;
+    setBusyText(busyTextFor(value));
     setBusy(item.ref.id);
     try {
       const res = await ChangeAgentFileUse(personaId, item.ref, value);
@@ -177,7 +210,14 @@ export const PersonaFiles: FC<Props> = ({ personaId, onNeedsCodeInterpreterChang
     }
   };
 
+  /** An uploaded skill cannot come back from SharePoint: ask first. */
+  const requestRemove = (item: AgentFileItem) => {
+    if (item.uploadedSkill) setConfirmRemove(item);
+    else onRemove(item);
+  };
+
   const onRemove = async (item: AgentFileItem) => {
+    setBusyText(busyTextFor());
     setBusy(item.ref.id);
     try {
       const res = await RemoveAgentFile(personaId, item.ref);
@@ -191,6 +231,7 @@ export const PersonaFiles: FC<Props> = ({ personaId, onNeedsCodeInterpreterChang
   };
 
   const onCheckNow = async (item: AgentFileItem) => {
+    setBusyText(busyTextFor());
     setBusy(item.ref.id);
     try {
       const res = await CheckPersonaSkillNow(personaId, item.ref.id);
@@ -273,14 +314,43 @@ export const PersonaFiles: FC<Props> = ({ personaId, onNeedsCodeInterpreterChang
                   key={`${item.ref.kind}:${item.ref.id}`}
                   item={item}
                   busy={busy}
+                  busyText={busyText}
                   onChangeUse={onChangeUse}
-                  onRemove={onRemove}
+                  onRemove={requestRemove}
                   onCheckNow={onCheckNow}
                   onReplace={(i) => pickZip(i.ref.id)}
                 />
               ))}
             </ul>
           )}
+          <Dialog open={confirmRemove !== null} onOpenChange={(open) => !open && setConfirmRemove(null)}>
+            <DialogContent data-testid="persona-files-confirm-remove">
+              <DialogHeader>
+                <DialogTitle>Remove skill</DialogTitle>
+                <DialogDescription>
+                  {confirmRemove ? removeUploadedSkillText(confirmRemove.name) : ""}
+                </DialogDescription>
+              </DialogHeader>
+              <DialogFooter>
+                <Button
+                  type="button"
+                  variant="destructive"
+                  onClick={() => {
+                    const item = confirmRemove;
+                    setConfirmRemove(null);
+                    if (item) onRemove(item);
+                  }}
+                >
+                  Remove
+                </Button>
+                <DialogClose asChild>
+                  <Button type="button" variant="outline">
+                    Cancel
+                  </Button>
+                </DialogClose>
+              </DialogFooter>
+            </DialogContent>
+          </Dialog>
           {notAdded.length > 0 && (
             <div
               role="status"
@@ -357,11 +427,13 @@ const FileIcon: FC<{ item: AgentFileItem }> = ({ item }) =>
 const FileRow: FC<{
   item: AgentFileItem;
   busy: string | null;
+  busyText: string;
   onChangeUse: (item: AgentFileItem, use: string) => void;
   onRemove: (item: AgentFileItem) => void;
   onCheckNow: (item: AgentFileItem) => void;
   onReplace: (item: AgentFileItem) => void;
-}> = ({ item, busy, onChangeUse, onRemove, onCheckNow, onReplace }) => {
+}> = ({ item, busy, busyText, onChangeUse, onRemove, onCheckNow, onReplace }) => {
+  const isBusy = busy === item.ref.id;
   const text = AGENT_FILE_USE_TEXT[item.use];
   const statusText = STATUS_TEXT[item.status] ?? item.statusMessage;
   return (
@@ -387,6 +459,16 @@ const FileRow: FC<{
             {statusText}
           </span>
         )}
+        {isBusy && (
+          <span
+            role="status"
+            className="text-xs text-muted-foreground inline-flex items-center gap-1"
+            data-testid="persona-file-busy"
+          >
+            <LoadingIndicator isLoading />
+            {busyText}
+          </span>
+        )}
         {item.status === "ok" && item.sizeBytes !== undefined && !item.isFolder && (
           <span className="text-xs text-muted-foreground">{formatSize(item.sizeBytes)}</span>
         )}
@@ -403,7 +485,6 @@ const FileRow: FC<{
             disabled={busy !== null}
             data-testid="persona-file-use"
           >
-            {busy === item.ref.id ? <LoadingIndicator isLoading /> : null}
             {text.label}
             <ChevronDown size={14} />
           </Button>
