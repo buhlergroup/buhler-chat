@@ -13,7 +13,13 @@ import "server-only";
  *   - 401 / 403 / 404      -> the skill is not used for this user (no
  *                             fallback: the copy would leak a file the user
  *                             cannot open);
- *   - timeout, 5xx, other  -> the stored copy, with a warning in the log;
+ *   - timeout, 5xx, other  -> the skill is not used in this request either:
+ *                             without an answer there is no proof that the
+ *                             user may read the file (fail closed). The error
+ *                             is not cached, so the next request checks again;
+ *   - new cTag, download   -> the stored copy: the metadata answer of this
+ *     fails (timeout, 5xx)    request already proved that the user may read
+ *                             the file;
  *   - new file invalid     -> the stored copy; the error goes on the row, so
  *                             the editor shows it to the owner and chats do
  *                             not download that version again.
@@ -237,7 +243,11 @@ export type LinkedSkillSyncResult =
   | { status: "updated"; skill: PersonaSkillModel }
   /** The stored copy stays in use; `invalid` when the new file is not a valid skill. */
   | { status: "kept"; skill: PersonaSkillModel; message: string; invalid: boolean }
-  /** The user may not read the file: do not use the skill. */
+  /**
+   * Do not use the skill: the user may not read the file (401/403/404), or
+   * the check gave no answer (timeout, 5xx, network error), so access is not
+   * proven for this request.
+   */
   | { status: "denied"; skill: PersonaSkillModel; message: string }
   /** The row was deleted meanwhile. */
   | { status: "gone"; skill: PersonaSkillModel; message: string };
@@ -291,12 +301,16 @@ export async function syncLinkedSkill(
       });
       return { status: "denied", skill, message: NO_ACCESS_MESSAGE };
     }
-    logWarn("agent skills: SharePoint check failed, using the stored version", {
+    // No answer is no proof of access: the skill is left out of this
+    // request (fail closed). checkDriveItem does not cache this error.
+    logWarn("agent skills: SharePoint check failed, skill not used in this request", {
       skill: skill.name,
       personaId: skill.personaId,
+      status: error instanceof GraphFileError ? error.status : undefined,
+      timedOut: error instanceof GraphFileError ? error.timedOut : undefined,
       error: errorText(error),
     });
-    return { status: "kept", skill, message: NOT_REACHABLE_MESSAGE, invalid: false };
+    return { status: "denied", skill, message: NOT_REACHABLE_MESSAGE };
   }
 
   if (meta.version === src.version) {
@@ -317,6 +331,8 @@ export async function syncLinkedSkill(
         return { status: "denied", skill, message: fetched.message };
       }
       if (fetched.reason === "transient") {
+        // The metadata answer above proved read access; only the download
+        // of the new version failed.
         logWarn("agent skills: download of the new SharePoint version failed, using the stored version", {
           skill: skill.name,
           personaId: skill.personaId,
@@ -450,8 +466,9 @@ export interface SyncedSkills {
 
 /**
  * Checks every linked skill once, in parallel (metadata timeout 5 s each).
- * Uploaded skills pass through unchanged. A linked skill whose check fails
- * unexpectedly is left out (fail closed).
+ * Uploaded skills pass through unchanged. A linked skill the user may not
+ * read, or whose check gave no answer, is left out and named as unavailable;
+ * one whose check fails unexpectedly is left out too (fail closed).
  */
 export async function syncLinkedSkills(
   skills: ReadonlyArray<PersonaSkillModel>,
@@ -483,8 +500,9 @@ export async function syncLinkedSkills(
 
 /**
  * Can this user read the file of a linked skill? Uses the same cached check
- * as chats. Only a clear 401/403/404 says no; a timeout or 5xx says yes, as
- * chats then use the stored copy too. Uploaded skills: always yes.
+ * as chats. Only an answer from SharePoint says yes; 401/403/404, a timeout,
+ * a 5xx or a network error say no (chats then leave the skill out too).
+ * Uploaded skills: always yes.
  */
 export async function canReadLinkedSkill(
   skill: PersonaSkillModel,
@@ -495,7 +513,7 @@ export async function canReadLinkedSkill(
   try {
     await checkDriveItem(token, userId, skill.source.driveId, skill.source.itemId);
     return true;
-  } catch (error) {
-    return !isFileAccessDenied(error);
+  } catch {
+    return false;
   }
 }

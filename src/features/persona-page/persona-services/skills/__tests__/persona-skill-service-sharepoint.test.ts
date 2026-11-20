@@ -50,8 +50,9 @@ vi.mock("../persona-skill-store", () => ({
 }));
 
 // ── Fake Graph ──────────────────────────────────────────────────────────────
-let graph: { status?: number; cTag: string; name: string; content: Buffer };
+let graph: { status?: number; cTag: string; name: string; content: Buffer; networkError?: boolean };
 const fetchMock = vi.fn(async (input: string, _init?: RequestInit): Promise<Response> => {
+  if (graph.networkError) throw new TypeError("fetch failed");
   if (graph.status) return new Response("{}", { status: graph.status });
   if (String(input).includes("/content")) {
     return new Response(new Uint8Array(graph.content), { status: 200 });
@@ -248,6 +249,18 @@ describe("CheckPersonaSkillNow", () => {
     existing = [{ ...linkedRow(), source: undefined }];
     expect((await CheckPersonaSkillNow("p1", "s1")).status).toBe("ERROR");
   });
+
+  it.each([
+    ["500", { status: 500 }],
+    ["503", { status: 503 }],
+    ["a network error", { networkError: true }],
+  ])("shows the owner an error when SharePoint gives no answer (%s)", async (_label, over) => {
+    existing = [linkedRow()];
+    Object.assign(graph, over);
+    const res = await CheckPersonaSkillNow("p1", "s1");
+    expect(res.status).toBe("ERROR");
+    expect(res.status === "ERROR" && res.errors[0].message).toMatch(/SharePoint did not answer/);
+  });
 });
 
 describe("FindPersonaSkills — linked skills and SharePoint access of the viewer", () => {
@@ -291,12 +304,20 @@ describe("FindPersonaSkills — linked skills and SharePoint access of the viewe
     expect(res.status === "OK" && res.response.skills[0].noAccess).toBeUndefined();
   });
 
-  it("a timeout or 5xx does not hide the entry (chats use the stored copy then too)", async () => {
+  it.each([
+    ["500", { status: 500 }],
+    ["503", { status: 503 }],
+    ["a network error", { networkError: true }],
+  ])("no answer from SharePoint (%s) shows the name and a note only (chats leave the skill out too)", async (_label, over) => {
     access = { canUse: true, canEdit: false };
     existing = [linkedRow()];
-    graph.status = 503;
+    Object.assign(graph, over);
     const res = await FindPersonaSkills("p1");
-    expect(res.status === "OK" && res.response.skills[0].description).toBe("Builds demo things.");
+    expect(res.status === "OK" && res.response.skills[0]).toMatchObject({
+      name: "demo-skill",
+      description: "",
+      noAccess: true,
+    });
   });
 
   it("owners and admins see the full entry without a Graph call", async () => {
