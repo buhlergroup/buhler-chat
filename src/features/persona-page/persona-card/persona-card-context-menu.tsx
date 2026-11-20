@@ -25,6 +25,16 @@ import {
 } from "../persona-services/agent-trust-service";
 import { DeletePersona } from "../persona-services/persona-service";
 import { personaStore } from "../persona-store";
+import { Button } from "@/features/ui/button";
+import {
+  Dialog,
+  DialogClose,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/features/ui/dialog";
 
 interface Props {
   persona: PersonaModel;
@@ -36,9 +46,24 @@ interface Props {
 
 type DropdownAction = "delete" | "verify" | "downgrade" | "unpublish";
 
+/** Actions that ask first, in the app's own dialog (not window.confirm). */
+type ConfirmedAction = "delete" | "unpublish";
+
+export const deleteAgentText = (name: string) =>
+  `Delete the agent "${name}"? Its files, skills and folder links are removed from the agent. Chats that already used it stay.`;
+
+export const unpublishAgentText = (name: string) =>
+  `Unpublish the agent "${name}" for the whole organization? Only the owner will still see it.`;
+
+const CONFIRM: Record<ConfirmedAction, { title: string; button: string; text: (name: string) => string }> = {
+  delete: { title: "Delete agent", button: "Delete", text: deleteAgentText },
+  unpublish: { title: "Unpublish agent", button: "Unpublish", text: unpublishAgentText },
+};
+
 export const PersonaCardContextMenu: FC<Props> = (props) => {
   const { persona, showOwnerActions = true, isVerifier = false } = props;
   const { isLoading, handleAction } = useDropdownAction({ persona });
+  const [confirm, setConfirm] = useState<ConfirmedAction | null>(null);
 
   const trustLevel = effectiveTrustLevel(persona);
   const showVerifierActions = isVerifier && persona.isPublished;
@@ -65,7 +90,7 @@ export const PersonaCardContextMenu: FC<Props> = (props) => {
                 <span>Edit</span>
               </DropdownMenuItemWithIcon>
               <DropdownMenuItemWithIcon
-                onClick={async () => await handleAction("delete")}
+                onClick={() => setConfirm("delete")}
               >
                 <Trash size={18} />
                 <span>Delete</span>
@@ -91,7 +116,7 @@ export const PersonaCardContextMenu: FC<Props> = (props) => {
                 </DropdownMenuItemWithIcon>
               )}
               <DropdownMenuItemWithIcon
-                onClick={async () => await handleAction("unpublish")}
+                onClick={() => setConfirm("unpublish")}
               >
                 <Store size={18} />
                 <span>Unpublish agent</span>
@@ -100,6 +125,32 @@ export const PersonaCardContextMenu: FC<Props> = (props) => {
           )}
         </DropdownMenuContent>
       </DropdownMenu>
+      <Dialog open={confirm !== null} onOpenChange={(open) => !open && setConfirm(null)}>
+        <DialogContent data-testid="persona-card-confirm">
+          <DialogHeader>
+            <DialogTitle>{confirm ? CONFIRM[confirm].title : ""}</DialogTitle>
+            <DialogDescription>{confirm ? CONFIRM[confirm].text(persona.name) : ""}</DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            <Button
+              type="button"
+              variant="destructive"
+              onClick={async () => {
+                const action = confirm;
+                setConfirm(null);
+                if (action) await handleAction(action);
+              }}
+            >
+              {confirm ? CONFIRM[confirm].button : ""}
+            </Button>
+            <DialogClose asChild>
+              <Button type="button" variant="outline">
+                Cancel
+              </Button>
+            </DialogClose>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </>
   );
 };
@@ -120,13 +171,10 @@ const useDropdownAction = (props: { persona: PersonaModel }) => {
   const handleAction = async (action: DropdownAction) => {
     setIsLoading(true);
     switch (action) {
+      // Delete and unpublish run after the dialog of the menu (confirmed).
       case "delete":
-        if (
-          window.confirm(`Are you sure you want to delete ${persona.name}?`)
-        ) {
-          await DeletePersona(persona.id);
-          revalidate();
-        }
+        await DeletePersona(persona.id);
+        revalidate();
         break;
       case "verify":
         await SetAgentTrustLevel(persona.id, "verified");
@@ -137,14 +185,8 @@ const useDropdownAction = (props: { persona: PersonaModel }) => {
         revalidate();
         break;
       case "unpublish":
-        if (
-          window.confirm(
-            `Unpublish ${persona.name} for the whole organization? Only the owner will still see it.`
-          )
-        ) {
-          await UnpublishAgent(persona.id);
-          revalidate();
-        }
+        await UnpublishAgent(persona.id);
+        revalidate();
         break;
     }
     setIsLoading(false);

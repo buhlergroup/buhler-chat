@@ -26,8 +26,8 @@ export function findSharePointFilesTool(session: SharePointFileSession) {
   return tool({
     description:
       `List or search files in the SharePoint folders and files linked to this agent: ${sourceList(session)}. ` +
-      `Searches file names and folder paths (case-insensitive, all words must match), up to ${SHAREPOINT_FILE_RULES.maxDepth} folder levels deep, at most ${SHAREPOINT_FILE_RULES.maxFindResults} results. ` +
-      "Returns name, path, size, last change and id. " +
+      `Searches file names and folder paths (case-insensitive, all words must match), up to ${SHAREPOINT_FILE_RULES.maxDepth} folder levels deep. ` +
+      `Returns up to ${SHAREPOINT_FILE_RULES.maxFindResults} files per call (name, path, size, last change and id), the total number of matches and, when more files match, nextOffset: call again with the same query and path and offset = nextOffset for the next files. ` +
       "When your instructions or an index already give the exact file name, skip this and call fetch_sharepoint_file with that name.",
     inputSchema: z.object({
       query: z
@@ -40,8 +40,14 @@ export function findSharePointFilesTool(session: SharePointFileSession) {
         .max(200)
         .optional()
         .describe("Only files below this folder path, relative to a linked folder, e.g. 2024/events."),
+      offset: z
+        .number()
+        .int()
+        .min(0)
+        .optional()
+        .describe("Number of matching files to skip: the nextOffset of the previous result. Empty: the first files."),
     }),
-    execute: async (args: { query?: string; path?: string }) => {
+    execute: async (args: { query?: string; path?: string; offset?: number }) => {
       try {
         return await session.find(args);
       } catch (error) {

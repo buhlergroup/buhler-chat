@@ -38,10 +38,7 @@ import {
   DefaultTools,
   effectiveTrustLevel,
 } from "./persona-services/models";
-import { PersonaDocuments } from "./persona-documents/persona-documents";
-import { CodeInterpreterDocuments } from "./persona-documents/code-interpreter-documents";
-import { PersonaSkills } from "./persona-skills/persona-skills";
-import { PersonaSharePointFiles } from "./persona-sharepoint-files/persona-sharepoint-files";
+import { PersonaFiles } from "./persona-files/persona-files";
 import { PersonaAccessGroup } from "./persona-access-group/persona-access-group";
 import { TooltipProvider } from "@radix-ui/react-tooltip";
 import { useResetableActionState } from "../common/hooks/useResetableActionState";
@@ -73,6 +70,15 @@ export const AddNewPersona: FC<Props> = (props) => {
     persona.defaultTools || {}
   );
   const [availableModels, setAvailableModels] = useState<Record<string, ModelConfig>>(MODEL_CONFIGS);
+  // Code, Skill and On-demand files need the code interpreter: while the
+  // agent has one, the tool stays on and locked (the server enforces it too).
+  const [filesNeedCodeInterpreter, setFilesNeedCodeInterpreter] = useState(false);
+  // A file action (add, change of use, remove) is running: the editor stays
+  // open (Escape, a click outside and the close button are ignored).
+  const [filesBusy, setFilesBusy] = useState(false);
+  const savedDefaultTools: NonNullable<DefaultTools> = filesNeedCodeInterpreter
+    ? { ...defaultTools, codeInterpreter: true }
+    : defaultTools;
 
   // Reset local state when persona changes
   useEffect(() => {
@@ -154,7 +160,7 @@ export const AddNewPersona: FC<Props> = (props) => {
     <Sheet
       open={isOpened}
       onOpenChange={(value) => {
-        if (!isLoading) {
+        if (!isLoading && !filesBusy) {
           personaStore.updateOpened(value);
           startTransition(() => {
             reset();
@@ -183,7 +189,9 @@ export const AddNewPersona: FC<Props> = (props) => {
               type="always"
             >
               <div className="pb-6 px-6 flex gap-8 flex-col  flex-1">
-                <input type="hidden" name="id" defaultValue={persona.id} />
+                {/* value, not defaultValue: after the first save of a new
+                    agent the editor stays open on the saved id. */}
+                <input type="hidden" name="id" value={persona.id} readOnly />
                 <input
                   type="hidden"
                   name="subAgentIds"
@@ -192,7 +200,7 @@ export const AddNewPersona: FC<Props> = (props) => {
                 <input
                   type="hidden"
                   name="defaultTools"
-                  value={JSON.stringify(defaultTools)}
+                  value={JSON.stringify(savedDefaultTools)}
                 />
                 <div className="grid gap-2">
                   <Label>Name</Label>
@@ -294,13 +302,19 @@ export const AddNewPersona: FC<Props> = (props) => {
                       <input
                         type="checkbox"
                         className="h-4 w-4 rounded border-input"
-                        checked={defaultTools.codeInterpreter ?? false}
+                        checked={savedDefaultTools.codeInterpreter ?? false}
+                        disabled={filesNeedCodeInterpreter}
                         onChange={(e) =>
                           setDefaultTools((prev) => ({ ...prev, codeInterpreter: e.target.checked }))
                         }
                       />
                       <span className="text-sm">Code Interpreter</span>
                     </label>
+                    {filesNeedCodeInterpreter && (
+                      <p className="text-xs text-muted-foreground" data-testid="code-interpreter-locked">
+                        The files of this agent need the code interpreter.
+                      </p>
+                    )}
                   </div>
                 </div>
                 <div className="grid gap-2">
@@ -394,14 +408,11 @@ export const AddNewPersona: FC<Props> = (props) => {
                     ) : undefined
                   }
                 />
-                <PersonaDocuments
-                  initialPersonaDocumentIds={persona.personaDocumentIds || []}
+                <PersonaFiles
+                  personaId={persona.id}
+                  onNeedsCodeInterpreterChange={setFilesNeedCodeInterpreter}
+                  onBusyChange={setFilesBusy}
                 />
-                <CodeInterpreterDocuments
-                  initialCIDocumentIds={persona.codeInterpreterDocumentIds || []}
-                />
-                <PersonaSkills personaId={persona.id} />
-                <PersonaSharePointFiles personaId={persona.id} />
               </div>
             </ScrollArea>
             <SheetFooter className="py-2 flex justify-end flex-row">
@@ -424,33 +435,7 @@ function Submit({ isLoading }: { isLoading: boolean }) {
       <AdvancedLoadingIndicator
         isLoading={isLoading}
         interval={2500}
-        loadingMessages={[
-          "Checking Documents...",
-          "Searching for Documents...",
-          "Translating Documents...",
-          "Indexing Documents...",
-          "Almost there...",
-          "Big documents take time...",
-          "Just a moment...",
-          "Hang tight...",
-          "Processing your request...",
-          "Analyzing content...",
-          "Finalizing setup...",
-          "Loading resources...",
-          "Wrapping things up...",
-          "Preparing your results...",
-          "Tidying up the details...",
-          "Double-checking info...",
-          "Synchronizing...",
-          "Fetching additional data...",
-          "Reviewing documents...",
-          "Securing data...",
-          "Hold on, almost finished...",
-          "Making progress...",
-          "One last check...",
-          "Taking longer than expected...",
-        ]
-        }
+        loadingMessages={["Saving the agent...", "Just a moment...", "Almost there..."]}
         />
     </div>
   );
