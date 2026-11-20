@@ -6,7 +6,7 @@
  * URL, so the guarded fetch here gets a permissive URL check; the guard
  * itself is covered in mcp-helpers.test.ts.
  */
-import { describe, it, expect, beforeAll, afterAll, vi } from "vitest";
+import { describe, it, expect, beforeAll, afterAll, afterEach, vi } from "vitest";
 import { createServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import { z } from "zod";
@@ -145,6 +145,12 @@ describe("Per-user OAuth against a local fake MCP server + authorization server"
   const validTokens = new Map<string, string>();
   let tokenCounter = 0;
   let lastTokenRequest = "";
+  let tokenRequests = 0;
+  /** "moved": the resource names a second issuer (same host, other path). */
+  let asMode: "normal" | "moved" | "split" = "normal";
+  afterEach(() => {
+    asMode = "normal";
+  });
 
   beforeAll(async () => {
     oauthServer = createServer(async (req, res) => {
@@ -160,13 +166,18 @@ describe("Per-user OAuth against a local fake MCP server + authorization server"
         });
 
       if (url.pathname.startsWith("/.well-known/oauth-protected-resource")) {
-        return json(200, { resource: `${origin}/mcp`, authorization_servers: [origin] });
+        const as = asMode === "moved" ? `${origin}/tenant2` : origin;
+        return json(200, { resource: `${origin}/mcp`, authorization_servers: [as] });
       }
-      if (url.pathname === "/.well-known/oauth-authorization-server") {
+      if (
+        url.pathname === "/.well-known/oauth-authorization-server" ||
+        url.pathname === "/.well-known/oauth-authorization-server/tenant2"
+      ) {
         return json(200, {
-          issuer: origin,
+          issuer: url.pathname.endsWith("/tenant2") ? `${origin}/tenant2` : origin,
           authorization_endpoint: `${origin}/authorize`,
-          token_endpoint: `${origin}/token`,
+          // "split": the token endpoint on another origin (never contacted).
+          token_endpoint: asMode === "split" ? "http://localhost:9/token" : `${origin}/token`,
           registration_endpoint: `${origin}/register`,
           response_types_supported: ["code"],
           grant_types_supported: ["authorization_code", "refresh_token"],
@@ -180,6 +191,7 @@ describe("Per-user OAuth against a local fake MCP server + authorization server"
       }
       if (url.pathname === "/token" && req.method === "POST") {
         lastTokenRequest = await readBody();
+        tokenRequests++;
         const form = new URLSearchParams(lastTokenRequest);
         // The fake "code" names the user who signed in at the authorization server.
         const user =
@@ -378,5 +390,55 @@ describe("Per-user OAuth against a local fake MCP server + authorization server"
     const depsB = callbackDeps(store, true);
     await completeMcpOAuthCallback({ code: "code-userB", state: b.state, userId: "userB" }, depsB);
     expect(depsB.refreshOwnerTools).not.toHaveBeenCalled();
+  });
+
+  // Pinned: the code goes only to the token endpoint of the authorization
+  // server the user was sent to.
+  it("accepts a callback whose iss names the recorded issuer", async () => {
+    const store = memoryStore();
+    const s = await startSignIn(store, "userE");
+    const result = await completeMcpOAuthCallback(
+      { code: "code-userE", state: s.state, userId: "userE", iss: origin },
+      callbackDeps(store, true)
+    );
+    expect(result.ok).toBe(true);
+  });
+
+  it("refuses a callback whose iss names another issuer, without a token request", async () => {
+    const store = memoryStore();
+    const s = await startSignIn(store, "userF");
+    const before = tokenRequests;
+    const result = await completeMcpOAuthCallback(
+      { code: "code-userF", state: s.state, userId: "userF", iss: "https://other-issuer.example.test" },
+      callbackDeps(store, true)
+    );
+    expect(result).toMatchObject({ ok: false, reason: "invalid-state" });
+    expect(tokenRequests).toBe(before);
+    expect(await provider(store, "userF").tokens()).toBeUndefined();
+  });
+
+  it("refuses the code exchange when discovery finds another issuer than at the start", async () => {
+    const store = memoryStore();
+    const s = await startSignIn(store, "userG");
+    asMode = "moved";
+    const before = tokenRequests;
+    await expect(
+      completeMcpOAuthCallback({ code: "code-userG", state: s.state, userId: "userG" }, callbackDeps(store, true))
+    ).rejects.toThrow(/changed during the sign-in/);
+    expect(tokenRequests).toBe(before);
+  });
+
+  it("refuses to start a sign-in when the token endpoint is not on the issuer's origin", async () => {
+    asMode = "split";
+    const store = memoryStore();
+    const state = createMcpOAuthState(EXT_ID);
+    const p = provider(store, "userH", { state });
+    const captured: URL[] = [];
+    p.redirectToAuthorization = (u: URL) => void captured.push(u);
+    await expect(auth(p, { serverUrl: `${origin}/mcp`, fetchFn: looseFetch() })).rejects.toThrow(
+      /token_endpoint is not on the issuer's origin/
+    );
+    expect(captured).toHaveLength(0);
+    expect(await readPendingMcpOAuth(store, EXT_ID, "userH")).toBeUndefined();
   });
 });

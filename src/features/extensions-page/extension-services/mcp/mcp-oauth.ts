@@ -2,8 +2,9 @@ import "server-only";
 
 import { randomBytes, timingSafeEqual } from "node:crypto";
 import { AI_NAME } from "@/features/theme/theme-config";
-import type { OAuthClientProvider } from "@modelcontextprotocol/sdk/client/auth.js";
+import type { OAuthClientProvider, OAuthDiscoveryState } from "@modelcontextprotocol/sdk/client/auth.js";
 import type {
+  AuthorizationServerMetadata,
   OAuthClientInformationMixed,
   OAuthClientMetadata,
   OAuthTokens,
@@ -27,10 +28,91 @@ export class McpOAuthRequiredError extends Error {
   }
 }
 
+export class McpOAuthIssuerError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "McpOAuthIssuerError";
+  }
+}
+
+/**
+ * Compares two authorization server identifiers as parsed URLs, tolerating
+ * one trailing "/" (the SDK writes an origin-only URL with a trailing slash;
+ * metadata usually has none).
+ */
+export function issuersMatch(a: string, b: string): boolean {
+  let [x, y] = [a, b];
+  try {
+    [x, y] = [new URL(a).href, new URL(b).href];
+  } catch {
+    // Not two URLs: compared as written.
+  }
+  return x === y || (x.endsWith("/") && x.slice(0, -1) === y) || (y.endsWith("/") && y.slice(0, -1) === x);
+}
+
+const originOf = (value: string): string | undefined => {
+  try {
+    return new URL(value).origin;
+  } catch {
+    return undefined;
+  }
+};
+
+/**
+ * Checks discovered authorization server metadata before any request is sent
+ * to its endpoints, and returns the issuer the sign-in is bound to.
+ *
+ *  - `issuer` must equal the authorization server URL the metadata was read
+ *    from (RFC 8414 §3.3).
+ *  - authorization, token and (if present) registration endpoints must be on
+ *    the issuer's origin. All extensions share one redirect URL, so endpoints
+ *    split over hosts could send a code issued by one server to another.
+ *
+ * Without metadata the SDK uses /authorize, /token and /register on the
+ * authorization server URL itself, which is then the issuer.
+ */
+export function validateAuthorizationServerMetadata(
+  authorizationServerUrl: string,
+  metadata: AuthorizationServerMetadata | undefined
+): string {
+  if (!metadata) return authorizationServerUrl;
+  const issuer = (metadata as { issuer?: unknown }).issuer;
+  if (typeof issuer !== "string" || !originOf(issuer)) {
+    throw new McpOAuthIssuerError("The authorization server metadata has no valid issuer");
+  }
+  if (!issuersMatch(issuer, authorizationServerUrl)) {
+    throw new McpOAuthIssuerError("The authorization server metadata names another issuer");
+  }
+  const issuerOrigin = originOf(issuer);
+  const endpoints: Array<[string, unknown]> = [
+    ["authorization_endpoint", metadata.authorization_endpoint],
+    ["token_endpoint", metadata.token_endpoint],
+    ["registration_endpoint", metadata.registration_endpoint],
+  ];
+  for (const [name, value] of endpoints) {
+    if (value === undefined || value === null) {
+      if (name === "registration_endpoint") continue;
+      throw new McpOAuthIssuerError(`The authorization server metadata has no ${name}`);
+    }
+    if (typeof value !== "string" || originOf(value) !== issuerOrigin) {
+      throw new McpOAuthIssuerError(`The ${name} is not on the issuer's origin`);
+    }
+  }
+  return issuer;
+}
+
 /** Sign-in started by one user, kept until the callback arrives. */
 export interface PendingMcpOAuth {
   state: string;
   codeVerifier?: string;
+  /**
+   * Issuer of the authorization server the user was sent to. The callback
+   * compares it with the `iss` response parameter (RFC 9207) and with the
+   * issuer discovered again for the code exchange.
+   */
+  issuer?: string;
+  /** The server announced RFC 9207 support: its callback must carry `iss`. */
+  issRequired?: boolean;
   userId: string;
   /** Agent through which the user may use the extension (re-checked at the callback). */
   personaId?: string;
@@ -57,6 +139,11 @@ export interface McpOAuthProviderOptions {
    * expired token that cannot be refreshed fails with McpOAuthRequiredError.
    */
   interactive?: { state: string; personaId?: string; returnTo?: string };
+  /**
+   * Callback only: the issuer recorded when the sign-in started. Discovery
+   * that finds another issuer stops before the code is sent anywhere.
+   */
+  expectedIssuer?: string;
 }
 
 const parseJson = <T>(raw: string | undefined): T | undefined => {
@@ -119,6 +206,8 @@ export class KeyVaultMcpOAuthProvider implements OAuthClientProvider {
   private readonly userNames: ReturnType<typeof mcpOAuthUserSecretNames>;
   private readonly tags: Record<string, string>;
   private authorizationUrl: URL | undefined;
+  private discoveredIssuer: string | undefined;
+  private discoveredIssRequired = false;
 
   constructor(private readonly options: McpOAuthProviderOptions) {
     this.names = mcpOAuthSecretNames(options.extensionId);
@@ -139,6 +228,30 @@ export class KeyVaultMcpOAuthProvider implements OAuthClientProvider {
       token_endpoint_auth_method: "none",
       ...(this.options.scopes ? { scope: this.options.scopes } : {}),
     };
+  }
+
+  /**
+   * Called by the SDK right after discovery, before registration, token or
+   * authorization requests. No discoveryState() is offered, so every auth()
+   * run discovers (and checks) again.
+   */
+  saveDiscoveryState(state: OAuthDiscoveryState): void {
+    const issuer = validateAuthorizationServerMetadata(
+      state.authorizationServerUrl,
+      state.authorizationServerMetadata
+    );
+    if (this.options.expectedIssuer !== undefined && !issuersMatch(issuer, this.options.expectedIssuer)) {
+      throw new McpOAuthIssuerError("The authorization server changed during the sign-in");
+    }
+    this.discoveredIssuer = issuer;
+    this.discoveredIssRequired =
+      (state.authorizationServerMetadata as { authorization_response_iss_parameter_supported?: unknown } | undefined)
+        ?.authorization_response_iss_parameter_supported === true;
+  }
+
+  /** Issuer bound by the last discovery of this provider. */
+  get issuer(): string | undefined {
+    return this.discoveredIssuer;
   }
 
   /** The authorization URL captured by an interactive sign-in. */
@@ -201,6 +314,8 @@ export class KeyVaultMcpOAuthProvider implements OAuthClientProvider {
     const pending: PendingMcpOAuth = {
       state: this.options.interactive.state,
       codeVerifier,
+      issuer: this.discoveredIssuer,
+      ...(this.discoveredIssRequired ? { issRequired: true } : {}),
       userId: this.options.userId,
       personaId: this.options.interactive.personaId,
       returnTo: this.options.interactive.returnTo,
@@ -255,15 +370,22 @@ export async function hasMcpUserTokens(
 
 /**
  * Checks a callback against the pending sign-in: same state (constant-time),
- * same user who started it, not older than the TTL.
+ * same user who started it, not older than the TTL, and, when the
+ * authorization server sends `iss` (RFC 9207), the issuer recorded for this
+ * state.
  */
 export function isPendingMcpOAuthValid(
   pending: PendingMcpOAuth | undefined,
-  input: { state: string; userId: string; now?: number }
+  input: { state: string; userId: string; iss?: string | null; now?: number }
 ): boolean {
   if (!pending || !pending.codeVerifier) return false;
   if (!safeEqual(pending.state, input.state)) return false;
   if (pending.userId !== input.userId) return false;
+  if (input.iss !== undefined && input.iss !== null) {
+    if (!pending.issuer || !issuersMatch(input.iss, pending.issuer)) return false;
+  } else if (pending.issRequired) {
+    return false;
+  }
   const age = (input.now ?? Date.now()) - pending.createdAt;
   return age >= 0 && age <= MCP_OAUTH_PENDING_TTL_MS;
 }

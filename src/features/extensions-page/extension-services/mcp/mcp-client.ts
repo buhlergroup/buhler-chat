@@ -86,14 +86,15 @@ async function connectWith(
   fetchImpl: McpFetch
 ): Promise<McpSession> {
   const url = new URL(options.url);
-  const requestInit: RequestInit = { headers: options.headers };
+  // No requestInit headers: the SDK would also send them to the OAuth
+  // authorization server. The header rows go in through the fetch instead.
+  const serverFetch = withServerOriginHeaders(fetchImpl, options.url, options.headers);
   const client = new Client(CLIENT_INFO, { capabilities: {} });
   const clientTransport =
     transport === "streamable-http"
       ? new StreamableHTTPClientTransport(url, {
-          requestInit,
           authProvider: options.authProvider,
-          fetch: fetchImpl,
+          fetch: serverFetch,
           redirectPolicy: "same-origin",
           // Short-lived sessions: one connect per list or call.
           reconnectionOptions: {
@@ -104,10 +105,9 @@ async function connectWith(
           },
         })
       : new SSEClientTransport(url, {
-          requestInit,
           authProvider: options.authProvider,
           // Also used for the event stream when no eventSourceInit.fetch is set.
-          fetch: fetchImpl,
+          fetch: serverFetch,
         });
   try {
     await client.connect(clientTransport, { timeout: MCP_LIMITS.connectTimeoutMs });
@@ -118,7 +118,37 @@ async function connectWith(
   return wrapClient(client);
 }
 
-export const isMcpAuthError = (error: unknown): boolean =>
+/**
+ * Adds the static header rows to requests for the MCP server's own origin
+ * only. The SDK sends `requestInit` headers with every request, including
+ * OAuth discovery, registration and token requests to the authorization
+ * server, which must not receive an API key meant for the MCP server.
+ * Header rows win over SDK headers of the same name, as with requestInit.
+ */
+export function withServerOriginHeaders(
+  fetchImpl: McpFetch,
+  serverUrl: string,
+  headers: Record<string, string>
+): McpFetch {
+  const entries = Object.entries(headers);
+  if (entries.length === 0) return fetchImpl;
+  const serverOrigin = new URL(serverUrl).origin;
+  return (input, init) => {
+    const url = typeof input === "string" ? input : input.href;
+    let sameOrigin = false;
+    try {
+      sameOrigin = new URL(url).origin === serverOrigin;
+    } catch {
+      sameOrigin = false;
+    }
+    if (!sameOrigin) return fetchImpl(input, init);
+    const merged = new Headers(init?.headers);
+    for (const [name, value] of entries) merged.set(name, value);
+    return fetchImpl(input, { ...init, headers: merged });
+  };
+}
+
+export const isMcpAuthError =(error: unknown): boolean =>
   error instanceof UnauthorizedError || error instanceof McpOAuthRequiredError;
 
 /**

@@ -61,13 +61,15 @@ export type McpOAuthCallbackResult =
  *   - the state matches the pending record of THIS user (constant-time; the
  *     record is stored per extension + user),
  *   - the sign-in is younger than ten minutes,
+ *   - an `iss` response parameter (RFC 9207) names the issuer recorded for
+ *     this state, and discovery for the code exchange finds that issuer again,
  *   - the user may still use the extension under the access rule (owner,
  *     published, or through the agent recorded at the start). Ownership is
  *     not required.
  * The tokens are stored for this user only.
  */
 export async function completeMcpOAuthCallback(
-  input: { code: string | null; state: string; userId: string },
+  input: { code: string | null; state: string; userId: string; iss?: string | null },
   deps: McpOAuthCallbackDeps = defaultDeps()
 ): Promise<McpOAuthCallbackResult> {
   const extensionId = extensionIdFromMcpOAuthState(input.state);
@@ -75,8 +77,8 @@ export async function completeMcpOAuthCallback(
 
   const { store, userId } = { store: deps.store, userId: input.userId };
   const pending = await readPendingMcpOAuth(store, extensionId, userId);
-  if (!isPendingMcpOAuthValid(pending, { state: input.state, userId, now: deps.now?.() })) {
-    logWarn("MCP OAuth callback: state does not match a pending sign-in of this user", { extensionId });
+  if (!isPendingMcpOAuthValid(pending, { state: input.state, userId, iss: input.iss, now: deps.now?.() })) {
+    logWarn("MCP OAuth callback: state or issuer does not match a pending sign-in of this user", { extensionId });
     return { ok: false, reason: "invalid-state" };
   }
   // One use only.
@@ -103,6 +105,8 @@ export async function completeMcpOAuthCallback(
     scopes: extension.mcp.oauth?.scopes || undefined,
     redirectUrl: deps.redirectUrl(),
     store,
+    // The code goes only to the token endpoint of the server the user was sent to.
+    expectedIssuer: pending!.issuer,
   });
   // codeVerifier() reads the pending record we just cleared: hand it over.
   provider.codeVerifier = async () => pending!.codeVerifier!;

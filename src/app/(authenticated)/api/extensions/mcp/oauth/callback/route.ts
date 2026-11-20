@@ -1,7 +1,7 @@
 /**
  * OAuth redirect target for Remote MCP extensions (per-user sign-in).
  * The checks live in completeMcpOAuthCallback (mcp-oauth-callback.ts):
- * state of THIS user, ten-minute limit, access rule. The browser only gets a
+ * state of THIS user, ten-minute limit, issuer (RFC 9207), access rule. The browser only gets a
  * redirect back to a same-origin path.
  */
 
@@ -26,6 +26,7 @@ export async function GET(req: Request) {
     const result = await completeMcpOAuthCallback({
       code: params.get("code"),
       state: params.get("state") ?? "",
+      iss: params.get("iss"),
       userId: await userHashedId(),
     });
     return redirectBack(req, result.ok ? "connected" : "failed", result.returnTo);

@@ -7,13 +7,17 @@ import {
   extensionIdFromMcpOAuthState,
   hasMcpUserTokens,
   isPendingMcpOAuthValid,
+  issuersMatch,
   KeyVaultMcpOAuthProvider,
+  McpOAuthIssuerError,
   McpOAuthRequiredError,
   MCP_OAUTH_PENDING_TTL_MS,
   mcpClientSlug,
   readPendingMcpOAuth,
   safeReturnPath,
+  validateAuthorizationServerMetadata,
 } from "./mcp-oauth";
+import { openMcpSession, withServerOriginHeaders } from "./mcp-client";
 import { AI_NAME } from "@/features/theme/theme-config";
 import { MCP_EXTENSION_TAG, mcpOAuthUserSecretNames, type SecretStore } from "../extension-secrets";
 import { mcpHeaderErrors, McpSecretSchema } from "../models";
@@ -333,5 +337,210 @@ describe("MCP client identity", () => {
       redirectUrl: "https://app.example.com/cb",
     } as never);
     expect(p.clientMetadata.client_name).toBe(AI_NAME);
+  });
+});
+
+// Pinned: all extensions share one redirect URL, so the metadata of an
+// authorization server must not send the code elsewhere (RFC 8414 §3.3,
+// RFC 9207).
+describe("MCP OAuth issuer binding", () => {
+  const AS = "https://as.example.test";
+  const meta = (over: Record<string, unknown> = {}) =>
+    ({
+      issuer: AS,
+      authorization_endpoint: `${AS}/authorize`,
+      token_endpoint: `${AS}/token`,
+      registration_endpoint: `${AS}/register`,
+      response_types_supported: ["code"],
+      ...over,
+    }) as never;
+
+  it("accepts endpoints on the issuer's origin and returns the issuer", () => {
+    expect(validateAuthorizationServerMetadata(AS, meta())).toBe(AS);
+    expect(validateAuthorizationServerMetadata(`${AS}/`, meta())).toBe(AS);
+    expect(validateAuthorizationServerMetadata(AS, meta({ registration_endpoint: undefined }))).toBe(AS);
+  });
+
+  it("uses the authorization server URL as issuer when there is no metadata", () => {
+    expect(validateAuthorizationServerMetadata(AS, undefined)).toBe(AS);
+  });
+
+  it.each([
+    ["an issuer other than the URL it was read from", { issuer: "https://other.example.test" }],
+    ["an issuer with another path", { issuer: `${AS}/tenant` }],
+    ["no issuer", { issuer: undefined }],
+    ["a token endpoint on another host", { token_endpoint: "https://collector.example.test/token" }],
+    ["an authorization endpoint on another host", { authorization_endpoint: "https://other.example.test/authorize" }],
+    ["a registration endpoint on another host", { registration_endpoint: "https://other.example.test/register" }],
+    ["a token endpoint on another port", { token_endpoint: `${AS}:8443/token` }],
+    ["a token endpoint over http", { token_endpoint: "http://as.example.test/token" }],
+  ])("refuses metadata with %s", (_label, over) => {
+    expect(() => validateAuthorizationServerMetadata(AS, meta(over))).toThrow(McpOAuthIssuerError);
+  });
+
+  it("compares issuers as URLs, tolerating one trailing slash", () => {
+    expect(issuersMatch("https://AS.example.test", "https://as.example.test/")).toBe(true);
+    expect(issuersMatch("https://as.example.test/a", "https://as.example.test/b")).toBe(false);
+  });
+
+  const store = (): SecretStore => {
+    const data = new Map<string, string>();
+    return {
+      get: async (n) => data.get(n),
+      set: async (n, v) => void data.set(n, v),
+      remove: async (n) => void data.delete(n),
+      removeTagged: async () => 0,
+    };
+  };
+  const interactiveProvider = (s: SecretStore, extra: Record<string, unknown> = {}) =>
+    new KeyVaultMcpOAuthProvider({
+      extensionId: "e1",
+      serverUrl: "https://mcp.example.test/mcp",
+      userId: "u1",
+      redirectUrl: "https://app/cb",
+      store: s,
+      interactive: { state: "e1.state" },
+      ...extra,
+    });
+
+  it("records the discovered issuer with the pending sign-in", async () => {
+    const s = store();
+    const p = interactiveProvider(s);
+    p.saveDiscoveryState({ authorizationServerUrl: AS, authorizationServerMetadata: meta() });
+    await p.saveCodeVerifier("v");
+    expect(await readPendingMcpOAuth(s, "e1", "u1")).toMatchObject({ issuer: AS });
+    expect((await readPendingMcpOAuth(s, "e1", "u1"))?.issRequired).toBeUndefined();
+  });
+
+  it("refuses metadata in saveDiscoveryState, before any request to its endpoints", () => {
+    const p = interactiveProvider(store());
+    expect(() =>
+      p.saveDiscoveryState({
+        authorizationServerUrl: AS,
+        authorizationServerMetadata: meta({ token_endpoint: "https://collector.example.test/token" }),
+      })
+    ).toThrow(McpOAuthIssuerError);
+  });
+
+  it("refuses another issuer at the callback than the one the user was sent to", () => {
+    const p = interactiveProvider(store(), { expectedIssuer: "https://first.example.test" });
+    expect(() => p.saveDiscoveryState({ authorizationServerUrl: AS, authorizationServerMetadata: meta() })).toThrow(
+      /changed during the sign-in/
+    );
+  });
+
+  it("checks the iss response parameter against the issuer of the state", () => {
+    const pending = { state: "s1", codeVerifier: "v", userId: "u1", createdAt: 1_000, issuer: AS };
+    const check = (iss: string | null | undefined, p: object = pending) =>
+      isPendingMcpOAuthValid(p as never, { state: "s1", userId: "u1", iss, now: 2_000 });
+    expect(check(AS)).toBe(true);
+    expect(check(`${AS}/`)).toBe(true);
+    expect(check(null)).toBe(true);
+    expect(check("https://other.example.test")).toBe(false);
+    expect(check("")).toBe(false);
+    // A pending record without an issuer accepts no iss at all.
+    expect(check(AS, { ...pending, issuer: undefined })).toBe(false);
+    // A server that announced RFC 9207 support must send iss.
+    expect(check(null, { ...pending, issRequired: true })).toBe(false);
+    expect(check(AS, { ...pending, issRequired: true })).toBe(true);
+  });
+
+  it("requires iss when the metadata announces RFC 9207 support", async () => {
+    const s = store();
+    const p = interactiveProvider(s);
+    p.saveDiscoveryState({
+      authorizationServerUrl: AS,
+      authorizationServerMetadata: meta({ authorization_response_iss_parameter_supported: true }),
+    });
+    await p.saveCodeVerifier("v");
+    expect(await readPendingMcpOAuth(s, "e1", "u1")).toMatchObject({ issuer: AS, issRequired: true });
+  });
+});
+
+// Pinned: header rows (for example an API key) are for the MCP server only.
+// The SDK also sends requestInit headers to the OAuth authorization server.
+describe("MCP header rows reach only the MCP server origin", () => {
+  it("adds the rows for the server origin and leaves other origins alone", async () => {
+    const seen: Array<{ url: string; headers: Headers }> = [];
+    const base = async (url: string | URL, init?: RequestInit) => {
+      seen.push({ url: String(url), headers: new Headers(init?.headers) });
+      return new Response("{}");
+    };
+    const f = withServerOriginHeaders(base, "https://mcp.example.test/mcp", { "X-Api-Key": FAKE });
+    await f("https://mcp.example.test/mcp", { headers: { Accept: "application/json" } });
+    await f(new URL("https://mcp.example.test/.well-known/oauth-protected-resource/mcp"));
+    await f("https://as.example.test/token", { headers: { "content-type": "application/x-www-form-urlencoded" } });
+    await f("https://mcp.example.test:8443/mcp");
+    expect(seen.map((r) => r.headers.get("x-api-key"))).toEqual([FAKE, FAKE, null, null]);
+    expect(seen[0].headers.get("accept")).toBe("application/json");
+    expect(seen[2].headers.get("content-type")).toBe("application/x-www-form-urlencoded");
+  });
+
+  it("sends no header row to the authorization server during a real SDK sign-in attempt", async () => {
+    const MCP = "https://mcp.example.test";
+    const AS = "https://as.example.test";
+    const seen: Array<{ url: string; headers: Headers }> = [];
+    const json = (body: unknown, status = 200) =>
+      new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
+    const fakeFetch = async (input: string | URL, init?: RequestInit) => {
+      const url = String(input);
+      seen.push({ url, headers: new Headers(init?.headers) });
+      if (url === `${MCP}/mcp`) {
+        return new Response(null, {
+          status: 401,
+          headers: { "www-authenticate": `Bearer resource_metadata="${MCP}/.well-known/oauth-protected-resource/mcp"` },
+        });
+      }
+      if (url.startsWith(`${MCP}/.well-known/oauth-protected-resource`)) {
+        return json({ resource: `${MCP}/mcp`, authorization_servers: [AS] });
+      }
+      if (url === `${AS}/.well-known/oauth-authorization-server`) {
+        return json({
+          issuer: AS,
+          authorization_endpoint: `${AS}/authorize`,
+          token_endpoint: `${AS}/token`,
+          registration_endpoint: `${AS}/register`,
+          response_types_supported: ["code"],
+          code_challenge_methods_supported: ["S256"],
+        });
+      }
+      if (url === `${AS}/register`) {
+        return json({ client_id: "dyn", redirect_uris: ["https://app/cb"] }, 201);
+      }
+      return new Response(null, { status: 404 });
+    };
+    const memory = new Map<string, string>();
+    const authProvider = new KeyVaultMcpOAuthProvider({
+      extensionId: "e1",
+      serverUrl: `${MCP}/mcp`,
+      userId: "u1",
+      redirectUrl: "https://app/cb",
+      store: {
+        get: async (n) => memory.get(n),
+        set: async (n, v) => void memory.set(n, v),
+        remove: async (n) => void memory.delete(n),
+        removeTagged: async () => 0,
+      },
+    });
+
+    await expect(
+      openMcpSession({
+        url: `${MCP}/mcp`,
+        transport: "streamable-http",
+        headers: { "X-Api-Key": FAKE },
+        authProvider,
+        fetch: fakeFetch,
+      })
+    ).rejects.toThrow();
+
+    const toAs = seen.filter((r) => r.url.startsWith(AS));
+    const toMcp = seen.filter((r) => r.url.startsWith(MCP));
+    // The SDK reached the authorization server (metadata and registration) ...
+    expect(toAs.map((r) => new URL(r.url).pathname)).toEqual(
+      expect.arrayContaining(["/.well-known/oauth-authorization-server", "/register"])
+    );
+    // ... without the header row, which went to the MCP server only.
+    expect(toAs.every((r) => r.headers.get("x-api-key") === null)).toBe(true);
+    expect(toMcp.find((r) => r.url === `${MCP}/mcp`)?.headers.get("x-api-key")).toBe(FAKE);
   });
 });
