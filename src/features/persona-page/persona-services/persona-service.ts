@@ -270,8 +270,9 @@ export const UpsertPersona = async (
     if (personaResponse.status === "OK") {
       const { response: persona } = personaResponse;
 
-      // The stored list, not the client's, says which documents the persona
-      // has now.
+      // The documents to remove are computed from the STORED list, not from
+      // the ids the client sends, so a save can only remove documents of
+      // this agent.
       const personaDocumentIdsResponse = await AddOrUpdatePersonaDocuments(
         sharePointFiles,
         persona.personaDocumentIds || []
