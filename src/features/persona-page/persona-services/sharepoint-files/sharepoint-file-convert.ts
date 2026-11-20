@@ -32,8 +32,26 @@ export interface PreparedFile {
   height?: number;
 }
 
-/** Decoded pixels may not exceed this (a 50 MB file can hold a pixel bomb). */
-const MAX_INPUT_PIXELS = 150_000_000;
+/**
+ * Decoded pixels may not exceed this: a small, highly compressed PNG or GIF
+ * can hold a pixel bomb. 40 MP (about 160 MB of RGBA) covers normal photos;
+ * larger images come as SharePoint's preview image (imageMaxPx) anyway.
+ */
+export const MAX_INPUT_PIXELS = 40_000_000;
+
+/**
+ * sharp input with the pixel limit, first page / frame only: an animated GIF
+ * or WebP, or a multi-page TIFF, is never decoded with all its frames.
+ */
+const firstFrame = (data: Buffer): Sharp =>
+  sharp(data, { page: 0, pages: 1, limitInputPixels: MAX_INPUT_PIXELS });
+
+const PIXEL_LIMIT_MESSAGE =
+  `The image has more than ${MAX_INPUT_PIXELS / 1_000_000} megapixels and cannot be read. ` +
+  "Ask the user for a smaller copy.";
+
+const isPixelLimitError = (error: unknown): boolean =>
+  error instanceof Error && /pixel limit/i.test(error.message);
 
 const replaceExtension = (name: string, ext: string): string => {
   const dot = name.lastIndexOf(".");
@@ -130,7 +148,7 @@ export async function prepareFileForCodeInterpreter(
         });
       } else {
         // First page of a multi-page TIFF.
-        input = sharp(data, { page: 0, limitInputPixels: MAX_INPUT_PIXELS });
+        input = firstFrame(data);
       }
       const { data: out, info } = await input
         .rotate()
@@ -148,32 +166,30 @@ export async function prepareFileForCodeInterpreter(
       };
     }
 
-    const animated = ext === "gif";
-    const meta = await sharp(data, { animated, limitInputPixels: MAX_INPUT_PIXELS }).metadata();
+    // Header only (no pixels decoded); width/height of the first frame.
+    const meta = await firstFrame(data).metadata();
     const { width, height } = orientedSize(meta);
-    // An animated image reports the height of all frames together.
-    const shownHeight = animated && meta.pageHeight ? meta.pageHeight : height;
-    if (Math.max(width, shownHeight) <= maxPx) {
-      return { name, data, width, height: shownHeight };
+    if (Math.max(width, height) <= maxPx) {
+      // Passed through as it is: an animation is kept.
+      return { name, data, width, height };
     }
-    let pipeline = sharp(data, { animated, limitInputPixels: MAX_INPUT_PIXELS })
-      .rotate()
-      .resize(fit);
+    let pipeline = firstFrame(data).rotate().resize(fit);
     if (ext === "jpg" || ext === "jpeg") pipeline = pipeline.jpeg({ quality });
     else if (ext === "png") pipeline = pipeline.png();
     else if (ext === "webp") pipeline = pipeline.webp({ quality });
     else pipeline = pipeline.gif();
     const { data: out, info } = await pipeline.toBuffer({ resolveWithObject: true });
-    const outHeight = animated && info.pageHeight ? info.pageHeight : info.height;
+    const frames = (meta.pages ?? 1) > 1 ? " Only the first frame of the animation is kept." : "";
     return {
       name,
       data: out,
-      note: `Resized from ${width}x${shownHeight} to ${info.width}x${outHeight} px.`,
+      note: `Resized from ${width}x${height} to ${info.width}x${info.height} px.${frames}`,
       width: info.width,
-      height: outHeight,
+      height: info.height,
     };
   } catch (error) {
     if (error instanceof FileConversionError) throw error;
+    if (isPixelLimitError(error)) throw new FileConversionError(PIXEL_LIMIT_MESSAGE);
     throw new FileConversionError(
       `The image could not be read (${error instanceof Error ? error.message : String(error)}).`,
     );
@@ -202,7 +218,7 @@ export async function preparePreviewForCodeInterpreter(
 ): Promise<PreparedFile> {
   let format: string | undefined;
   try {
-    format = (await sharp(data, { limitInputPixels: MAX_INPUT_PIXELS }).metadata()).format;
+    format = (await firstFrame(data).metadata()).format;
   } catch (error) {
     throw new FileConversionError(
       `The preview image could not be read (${error instanceof Error ? error.message : String(error)}).`,
