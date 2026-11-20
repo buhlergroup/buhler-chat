@@ -54,6 +54,7 @@ import {
 } from "./skills/persona-skill-store";
 import { deleteFileSourcesForPersona } from "./sharepoint-files/sharepoint-file-store";
 import { getCodeInterpreterFileLimit } from "@/features/chat-page/chat-services/code-interpreter-constants";
+import { unavailableAgentFileNames } from "@/features/chat-page/chat-services/chat-api/unavailable-agent-files";
 import {
   extensionIdsForAgentSave,
   usableExtensionIdsForAgent,
@@ -475,6 +476,9 @@ export const CreatePersonaChat = async (
 
     // Download and upload Code Interpreter documents from SharePoint
     let attachedFiles: AttachedFileModel[] = [];
+    // Names of the documents that could not be loaded; the model is told
+    // about them (thread.unavailableAgentFiles), the user may lack access.
+    const notLoadedFileNames: string[] = [];
     const ciDocumentIds = persona.codeInterpreterDocumentIds || [];
     
     if (ciDocumentIds.length > 0) {
@@ -502,6 +506,7 @@ export const CreatePersonaChat = async (
                 fileName: doc.fileName,
                 error: downloadResult.errors
               });
+              notLoadedFileNames.push(doc.fileName);
               continue;
             }
 
@@ -533,6 +538,7 @@ export const CreatePersonaChat = async (
                 fileName: name,
                 error: uploadResult.errors
               });
+              notLoadedFileNames.push(doc.fileName);
             }
           } catch (error) {
             logError("Error processing CI document", {
@@ -540,6 +546,7 @@ export const CreatePersonaChat = async (
               fileName: doc.fileName,
               error: error instanceof Error ? error.message : String(error)
             });
+            notLoadedFileNames.push(doc.fileName);
           }
         }
       }
@@ -572,6 +579,7 @@ export const CreatePersonaChat = async (
     // use enter the thread.
     const chatUserId = await userHashedId();
     const extensionIds = await usableExtensionIdsForAgent(persona, chatUserId);
+    const unavailableAgentFiles = unavailableAgentFileNames(notLoadedFileNames);
 
     // The attached files are built here on the server (agent documents and
     // skill archives), so the thread is created directly; the UpsertChatThread
@@ -595,6 +603,7 @@ export const CreatePersonaChat = async (
       selectedModel: persona.selectedModel as ChatModel | undefined,
       subAgentIds: persona.subAgentIds || [],
       defaultTools: persona.defaultTools,
+      ...(unavailableAgentFiles.length > 0 ? { unavailableAgentFiles } : {}),
     }).catch((error) => {
       logError("Failed to create the agent chat", {
         personaId,

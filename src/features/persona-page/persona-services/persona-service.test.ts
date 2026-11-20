@@ -678,6 +678,75 @@ describe("persona-service.ts", () => {
     expect(callArg.attachedFiles![0].id).toBe("openai-file-1");
   });
 
+  // 015b – CreatePersonaChat names the files it could not load (no ids, no URLs)
+  it("015b CreatePersonaChat stores the names of CI docs that could not be loaded on the thread", async () => {
+    seedPersona({ id: "p-chat-ci-names", codeInterpreterDocumentIds: ["d1", "d2", "d3", "d4"] });
+    const ciDoc = (id: string, fileName: string) => ({
+      id,
+      fileName,
+      userId: USER_HASH,
+      source: "SHAREPOINT" as const,
+      type: "PERSONA_CI_DOCUMENT" as const,
+      externalFile: { documentId: `sp-${id}`, parentReference: { driveId: "drive-1" } },
+    });
+    vi.mocked(PersonaCIDocumentsByIds).mockResolvedValueOnce({
+      status: "OK",
+      response: [
+        ciDoc("d1", "no-access.xlsx"),
+        ciDoc("d2", "ok.csv"),
+        ciDoc("d3", "upload-fails.csv"),
+        ciDoc("d4", "throws.csv"),
+      ],
+    });
+    vi.mocked(DownloadSharePointFile)
+      .mockResolvedValueOnce({ status: "ERROR", errors: [{ message: "Graph returned 403." }] })
+      .mockResolvedValueOnce({
+        status: "OK",
+        response: { buffer: Buffer.from("data"), name: "ok.csv", contentType: "text/csv" },
+      })
+      .mockResolvedValueOnce({
+        status: "OK",
+        response: { buffer: Buffer.from("data"), name: "upload-fails.csv", contentType: "text/csv" },
+      })
+      .mockRejectedValueOnce(new Error("boom"));
+    vi.mocked(UploadFileForCodeInterpreter)
+      .mockResolvedValueOnce({ status: "OK", response: { id: "openai-file-1", name: "ok.csv" } })
+      .mockResolvedValueOnce({ status: "ERROR", errors: [{ message: "upload failed" }] });
+
+    const result = await CreatePersonaChat("p-chat-ci-names");
+    expect(result.status).toBe("OK");
+
+    const callArg = vi.mocked(createChatThreadWithServerFiles).mock.calls[0][0] as any;
+    expect(callArg.attachedFiles).toHaveLength(1);
+    expect(callArg.unavailableAgentFiles).toEqual([
+      "no-access.xlsx",
+      "upload-fails.csv",
+      "throws.csv",
+    ]);
+    expect(JSON.stringify(callArg.unavailableAgentFiles)).not.toMatch(/sp-d|drive-1|d1|http/);
+  });
+
+  it("015c CreatePersonaChat sets no note when every CI doc loads", async () => {
+    seedPersona({ id: "p-chat-ci-all", codeInterpreterDocumentIds: ["d1"] });
+    vi.mocked(PersonaCIDocumentsByIds).mockResolvedValueOnce({
+      status: "OK",
+      response: [
+        {
+          id: "d1",
+          fileName: "ok.csv",
+          userId: USER_HASH,
+          source: "SHAREPOINT",
+          type: "PERSONA_CI_DOCUMENT",
+          externalFile: { documentId: "sp-ok", parentReference: { driveId: "drive-1" } },
+        },
+      ],
+    });
+
+    await CreatePersonaChat("p-chat-ci-all");
+    const callArg = vi.mocked(createChatThreadWithServerFiles).mock.calls[0][0] as any;
+    expect(callArg.unavailableAgentFiles).toBeUndefined();
+  });
+
   // 016 – DeletePersona UNAUTHORIZED when not owner
   it("016 DeletePersona UNAUTHORIZED when not owner/non-admin", async () => {
     await setSession(defaultSession);
