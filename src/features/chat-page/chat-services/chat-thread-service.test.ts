@@ -614,3 +614,65 @@ describe("chat-page.unit.thread-service.033 — EnsureChatThreadOperation blocks
     expect(result.status).toBe("UNAUTHORIZED");
   });
 });
+
+// Pinned: thread write actions are callable from the browser. They used to
+// store any attached code interpreter file id the client sent (which the chat
+// then mounted in the container) and any userId (another user's partition).
+describe("chat-page.unit.thread-service — server is the source of truth for code interpreter files", () => {
+  const uploaded = { id: "f-up", name: "a.csv", type: "code-interpreter" as const, source: "upload" as const };
+
+  it("UpsertChatThread keeps recorded files with their stored data and drops new ones", async () => {
+    historyItems = [makeThread({ attachedFiles: [uploaded] })];
+    const result = await UpsertChatThread(
+      makeThread({
+        attachedFiles: [
+          { ...uploaded, source: "skill" },
+          { id: "f-foreign", name: "x.csv", type: "code-interpreter", source: "upload" },
+          { id: "doc-1", name: "n.pdf", type: "search-indexed" },
+        ],
+      }),
+    );
+    expect(result.status).toBe("OK");
+    const doc = historyContainer.items.upsert.mock.calls[0][0];
+    expect(doc.attachedFiles).toEqual([
+      uploaded,
+      { id: "doc-1", name: "n.pdf", type: "search-indexed" },
+    ]);
+  });
+
+  it("UpsertChatThread cannot create a thread with code interpreter files", async () => {
+    const result = await UpsertChatThread(
+      makeThread({
+        id: "new-thread",
+        attachedFiles: [{ id: "f-foreign", name: "x.csv", type: "code-interpreter" }],
+      }),
+    );
+    expect(result.status).toBe("OK");
+    expect(historyContainer.items.upsert.mock.calls[0][0].attachedFiles).toEqual([]);
+  });
+
+  it("UpsertChatThread always writes to the caller's partition", async () => {
+    await UpsertChatThread(makeThread({ id: "new-thread", userId: "other-user-hash" }));
+    expect(historyContainer.items.upsert.mock.calls[0][0].userId).toBe(hashedEmail);
+  });
+
+  it("AddAttachedFile refuses a code interpreter file the server did not record", async () => {
+    historyItems = [makeThread({ attachedFiles: [] })];
+    const result = await AddAttachedFile("t1", {
+      id: "f-foreign",
+      name: "x.csv",
+      type: "code-interpreter",
+    });
+    expect(result.status).toBe("NOT_FOUND");
+    expect(historyContainer.items.upsert).not.toHaveBeenCalled();
+  });
+
+  it("AddAttachedFile still adds a search-indexed document", async () => {
+    historyItems = [makeThread({ attachedFiles: [] })];
+    const result = await AddAttachedFile("t1", { id: "doc-1", name: "n.pdf", type: "search-indexed" });
+    expect(result.status).toBe("OK");
+    expect(historyContainer.items.upsert.mock.calls[0][0].attachedFiles).toEqual([
+      { id: "doc-1", name: "n.pdf", type: "search-indexed" },
+    ]);
+  });
+});

@@ -58,8 +58,8 @@ vi.mock("@/features/chat-page/chat-services/code-interpreter-service", () => ({
 }));
 
 // ── chat-thread-service mock ─────────────────────────────────────────────────
-vi.mock("@/features/chat-page/chat-services/chat-thread-service", () => ({
-  UpsertChatThread: vi.fn(async (payload: any) => ({ status: "OK", response: { ...payload } })),
+vi.mock("@/features/chat-page/chat-services/code-interpreter-file-access", () => ({
+  createChatThreadWithServerFiles: vi.fn(async (payload: any) => ({ ...payload })),
 }));
 
 // ── access-group-service mock ────────────────────────────────────────────────
@@ -97,7 +97,7 @@ import {
 } from "./persona-ci-documents-service";
 
 import { UploadFileForCodeInterpreter } from "@/features/chat-page/chat-services/code-interpreter-service";
-import { UpsertChatThread } from "@/features/chat-page/chat-services/chat-thread-service";
+import { createChatThreadWithServerFiles } from "@/features/chat-page/chat-services/code-interpreter-file-access";
 import { AccessGroupById, UserAccessGroups } from "./access-group-service";
 
 // ── helpers ──────────────────────────────────────────────────────────────────
@@ -147,9 +147,8 @@ beforeEach(() => {
     status: "OK",
     response: { id: "openai-file-1", name: "file.csv" },
   });
-  vi.mocked(UpsertChatThread).mockImplementation(async (payload: any) => ({
-    status: "OK",
-    response: { ...payload },
+  vi.mocked(createChatThreadWithServerFiles).mockImplementation(async (payload: any) => ({
+    ...payload,
   }));
   historyContainer.items.create.mockImplementation(async (doc: any) => ({ resource: { ...doc } }));
   historyContainer.items.upsert.mockImplementation(async (doc: any) => ({ resource: { ...doc } }));
@@ -428,13 +427,15 @@ describe("persona-service.ts", () => {
 
     await CreatePersonaChat("p-chat-ci");
 
-    expect(UpsertChatThread).toHaveBeenCalled();
-    const callArg = vi.mocked(UpsertChatThread).mock.calls[0][0] as any;
+    expect(createChatThreadWithServerFiles).toHaveBeenCalled();
+    const callArg = vi.mocked(createChatThreadWithServerFiles).mock.calls[0][0] as any;
     expect(callArg.attachedFiles).toBeDefined();
     expect(callArg.attachedFiles!.length).toBe(1);
     expect(callArg.attachedFiles![0].id).toBe("openai-file-1");
     expect(callArg.attachedFiles![0].type).toBe("code-interpreter");
     expect(callArg.attachedFiles![0].uploadedAt).toBeInstanceOf(Date);
+    // Recorded as the agent's document: users may not delete it.
+    expect(callArg.attachedFiles![0].source).toBe("agent-document");
   });
 
   // 015 – CreatePersonaChat continues after a single CI doc fails to download
@@ -473,7 +474,7 @@ describe("persona-service.ts", () => {
     const result = await CreatePersonaChat("p-chat-ci-partial");
     expect(result.status).toBe("OK");
 
-    const callArg = vi.mocked(UpsertChatThread).mock.calls[0][0] as any;
+    const callArg = vi.mocked(createChatThreadWithServerFiles).mock.calls[0][0] as any;
     // Only one file should be attached (the one that downloaded successfully)
     expect(callArg.attachedFiles?.length).toBe(1);
     // The name comes from UploadFileForCodeInterpreter which returns the file.name from the upload
@@ -525,13 +526,10 @@ describe("persona-service.ts", () => {
     expect(result.status).toBe("ERROR");
   });
 
-  // 020 – CreatePersonaChat returns ERROR when UpsertChatThread fails
-  it("020 CreatePersonaChat returns ERROR when UpsertChatThread fails", async () => {
+  // 020 – CreatePersonaChat returns ERROR when the thread cannot be created
+  it("020 CreatePersonaChat returns ERROR when the thread cannot be created", async () => {
     seedPersona({ id: "p-chat-err" });
-    vi.mocked(UpsertChatThread).mockResolvedValueOnce({
-      status: "ERROR",
-      errors: [{ message: "thread fail" }],
-    });
+    vi.mocked(createChatThreadWithServerFiles).mockRejectedValueOnce(new Error("thread fail"));
 
     const result = await CreatePersonaChat("p-chat-err");
     expect(result.status).toBe("ERROR");

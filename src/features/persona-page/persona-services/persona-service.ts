@@ -2,7 +2,7 @@
 import "server-only";
 
 import { getCurrentUser, userHashedId } from "@/features/auth-page/helpers";
-import { UpsertChatThread } from "@/features/chat-page/chat-services/chat-thread-service";
+import { createChatThreadWithServerFiles } from "@/features/chat-page/chat-services/code-interpreter-file-access";
 import {
   CHAT_THREAD_ATTRIBUTE,
   ChatThreadModel,
@@ -520,7 +520,8 @@ export const CreatePersonaChat = async (
                 id: uploadResult.response.id,
                 name: uploadResult.response.name,
                 type: "code-interpreter",
-                uploadedAt: new Date()
+                uploadedAt: new Date(),
+                source: "agent-document",
               });
               
               logInfo("Successfully uploaded CI document to OpenAI", {
@@ -568,7 +569,10 @@ export const CreatePersonaChat = async (
       attachedFiles = [...attachedFiles, ...skillFiles];
     }
 
-    const response = await UpsertChatThread({
+    // The attached files are built here on the server (agent documents and
+    // skill archives), so the thread is created directly; the UpsertChatThread
+    // action would drop code interpreter files it did not record itself.
+    const created = await createChatThreadWithServerFiles({
       name: persona.name,
       useName: user.name,
       userId: await userHashedId(),
@@ -587,7 +591,16 @@ export const CreatePersonaChat = async (
       selectedModel: persona.selectedModel as ChatModel | undefined,
       subAgentIds: persona.subAgentIds || [],
       defaultTools: persona.defaultTools,
+    }).catch((error) => {
+      logError("Failed to create the agent chat", {
+        personaId,
+        error: error instanceof Error ? error.message : String(error),
+      });
+      return undefined;
     });
+    const response: ServerActionResponse<ChatThreadModel> = created
+      ? { status: "OK", response: created }
+      : { status: "ERROR", errors: [{ message: "The chat could not be created." }] };
 
     if (response.status === "OK") {
       // Fire-and-forget: stats must never block or fail chat creation.

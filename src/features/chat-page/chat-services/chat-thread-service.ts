@@ -30,6 +30,7 @@ import {
   ChatThreadModel,
   AttachedFileModel,
 } from "./models";
+import { mergeClientAttachedFiles } from "./code-interpreter-file-access";
 
 const VALID_REASONING_EFFORTS: ReadonlyArray<ReasoningEffort> = [
   "minimal",
@@ -354,15 +355,27 @@ export const UpsertChatThread = async (
   chatThread: ChatThreadModel
 ): Promise<ServerActionResponse<ChatThreadModel>> => {
   try {
+    let stored: ChatThreadModel | undefined;
     if (chatThread.id) {
       const response = await EnsureChatThreadOperation(chatThread.id);
       if (response.status !== "OK") {
         if (response.status !== "NOT_FOUND") {
           return response;
         }
+      } else {
+        stored = response.response;
       }
     }
 
+    // This is a server action, so `chatThread` may come straight from the
+    // browser. The thread always goes to the caller's own partition, and code
+    // interpreter files can only be kept or removed, never added: the server
+    // records those itself (see code-interpreter-file-access.ts).
+    chatThread.userId = await userHashedId();
+    chatThread.attachedFiles = mergeClientAttachedFiles(
+      stored?.attachedFiles,
+      chatThread.attachedFiles,
+    );
     chatThread.lastMessageAt = new Date();
     const { resource } = await HistoryContainer().items.upsert<ChatThreadModel>(
       chatThread
@@ -593,6 +606,14 @@ export const AddAttachedFile = async (
       const existingFiles = chatThread.attachedFiles || [];
       // Avoid duplicates
       if (!existingFiles.some(f => f.id === file.id)) {
+        // Code interpreter files are recorded by the server when they are
+        // uploaded (/api/code-interpreter/upload), never from a client id.
+        if (file.type !== "search-indexed") {
+          return {
+            status: "NOT_FOUND",
+            errors: [{ message: "File not found" }],
+          };
+        }
         chatThread.attachedFiles = [...existingFiles, file];
         return await UpsertChatThread(chatThread);
       }

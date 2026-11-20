@@ -359,6 +359,7 @@ export async function uploadSkillArchivesForCodeInterpreter(
           name: skillArchiveFileName(skill.name),
           type: "code-interpreter",
           uploadedAt: new Date(),
+          source: "skill",
         };
       } catch (error) {
         logError("agent skills: archive upload failed", {

@@ -6,6 +6,12 @@ vi.mock("@/features/chat-page/chat-services/code-interpreter-service", () => ({
   DeleteFileFromCodeInterpreter: vi.fn(),
 }));
 
+const mockFindFile = vi.fn();
+vi.mock("@/features/chat-page/chat-services/code-interpreter-file-access", () => ({
+  findCodeInterpreterFileOfCurrentUser: (...a: unknown[]) => mockFindFile(...a),
+  mayDeleteCodeInterpreterFile: (file: { source?: string }) => file.source === "upload",
+}));
+
 vi.mock("@/features/auth-page/helpers", () => ({
   getCurrentUser: vi.fn(),
 }));
@@ -47,6 +53,63 @@ describe("/api/code-interpreter/file/[fileId] route", () => {
     mockedDelete.mockReset();
     mockedGetCurrentUser.mockReset();
     mockedGetCurrentUser.mockResolvedValue(defaultUser);
+    mockFindFile.mockReset();
+    mockFindFile.mockImplementation(async (id: string) => ({
+      threadId: "t1",
+      file: { id, name: "data.csv", type: "code-interpreter", source: "upload" },
+    }));
+  });
+
+  // Pinned: GET and DELETE used to act on ANY OpenAI file id for any signed-in
+  // user. Now only files on the caller's own threads; DELETE only the
+  // caller's uploads. Everything else is a 404 and never reaches OpenAI.
+  describe("only files the caller may access", () => {
+    it("GET returns 404 for a file that is not on the caller's threads", async () => {
+      mockFindFile.mockResolvedValue(undefined);
+      const res = await GET(makeGetRequest("file-foreign"), {
+        params: Promise.resolve({ fileId: "file-foreign" }),
+      });
+      expect(res.status).toBe(404);
+      expect(mockFindFile).toHaveBeenCalledWith("file-foreign");
+      expect(mockedDownload).not.toHaveBeenCalled();
+    });
+
+    it("GET serves an agent document of the caller's own agent chat", async () => {
+      mockFindFile.mockResolvedValue({
+        threadId: "t1",
+        file: { id: "file-doc", name: "doc.xlsx", type: "code-interpreter", source: "agent-document" },
+      });
+      mockedDownload.mockResolvedValue({
+        status: "OK",
+        response: { data: Buffer.from("x"), name: "doc.xlsx", contentType: "application/octet-stream" },
+      });
+      const res = await GET(makeGetRequest("file-doc"), { params: Promise.resolve({ fileId: "file-doc" }) });
+      expect(res.status).toBe(200);
+    });
+
+    it("DELETE returns 404 for a file that is not on the caller's threads", async () => {
+      mockFindFile.mockResolvedValue(undefined);
+      const res = await DELETE(makeDeleteRequest("file-foreign"), {
+        params: Promise.resolve({ fileId: "file-foreign" }),
+      });
+      expect(res.status).toBe(404);
+      expect(mockedDelete).not.toHaveBeenCalled();
+    });
+
+    it.each([["agent-document"], ["skill"], [undefined]])(
+      "DELETE refuses a file the caller did not upload (source %s)",
+      async (source) => {
+        mockFindFile.mockResolvedValue({
+          threadId: "t1",
+          file: { id: "file-x", name: "skill-demo.zip", type: "code-interpreter", source },
+        });
+        const res = await DELETE(makeDeleteRequest("file-x"), {
+          params: Promise.resolve({ fileId: "file-x" }),
+        });
+        expect(res.status).toBe(404);
+        expect(mockedDelete).not.toHaveBeenCalled();
+      },
+    );
   });
 
   // api.unit.ci-file.001

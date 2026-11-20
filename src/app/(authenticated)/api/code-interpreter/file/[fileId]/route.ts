@@ -2,6 +2,13 @@ import { DeleteFileFromCodeInterpreter, DownloadFileFromCodeInterpreter } from "
 import { getCurrentUser } from "@/features/auth-page/helpers";
 import { logError, logDebug } from "@/features/common/services/logger";
 import { NextRequest } from "next/server";
+import {
+  findCodeInterpreterFileOfCurrentUser,
+  mayDeleteCodeInterpreterFile,
+} from "@/features/chat-page/chat-services/code-interpreter-file-access";
+
+// One answer for "no such file" and "not yours", so ids cannot be probed.
+const notFound = () => new Response("File not found", { status: 404 });
 
 export async function GET(
   _request: NextRequest,
@@ -19,6 +26,11 @@ export async function GET(
     if (!fileId) {
       return new Response("File ID is required", { status: 400 });
     }
+
+    // Only files on the caller's own threads: own uploads, and the agent's
+    // documents and skill archives of chats the caller started.
+    const owned = await findCodeInterpreterFileOfCurrentUser(fileId);
+    if (!owned) return notFound();
 
     logDebug("Downloading Code Interpreter file", { fileId, userEmail: user.email });
 
@@ -60,6 +72,11 @@ export async function DELETE(
     if (!fileId) {
       return new Response("File ID is required", { status: 400 });
     }
+
+    // Only files the caller uploaded. Agent documents and skill archives are
+    // never deleted here (a skill archive is shared by every chat with it).
+    const owned = await findCodeInterpreterFileOfCurrentUser(fileId);
+    if (!owned || !mayDeleteCodeInterpreterFile(owned.file)) return notFound();
 
     logDebug("Deleting Code Interpreter file", { fileId, userEmail: user.email });
 
