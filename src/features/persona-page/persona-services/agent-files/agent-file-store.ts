@@ -830,9 +830,14 @@ export async function addAgentFiles(
  * lists (persona-file-rows.ts). Returns a warning when something could not
  * be deleted (logged; the file is no longer used either way).
  */
-async function deleteUnlistedRows(personaId: string, ref: AgentFileRef): Promise<string | undefined> {
+async function deleteUnlistedRows(access: SkillAccess, ref: AgentFileRef): Promise<string | undefined> {
   if (ref.kind !== "document" && ref.kind !== "ci-document") return undefined;
-  const errors = await deleteFileRowsIfUnlisted(personaId, ref.kind, ref.id);
+  const personaId = access.persona.id;
+  const errors = await deleteFileRowsIfUnlisted(
+    { personaId, ownerUserId: access.persona.userId, callerUserId: access.currentUserId },
+    ref.kind,
+    ref.id,
+  );
   if (errors.length === 0) return undefined;
   logError("agent files: stored data of a removed file not deleted", {
     personaId,
@@ -862,7 +867,7 @@ export async function removeAgentFile(
       }
       const stored = await updatePersonaRow(personaId, withoutId(field, ref.id));
       if (!stored) return { status: "NOT_FOUND", errors: [{ message: "Agent not found." }] };
-      const warning = await deleteUnlistedRows(personaId, ref);
+      const warning = await deleteUnlistedRows(access, ref);
       return { status: "OK", response: warning ? { warning } : {} };
     }
     case "skill": {

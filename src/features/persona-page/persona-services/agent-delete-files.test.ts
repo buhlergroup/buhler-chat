@@ -1,10 +1,12 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
+import { createHash } from "crypto";
 
 /**
  * The cleanup of an agent's files when the agent is deleted (the three
- * calls DeletePersona makes): Search and Code rows in their own partition
- * with the Search chunks, skills (row + blob) and SharePoint sources, also
- * when an admin deletes another user's agent. Real code: persona-file-rows,
+ * calls DeletePersona makes): Search and Code rows in the owner's partition
+ * (and a legacy row in the deleting admin's own partition) with the Search
+ * chunks, skills (row + blob) and SharePoint sources, also when an admin
+ * deletes another user's agent. A row in any other partition stays. Real code: persona-file-rows,
  * the Search / Code row stores, the skill and source cleanups. Faked:
  * Cosmos (one container with partitions), the AI Search index, blobs.
  */
@@ -85,8 +87,12 @@ import { deleteSkillsForPersona } from "./skills/persona-skill-store";
 import { deleteFileSourcesForPersona } from "./sharepoint-files/sharepoint-file-store";
 import { logError } from "@/features/common/services/logger";
 
+const sha = (email: string) => createHash("sha256").update(email).digest("hex");
 const OWNER = "owner-hash";
-const ADMIN = "admin-hash";
+// An admin (ADMIN_EMAIL_ADDRESS) wrote rows in its own partition before the
+// owner-partition rule.
+const ADMIN_EMAIL = "admin@example.com";
+const ADMIN = sha(ADMIN_EMAIL);
 const DRIVE = "b!driveA_123";
 
 const searchRow = (id: string, userId: string) => {
@@ -103,8 +109,8 @@ const codeRow = (id: string, userId: string) => ({
 });
 
 /** What DeletePersona does with the files before it deletes the persona row. */
-const deleteAgentFiles = async (persona: Doc) => {
-  await deleteAgentFileRows(persona as any);
+const deleteAgentFiles = async (persona: Doc, caller = OWNER) => {
+  await deleteAgentFileRows(persona as any, caller);
   await deleteSkillsForPersona(persona.id);
   await deleteFileSourcesForPersona(persona.id);
 };
@@ -116,6 +122,7 @@ beforeEach(() => {
   chunks = [];
   deletedBlobs.length = 0;
   failDeleteOf = undefined;
+  vi.stubEnv("ADMIN_EMAIL_ADDRESS", ` ${ADMIN_EMAIL} , other-admin@example.com`);
   persona = {
     id: "p1",
     type: "PERSONA",
@@ -151,7 +158,7 @@ beforeEach(() => {
 
 const left = () => store.filter((d) => d.id !== "p1").map((d) => d.id);
 
-describe("deleting an agent deletes its files in every partition", () => {
+describe("deleting an agent deletes its files in the owner's partition", () => {
   it("removes Search rows with their chunks, Code rows, skills with blobs and sources", async () => {
     await deleteAgentFiles(persona);
     expect(left()).toEqual(["s-other"]);
@@ -159,10 +166,39 @@ describe("deleting an agent deletes its files in every partition", () => {
     expect(deletedBlobs.sort()).toEqual(["agent-skills/p1/s1.zip", "agent-skills/p1/s2.zip"]);
   });
 
-  it("needs no session: every partition comes from the row (an admin deleting a user's agent)", async () => {
-    // No user is signed in here at all; the owner's and the old admin rows go.
-    await deleteAgentFileRows(persona as any);
+  it("needs no session: the partitions come from the persona and the caller (an admin deleting a user's agent)", async () => {
+    // No user is signed in here at all; the owner's rows and the old rows of
+    // the deleting admin go.
+    await deleteAgentFileRows(persona as any, ADMIN);
     expect(store.filter((d) => d.type === "PERSONA_DOCUMENT" || d.type === "PERSONA_CI_DOCUMENT")).toEqual([]);
+  });
+
+  it("the owner deleting the agent removes an old admin row too (the admin is in ADMIN_EMAIL_ADDRESS)", async () => {
+    await deleteAgentFileRows(persona as any, OWNER);
+    expect(store.filter((d) => d.type === "PERSONA_DOCUMENT" || d.type === "PERSONA_CI_DOCUMENT")).toEqual([]);
+  });
+
+  it("keeps a row in the partition of a user who is not an admin", async () => {
+    const FORMER = sha("former-admin@example.com");
+    store = store.filter((d) => d.userId !== ADMIN);
+    chunks = chunks.filter((c) => c.user !== ADMIN);
+    store.push(searchRow("doc-legacy", FORMER), codeRow("ci-legacy", FORMER));
+    await deleteAgentFileRows(persona as any, OWNER);
+    expect(left().sort()).toEqual(["ci-legacy", "doc-legacy", "s-other", "s1", "s2", "src1"].sort());
+    expect(chunks.map((c) => c.user)).toEqual([FORMER, FORMER]);
+  });
+
+  it("never deletes a row with the same id in a third user's partition", async () => {
+    store.push(searchRow("doc-own", "victim-hash"), codeRow("ci-own", "victim-hash"));
+    await deleteAgentFileRows(persona as any, ADMIN);
+    expect(store.filter((d) => d.userId === "victim-hash").map((d) => d.id).sort()).toEqual([
+      "ci-own",
+      "doc-own",
+    ]);
+    expect(chunks).toEqual([
+      { personaDocumentId: "doc-own", user: "victim-hash" },
+      { personaDocumentId: "doc-own", user: "victim-hash" },
+    ]);
   });
 
   it("keeps a Search or Code row that another agent still lists", async () => {
@@ -174,7 +210,7 @@ describe("deleting an agent deletes its files in every partition", () => {
 
   it("a failing delete is logged and does not stop the others", async () => {
     failDeleteOf = "ci-own";
-    const failed = await deleteAgentFileRows(persona as any);
+    const failed = await deleteAgentFileRows(persona as any, ADMIN);
     expect(failed).toBe(1);
     expect(left()).toContain("ci-own");
     expect(left()).not.toContain("ci-legacy");
