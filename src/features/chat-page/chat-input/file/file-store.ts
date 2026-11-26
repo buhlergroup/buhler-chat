@@ -6,7 +6,12 @@ import {
 } from "@/features/globals/global-message-store";
 import { proxy, useSnapshot } from "valtio";
 import { UploadChatDocument } from "../../chat-services/chat-document-service";
-import { SupportedFileExtensionsInputImages, AttachedFileModel } from "../../chat-services/models";
+import {
+  SupportedFileExtensionsInputImages,
+  AttachedFileModel,
+  imageInputNotSupportedMessage,
+  modelAcceptsImages,
+} from "../../chat-services/models";
 import {
   getCodeInterpreterFileLimit,
   isCodeInterpreterSupportedFile,
@@ -83,6 +88,11 @@ class FileStore {
           !isInputImage);
 
       if (isInputImage) {
+        if (!modelAcceptsImages(z?.selectedModel)) {
+          showError(imageInputNotSupportedMessage(z?.selectedModel));
+          this.loading = "idle";
+          return;
+        }
         const reader = new FileReader();
         reader.readAsDataURL(file);
         reader.onload = () => {

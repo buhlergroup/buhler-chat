@@ -15,6 +15,9 @@ const historyContainer = {
       return { fetchAll: async () => ({ resources: historyItems }) };
     }),
   },
+  item: vi.fn((id: string, _pk?: string) => ({
+    read: vi.fn(async () => ({ resource: historyItems.find((i) => i.id === id) })),
+  })),
 };
 
 vi.mock("@/features/common/services/cosmos", () => ({
@@ -102,11 +105,25 @@ describe("chat-page.unit.citation.004 — CreateCitations uses provided userId o
   });
 });
 
-describe("chat-page.unit.citation.005 — FindCitationByID scopes query by hashed userId", () => {
-  it("includes userId in query", async () => {
+describe("chat-page.unit.citation.005 — FindCitationByID is a point read in the caller's partition", () => {
+  it("reads item(id, hashed userId) and runs no query", async () => {
     historyItems = [{ id: "cit1", type: CHAT_CITATION_ATTRIBUTE, userId: hashedEmail, content: {} }];
-    await FindCitationByID("cit1");
-    const userParam = queryCapture?.parameters?.find((p: any) => p.name === "@userId");
-    expect(userParam?.value).toBe(hashedEmail);
+    const result = await FindCitationByID("cit1");
+    expect(result.status).toBe("OK");
+    expect((result as any).response).toMatchObject({ id: "cit1" });
+    expect(historyContainer.item).toHaveBeenCalledWith("cit1", hashedEmail);
+    expect(historyContainer.items.query).not.toHaveBeenCalled();
+  });
+
+  it("returns the not-found error for a missing id, another type, another user or an empty id", async () => {
+    historyItems = [
+      { id: "thread1", type: "CHAT_THREAD", userId: hashedEmail },
+      { id: "cit2", type: CHAT_CITATION_ATTRIBUTE, userId: "other-user", content: {} },
+    ];
+    for (const id of ["missing", "thread1", "cit2", ""]) {
+      const result = await FindCitationByID(id);
+      expect(result.status).toBe("ERROR");
+      expect((result as any).errors[0].message).toBe("Citation not found");
+    }
   });
 });

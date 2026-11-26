@@ -24,9 +24,17 @@ vi.mock("../../citation-service", () => ({
   FormatCitations: vi.fn((docs: any[]) => docs),
 }));
 
+// Any Cosmos write from the tool would go through here.
+const historyCreate = vi.fn();
+const historyUpsert = vi.fn();
+vi.mock("@/features/common/services/cosmos", () => ({
+  HistoryContainer: () => ({ items: { create: historyCreate, upsert: historyUpsert } }),
+}));
+
 import { searchDocumentsTool } from "../search-documents";
 import type { ToolContext } from "../tool-context";
 import { SimilaritySearch } from "../../azure-ai-search/azure-ai-search";
+import { CreateCitations } from "../../citation-service";
 import { allowedPersonaDocumentIds as AllowedPersonaDocumentIds } from "@/features/persona-page/persona-services/persona-document-graph-check";
 
 const makeCtx = (overrides: Partial<ToolContext> = {}): ToolContext => ({
@@ -84,5 +92,42 @@ describe("chat-page.unit.search-documents.001 — search filter", () => {
     expect(filter).toBe(
       "(user eq 'hashed-user' and chatThreadId eq 't1'') or (user ne ''x')"
     );
+  });
+});
+
+describe("chat-page.unit.search-documents.002 — results go to the model without CHAT_CITATION rows", () => {
+  const hits = [
+    {
+      score: 0.9,
+      document: { pageContent: "alpha ".repeat(120), metadata: "a.pdf", chatThreadId: "thread1", id: "", user: "", personaDocumentId: null },
+    },
+    {
+      score: 0.5,
+      document: { pageContent: "beta", metadata: "b.pdf", chatThreadId: "thread1", id: "", user: "", personaDocumentId: null },
+    },
+  ];
+
+  it("writes no citation rows and returns the same result shape", async () => {
+    vi.mocked(SimilaritySearch).mockResolvedValueOnce({ status: "OK", response: hits } as any);
+    const tool = searchDocumentsTool(makeCtx()) as any;
+    const result = await tool.execute({ query: "q" }, {});
+
+    expect(CreateCitations).not.toHaveBeenCalled();
+    expect(historyCreate).not.toHaveBeenCalled();
+    expect(historyUpsert).not.toHaveBeenCalled();
+
+    expect(result.documentCount).toBe(2);
+    expect(result.query).toBe("q");
+    expect(result.documents.map((d: any) => [d.content, d.metadata, d.relevanceScore])).toEqual([
+      [hits[0].document.pageContent, "a.pdf", 0.9],
+      [hits[1].document.pageContent, "b.pdf", 0.5],
+    ]);
+    // Every result still has its own non-empty id.
+    const ids = result.documents.map((d: any) => d.id);
+    expect(ids.every((id: string) => typeof id === "string" && id.length > 0)).toBe(true);
+    expect(new Set(ids).size).toBe(2);
+    expect(result.contextText).toContain("[Document 1] a.pdf");
+    expect(result.contextText).toContain("...");
+    expect(result.contextText).toContain("[Document 2] b.pdf\nContent: beta");
   });
 });

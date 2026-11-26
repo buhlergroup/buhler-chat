@@ -14,8 +14,14 @@ const query = vi.fn(() => ({
     resources: stored.filter((d) => d.type === "CHAT_HISTORY_SUMMARY" && !d.isDeleted),
   }),
 }));
+// Point reads: the row with this id in this partition (userId), as Cosmos
+// would answer it. A missing row reads as `resource: undefined` (404).
+const readItem = vi.fn(async (id: string, pk: string) => ({
+  resource: stored.find((d) => d.id === id && d.userId === pk),
+}));
+const item = vi.fn((id: string, pk: string) => ({ read: () => readItem(id, pk) }));
 vi.mock("@/features/common/services/cosmos", () => ({
-  HistoryContainer: () => ({ items: { upsert, query } }),
+  HistoryContainer: () => ({ items: { upsert, query }, item }),
 }));
 
 // ── Auth ──────────────────────────────────────────────────────────────────────
@@ -532,13 +538,51 @@ describe("chat-page.unit.history-summary-service.005 — read and invalidate", (
   });
 
   it("returns null rather than throwing when Cosmos fails", async () => {
-    query.mockImplementationOnce(() => ({
-      fetchAll: async () => {
-        throw new Error("cosmos down");
-      },
-    }));
+    readItem.mockImplementationOnce(async () => {
+      throw new Error("cosmos down");
+    });
     expect(await FindChatHistorySummary("t1")).toBeNull();
     expect(logWarn).toHaveBeenCalled();
+  });
+
+  it("is a point read of summary-<threadId> in the caller's partition, not a query", async () => {
+    process.env.HISTORY_SUMMARY_ENABLED = "true";
+    await recordHistoryCompaction({
+      threadId: "t1",
+      userId: "user-hash",
+      droppedMessages: dropped,
+      coversThroughMessageId: "m2",
+      summarise: summariserReturning("body"),
+    });
+    query.mockClear();
+    item.mockClear();
+
+    const found = await FindChatHistorySummary("t1");
+
+    expect(found?.content).toBe("body");
+    expect(item).toHaveBeenCalledWith("summary-t1", "user-hash");
+    expect(query).not.toHaveBeenCalled();
+  });
+
+  it("returns null for a row of another thread, another type or another user under the same id", async () => {
+    const base = {
+      id: "summary-t1",
+      type: "CHAT_HISTORY_SUMMARY",
+      threadId: "t1",
+      userId: "user-hash",
+      isDeleted: false,
+      content: "x",
+    };
+    stored = [{ ...base, threadId: "t2" }];
+    expect(await FindChatHistorySummary("t1")).toBeNull();
+    stored = [{ ...base, type: "CHAT_MESSAGE" }];
+    expect(await FindChatHistorySummary("t1")).toBeNull();
+    stored = [{ ...base, userId: "other-user" }];
+    expect(await FindChatHistorySummary("t1")).toBeNull();
+    stored = [{ ...base, isDeleted: true }];
+    expect(await FindChatHistorySummary("t1")).toBeNull();
+    stored = [base];
+    expect(await FindChatHistorySummary("t1")).toMatchObject({ content: "x" });
   });
 
   it("soft-deletes the row so a rewound thread stops replaying it", async () => {
