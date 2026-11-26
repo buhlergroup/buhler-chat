@@ -3,7 +3,8 @@ import "server-only";
 import { z } from "zod";
 import { tool } from "ai";
 import { SimilaritySearch } from "../azure-ai-search/azure-ai-search";
-import { CreateCitations, FormatCitations } from "../citation-service";
+import { FormatCitations } from "../citation-service";
+import { uniqueId } from "@/features/common/util";
 import { userHashedId } from "@/features/auth-page/helpers";
 import { logInfo, logDebug, logError } from "@/features/common/services/logger";
 import { allowedPersonaDocumentIds } from "@/features/persona-page/persona-services/persona-document-graph-check";
@@ -112,26 +113,23 @@ export function searchDocumentsTool(ctx: ToolContext) {
         resultCount: documentResponse.response?.length ?? 0,
       });
 
+      // The results go to the model and the tool panel only. They are no
+      // longer stored as CHAT_CITATION rows: the chat renderer has no
+      // citation chips, so nothing read those rows back. Each result keeps a
+      // fresh id of the same format as before.
       const withoutEmbedding = FormatCitations(documentResponse.response);
-      const citationResponse = await CreateCitations(withoutEmbedding);
 
       const documents: Array<{
         id: string;
         content: string;
         metadata: string;
         relevanceScore?: number;
-      }> = [];
-
-      citationResponse.forEach((c, index) => {
-        if (c.status === "OK") {
-          documents.push({
-            id: c.response.id,
-            content: c.response.content.document.pageContent,
-            metadata: c.response.content.document.metadata,
-            relevanceScore: documentResponse.response[index]?.score ?? 0,
-          });
-        }
-      });
+      }> = withoutEmbedding.map((result, index) => ({
+        id: uniqueId(),
+        content: result.document.pageContent,
+        metadata: result.document.metadata,
+        relevanceScore: documentResponse.response[index]?.score ?? 0,
+      }));
 
       const contextText = documents
         .map((doc, index) => {
