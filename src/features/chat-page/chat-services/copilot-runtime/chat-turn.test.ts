@@ -185,7 +185,7 @@ describe("runCopilotChatTurn", () => {
   });
 
   it("a user over the concurrent-turn limit gets 429 with the limit text", async () => {
-    runCopilotTurn.mockRejectedValue(new TurnLimitError("You already have 2 replies running."));
+    runCopilotTurn.mockRejectedValue(new TurnLimitError("user"));
     const res = await runCopilotChatTurn({
       ctx: ctx("thread-limit"),
       payload: { message: "hello" } as never,
@@ -195,7 +195,7 @@ describe("runCopilotChatTurn", () => {
       toolset: {},
     });
     expect(res.status).toBe(429);
-    expect(await res.text()).toContain("2 replies running");
+    expect(await res.text()).toContain("maximum number of replies running");
     expect(hasActivePublisher("thread-limit")).toBe(false);
   });
 

@@ -84,7 +84,7 @@ describe("runtime limits", () => {
     a();
     a(); // releasing twice frees one slot only
     expect(() => limiter.acquire("u1")).not.toThrow();
-    expect(() => limiter.acquire("u1")).toThrow(/replies running/);
+    expect(() => limiter.acquire("u1")).toThrow(/maximum number of replies running/);
     expect(limiter.running).toBe(3);
   });
 

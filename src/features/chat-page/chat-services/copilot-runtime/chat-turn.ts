@@ -24,8 +24,8 @@ import {
   workspaceExtractDeps,
   workspaceUploadsNote,
 } from "./workspace-files";
-import { ThreadBusyError } from "./thread-lease";
-import { TurnLimitError } from "./runtime-limits";
+import { THREAD_BUSY_TEXT, ThreadBusyError } from "./thread-lease";
+import { TURN_LIMIT_TEXTS, TurnLimitError } from "./runtime-limits";
 import { canUsePersona, resolveSubAgents } from "./subagent-resolver";
 import { turnCostUsd } from "./usage-cost";
 import { compactionPart, type TurnUsage } from "./event-mapper";
@@ -141,14 +141,21 @@ export async function runCopilotChatTurn(args: CopilotChatTurnArgs): Promise<Res
   } catch (err) {
     unregisterPublisher(threadId);
     const message = err instanceof Error ? err.message : String(err);
-    // Our own refusals carry a text meant for the user; anything else stays in the log.
-    const userFacing = err instanceof ThreadBusyError || err instanceof TurnLimitError;
+    // The answer carries fixed texts only; the error text stays in the log.
+    const userText =
+      err instanceof ThreadBusyError
+        ? THREAD_BUSY_TEXT
+        : err instanceof TurnLimitError
+          ? TURN_LIMIT_TEXTS[err.kind]
+          : TURN_START_FAILED;
     const status = err instanceof ThreadBusyError ? 409 : err instanceof TurnLimitError ? 429 : 500;
     logError("/api/chat copilot: turn did not start", { threadId, turnId: ctx.turnId, message, status });
-    await writeSentinel(userFacing ? message : friendlyErrorMessage({ message, name: "CopilotRuntimeError" })).catch(
-      () => undefined,
-    );
-    return new Response(userFacing ? message : TURN_START_FAILED, { status });
+    // The stored row of an unknown error gets the same friendly text as the standard path.
+    const refusal = err instanceof ThreadBusyError || err instanceof TurnLimitError;
+    await writeSentinel(
+      refusal ? userText : friendlyErrorMessage({ message, name: "CopilotRuntimeError" }),
+    ).catch(() => undefined);
+    return new Response(userText, { status });
   }
 
   void handle.result

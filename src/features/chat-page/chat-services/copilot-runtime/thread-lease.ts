@@ -28,10 +28,13 @@ export interface LeaseBackend {
   readMetadata(name: string): Promise<Record<string, string>>;
 }
 
+export const THREAD_BUSY_TEXT =
+  "A reply is still running in this chat. Wait for it to finish or stop it, then send again.";
+
 export class ThreadBusyError extends Error {
   readonly status = 409;
   constructor() {
-    super("A reply is still running in this chat. Wait for it to finish or stop it, then send again.");
+    super(THREAD_BUSY_TEXT);
     this.name = "ThreadBusyError";
   }
 }

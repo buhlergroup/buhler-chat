@@ -81,10 +81,16 @@ export function readRuntimeLimits(env: Record<string, string | undefined> = proc
   };
 }
 
+/** Fixed user texts of TurnLimitError; the HTTP answer uses these, never err.message. */
+export const TURN_LIMIT_TEXTS = {
+  user: "You already have the maximum number of replies running. Wait for one to finish, then send again.",
+  server: "The server is busy. Please try again in a moment.",
+} as const;
+
 export class TurnLimitError extends Error {
   readonly status = 429;
-  constructor(message: string) {
-    super(message);
+  constructor(readonly kind: keyof typeof TURN_LIMIT_TEXTS) {
+    super(TURN_LIMIT_TEXTS[kind]);
     this.name = "TurnLimitError";
   }
 }
@@ -105,12 +111,10 @@ export class TurnLimiter {
     const { maxTurnsPerUser, maxTurnsPerProcess } = this.limits();
     const mine = this.perUser.get(userKey) ?? 0;
     if (mine >= maxTurnsPerUser) {
-      throw new TurnLimitError(
-        `You already have ${mine} replies running. Wait for one to finish, then send again.`,
-      );
+      throw new TurnLimitError("user");
     }
     if (this.total >= maxTurnsPerProcess) {
-      throw new TurnLimitError("The server is busy. Please try again in a moment.");
+      throw new TurnLimitError("server");
     }
     this.perUser.set(userKey, mine + 1);
     this.total += 1;
