@@ -449,6 +449,7 @@ export async function runCopilotTurn(input: CopilotTurnInput): Promise<CopilotTu
       const rec = rawResults.get(id);
       return rec && !rec.error ? { output: rec.output } : undefined;
     },
+    toolErrorText: (id) => rawResults.get(id)?.uiError,
   });
   mapper.start();
 

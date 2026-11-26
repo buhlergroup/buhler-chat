@@ -132,6 +132,18 @@ describe("CopilotEventMapper", () => {
     expect(chunks).toContainEqual({ type: "tool-output-available", toolCallId: "v2", output: "alpha", dynamic: true });
   });
 
+  it("shows the UI-safe error text for app tools", () => {
+    const { chunks } = run(
+      [
+        { type: "tool.execution_start", data: { toolCallId: "c1", toolName: "search_documents", arguments: {} } },
+        { type: "tool.execution_complete", data: { toolCallId: "c1", success: false, error: { message: "internal host 10.0.0.1" } } },
+        { type: "session.idle", data: {} },
+      ],
+      { toolErrorText: (id) => (id === "c1" ? "An error occurred." : undefined) },
+    );
+    expect(chunks).toContainEqual({ type: "tool-output-error", toolCallId: "c1", errorText: "An error occurred." });
+  });
+
   it("emits non-streamed message content and reasoning in full", () => {
     const { chunks, mapper } = run([
       { type: "assistant.message", data: { messageId: "m1", content: "Full answer", reasoningText: "why" } },

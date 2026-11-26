@@ -92,6 +92,8 @@ export interface EventMapperOptions {
   finishMetadata?: (usage: TurnUsage) => unknown;
   /** Raw tool output by call id (from the tool adapter); preferred over the runtime's text. */
   rawToolOutput?: (toolCallId: string) => { output?: unknown } | undefined;
+  /** UI-safe error text of an app tool call (see ToolUserError); built-ins use the runtime's text. */
+  toolErrorText?: (toolCallId: string) => string | undefined;
 }
 
 const FINISH_REASONS: Record<string, MappedFinishReason> = {
@@ -426,7 +428,9 @@ export class CopilotEventMapper {
       });
       return;
     }
-    const errorText = String(data.error?.message ?? data.result?.content ?? "Tool execution failed");
+    const errorText =
+      this.options.toolErrorText?.(toolCallId) ??
+      String(data.error?.message ?? data.result?.content ?? "Tool execution failed");
     this.emit({ type: "tool-output-error", toolCallId, errorText, ...dynamic });
   }
 

@@ -2,6 +2,7 @@ import { describe, it, expect, vi } from "vitest";
 import { jsonSchema, tool } from "ai";
 import { z } from "zod";
 
+import { ToolUserError } from "../tools/tool-user-error";
 import { runAppTool, toCopilotTools, toModelText, type ToolCallRecord, type TurnToolBinding } from "./tool-adapter";
 
 /** A toolset shaped like buildToolset's: zod tools, a JSON-schema (extension/MCP) tool, a function description. */
@@ -128,6 +129,19 @@ describe("runAppTool", () => {
       error: "Agent \"x\" was not found or you do not have access to it.",
     });
     expect(records[0]).toMatchObject({ toolName: "broken", error: expect.stringContaining("not found") });
+  });
+
+  it("UI error text: a ToolUserError's message, every other error the generic text; the model gets both", async () => {
+    const toolset = {
+      safe: tool({ description: "", inputSchema: z.object({}), execute: async () => { throw new ToolUserError("Docs / search: the server is busy"); } }),
+      internal: tool({ description: "", inputSchema: z.object({}), execute: async () => { throw new Error("connect ECONNREFUSED 10.0.0.1:443"); } }),
+    };
+    const records: ToolCallRecord[] = [];
+    const a = await runAppTool("safe", {}, { toolCallId: "a" }, { toolset, onResult: (r) => records.push(r) });
+    const b = await runAppTool("internal", {}, { toolCallId: "b" }, { toolset, onResult: (r) => records.push(r) });
+    expect(a.textResultForLlm).toBe("Docs / search: the server is busy");
+    expect(b.textResultForLlm).toBe("connect ECONNREFUSED 10.0.0.1:443");
+    expect(records.map((r) => r.uiError)).toEqual(["Docs / search: the server is busy", "An error occurred."]);
   });
 
   it("passes string output through and takes the last value of a streaming tool", async () => {

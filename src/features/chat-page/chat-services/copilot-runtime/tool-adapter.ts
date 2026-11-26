@@ -12,6 +12,7 @@
 import { asSchema } from "ai";
 import type { Tool as AiTool } from "@ai-sdk/provider-utils";
 import type { Tool as CopilotTool, ToolInvocation, ToolResultObject } from "@microsoft/copilot-sdk";
+import { uiErrorText } from "../tools/tool-user-error";
 
 /** One finished call of an app tool, with the RAW output (not the model text). */
 export interface ToolCallRecord {
@@ -19,7 +20,10 @@ export interface ToolCallRecord {
   toolName: string;
   input: unknown;
   output?: unknown;
+  /** Error text for the model. */
   error?: string;
+  /** Error text for the chat UI: a ToolUserError's message, else the generic text. */
+  uiError?: string;
 }
 
 /** What a handler needs from the turn that is running now. */
@@ -94,8 +98,8 @@ export async function runAppTool(
   binding: TurnToolBinding | undefined,
 ): Promise<ToolResultObject> {
   const toolCallId = invocation.toolCallId;
-  const fail = (message: string, input: unknown): ToolResultObject => {
-    binding?.onResult?.({ toolCallId, toolName: name, input, error: message });
+  const fail = (message: string, input: unknown, cause?: unknown): ToolResultObject => {
+    binding?.onResult?.({ toolCallId, toolName: name, input, error: message, uiError: uiErrorText(cause) });
     // Return the failure instead of throwing: a thrown message is hidden from
     // the model ("Tool execution failed"), while the AI SDK path shows the
     // model the error text so it can correct itself.
@@ -137,6 +141,6 @@ export async function runAppTool(
     binding?.onResult?.({ toolCallId, toolName: name, input, output });
     return { textResultForLlm: toModelText(output), resultType: "success" };
   } catch (err) {
-    return fail(err instanceof Error ? err.message : String(err), input);
+    return fail(err instanceof Error ? err.message : String(err), input, err);
   }
 }
