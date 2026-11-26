@@ -32,7 +32,20 @@ vi.mock("@/features/common/services/cosmos", () => ({
   }),
 }));
 
+// Copilot path of the safety net: the caller's runtime and the thread
+// workspace (an in-memory blob store, namespace <user key>/<thread>).
+const mockRuntime = vi.fn();
+const mockThreadWorkspace = vi.fn();
+vi.mock("../copilot-runtime/runtime-selection", () => ({
+  resolveAgentRuntimeForCurrentUser: () => mockRuntime(),
+}));
+vi.mock("../copilot-runtime/workspace-files", () => ({
+  threadWorkspace: (...a: unknown[]) => mockThreadWorkspace(...a),
+}));
+
 import { GetBlob } from "@/features/common/services/azure-storage";
+import { BlobSessionFs } from "../copilot-runtime/blob-session-fs";
+import { FakeBlobStore } from "../copilot-runtime/fake-blob-store.test-helper";
 import { userSession, type UserModel } from "@/features/auth-page/helpers";
 import { ImageAPIEntry } from "../images-api";
 import { CHAT_THREAD_ATTRIBUTE, MESSAGE_ATTRIBUTE } from "../models";
@@ -217,5 +230,107 @@ describe("ImageAPIEntry — who may read the files of a thread", () => {
     const res = await ImageAPIEntry(request("a.png"));
     expect(res.status).toBe(404);
     expect(getBlob).not.toHaveBeenCalled();
+  });
+});
+
+describe("ImageAPIEntry — Copilot workspace files linked as /api/images", () => {
+  let store: FakeBlobStore;
+  const ownerFs = () => new BlobSessionFs(store, `pk:${OWNER.email}/thread1`, undefined, undefined);
+  const notFound = () =>
+    getBlob.mockImplementation(async (_c: string, path: string) => ({
+      status: "NOT_FOUND",
+      errors: [{ message: `Blob not found: ${path}` }],
+    }));
+
+  beforeEach(async () => {
+    getBlob.mockReset();
+    mockRuntime.mockReset();
+    mockThreadWorkspace.mockReset();
+    store = new FakeBlobStore();
+    mockRuntime.mockResolvedValue("copilot");
+    mockThreadWorkspace.mockImplementation(async (userKey: string, threadId: string) => ({
+      store,
+      fs: new BlobSessionFs(store, `${userKey}/${threadId}`, undefined, undefined),
+    }));
+    notFound();
+  });
+
+  // chat-page.unit.images-api.012
+  it("redirects (307, relative) to the workspace route when the blob is missing and outputs/<img> exists", async () => {
+    await ownerFs().writeFileBytes("/workspace/outputs/agent_fix_check.pptx", Buffer.from("pptx"));
+    const res = await ImageAPIEntry(request("agent_fix_check.pptx"));
+    expect(res.status).toBe(307);
+    expect(res.headers.get("location")).toBe("/api/workspace/file?t=thread1&p=outputs%2Fagent_fix_check.pptx");
+    expectSecurityHeaders(res);
+    expect(getBlob).toHaveBeenCalledWith("images", "thread1/agent_fix_check.pptx");
+    expect(mockThreadWorkspace).toHaveBeenCalledWith(`pk:${OWNER.email}`, "thread1");
+  });
+
+  it("finds the file in a subfolder of /workspace/outputs and in /workspace/images", async () => {
+    await ownerFs().writeFileBytes("/workspace/outputs/run 2/report.docx", Buffer.from("doc"));
+    await ownerFs().writeFileBytes("/workspace/images/cat.png", PNG);
+    const nested = await ImageAPIEntry(request("report.docx"));
+    expect(nested.status).toBe(307);
+    expect(nested.headers.get("location")).toBe("/api/workspace/file?t=thread1&p=outputs%2Frun%202%2Freport.docx");
+    const image = await ImageAPIEntry(request("cat.png"));
+    expect(image.status).toBe(307);
+    expect(image.headers.get("location")).toBe("/api/workspace/file?t=thread1&p=images%2Fcat.png");
+  });
+
+  it("keeps the 404 when the file is in neither store (and for workspace files outside outputs / images)", async () => {
+    await ownerFs().writeFileBytes("/workspace/uploads/notes.pptx", Buffer.from("x"));
+    for (const img of ["missing.pptx", "notes.pptx"]) {
+      const res = await ImageAPIEntry(request(img));
+      expect(res.status).toBe(404);
+      expect(res.headers.get("location")).toBeNull();
+      expect(await res.text()).toBe(`Blob not found: thread1/${img}`);
+      expectSecurityHeaders(res);
+    }
+  });
+
+  it("never redirects for another user's thread: 404 without a workspace lookup", async () => {
+    await ownerFs().writeFileBytes("/workspace/outputs/agent_fix_check.pptx", Buffer.from("pptx"));
+    session.mockResolvedValue(OTHER);
+    const res = await ImageAPIEntry(request("agent_fix_check.pptx"));
+    expect(res.status).toBe(404);
+    expect(res.headers.get("location")).toBeNull();
+    expect(mockThreadWorkspace).not.toHaveBeenCalled();
+  });
+
+  it("never redirects an administrator to another user's thread workspace", async () => {
+    await ownerFs().writeFileBytes("/workspace/outputs/agent_fix_check.pptx", Buffer.from("pptx"));
+    session.mockResolvedValue(ADMIN);
+    const res = await ImageAPIEntry(request("agent_fix_check.pptx"));
+    expect(res.status).toBe(404);
+    expect(res.headers.get("location")).toBeNull();
+    expect(mockThreadWorkspace).not.toHaveBeenCalled();
+  });
+
+  it("keeps the 404 for a user on the AI SDK path", async () => {
+    await ownerFs().writeFileBytes("/workspace/outputs/agent_fix_check.pptx", Buffer.from("pptx"));
+    mockRuntime.mockResolvedValue("ai-sdk");
+    const res = await ImageAPIEntry(request("agent_fix_check.pptx"));
+    expect(res.status).toBe(404);
+    expect(res.headers.get("location")).toBeNull();
+    expect(mockThreadWorkspace).not.toHaveBeenCalled();
+  });
+
+  it("rejects an img with ../ as before: 404, no blob read, no workspace lookup", async () => {
+    await ownerFs().writeFileBytes("/workspace/outputs/x.pptx", Buffer.from("pptx"));
+    for (const img of ["../x.pptx", "../../outputs/x.pptx", "outputs/x.pptx"]) {
+      const res = await ImageAPIEntry(request(img));
+      expect(res.status).toBe(404);
+      expect(res.headers.get("location")).toBeNull();
+    }
+    expect(getBlob).not.toHaveBeenCalled();
+    expect(mockThreadWorkspace).not.toHaveBeenCalled();
+  });
+
+  it("does not redirect when the blob read fails for another reason than not found", async () => {
+    await ownerFs().writeFileBytes("/workspace/outputs/x.pptx", Buffer.from("pptx"));
+    getBlob.mockResolvedValue({ status: "ERROR", errors: [{ message: "Error downloading blob" }] });
+    const res = await ImageAPIEntry(request("x.pptx"));
+    expect(res.status).toBe(404);
+    expect(mockThreadWorkspace).not.toHaveBeenCalled();
   });
 });

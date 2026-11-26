@@ -51,6 +51,16 @@ export const threadImageAccess = async (
   // The reporting pages show every thread to an administrator.
   if (user.isAdmin) return "allowed";
 
+  return (await ownsThread(threadId, user)) ? "allowed" : "not-found";
+};
+
+/**
+ * True when `user` owns thread `threadId`: a live thread row in the user's own
+ * partition (one point read). False when the read fails (fail closed). Also
+ * false for an administrator looking at another user's thread.
+ */
+export const ownsThread = async (threadId: string, user: UserModel): Promise<boolean> => {
+  if (!user.email) return false;
   const userId = hashValue(user.email);
   try {
     // Point read in the caller's own partition: a thread of another user is
@@ -64,7 +74,7 @@ export const threadImageAccess = async (
       resource.userId === userId &&
       !resource.isDeleted
     ) {
-      return "allowed";
+      return true;
     }
   } catch (error) {
     // Fail closed. A missing item can also come as a thrown 404.
@@ -74,5 +84,5 @@ export const threadImageAccess = async (
       });
     }
   }
-  return "not-found";
+  return false;
 };

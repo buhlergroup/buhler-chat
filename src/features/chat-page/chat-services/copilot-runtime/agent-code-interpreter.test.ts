@@ -46,7 +46,13 @@ describe("copilotCodeInterpreterPlan", () => {
     expect(plan.enabled).toBe(true);
     // The current file of the skill version, the Code file and the upload, at their container paths.
     expect(plan.files).toEqual([
-      { id: "assistant-skill-current", name: "skill-deck.zip", containerPath: "/mnt/data/assistant-skill-current-skill-deck.zip" },
+      {
+        id: "assistant-skill-current",
+        name: "skill-deck.zip",
+        containerPath: "/mnt/data/assistant-skill-current-skill-deck.zip",
+        // The files in the archive: run_code does not return copies of them.
+        entries: [{ name: "SKILL.md", size: 40 }, { name: "build.py", size: 10 }],
+      },
       { id: "assistant-code1", name: "Line Overview.xlsx", containerPath: "/mnt/data/assistant-code1-Line Overview.xlsx" },
       { id: "assistant-up1", name: "notes.csv", containerPath: "/mnt/data/assistant-up1-notes.csv" },
     ]);
