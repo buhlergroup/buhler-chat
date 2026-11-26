@@ -7,6 +7,8 @@ import { AccessGroup } from "@/features/persona-page/persona-services/models";
 import { ServerActionResponse } from "@/features/common/server-action-response";
 import { SESSION_EXPIRED_ERROR_CODE } from "@/features/common/error-codes";
 
+const GUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
 const SESSION_EXPIRED_MESSAGE =
   "Your session expired. We'll sign you out so you can sign in again.";
 
@@ -121,6 +123,14 @@ export async function AccessGroupById(
 
     if (!user.token) {
       return sessionExpiredResponse<AccessGroup>();
+    }
+
+    // Entra group ids are GUIDs. Anything else never reaches the $filter.
+    if (!GUID_PATTERN.test(accessGroupId ?? "")) {
+      return {
+        status: "ERROR",
+        errors: [{ message: "Invalid access group id." }],
+      };
     }
 
     const client = getGraphClient(user.token);

@@ -1,11 +1,16 @@
-import { describe, it, expect, vi } from "vitest";
+import { describe, it, expect, vi, beforeEach } from "vitest";
 
 vi.mock("@/features/common/services/azure-storage", () => ({
   GetBlob: vi.fn(),
   UploadBlob: vi.fn(),
 }));
 
-import { GetThreadAndImageFromUrl } from "../chat-image-service";
+import {
+  GetImageFromStore,
+  GetThreadAndImageFromUrl,
+  UploadImageToStore,
+} from "../chat-image-service";
+import { GetBlob, UploadBlob } from "@/features/common/services/azure-storage";
 
 const url = (t: string, img: string) =>
   `http://localhost/api/images?t=${encodeURIComponent(t)}&img=${encodeURIComponent(img)}`;
@@ -25,5 +30,67 @@ describe("GetThreadAndImageFromUrl — blob path guard", () => {
     expect((await GetThreadAndImageFromUrl(url("thread1", "../agent-skills/p1/s.zip"))).status).toBe("ERROR");
     expect((await GetThreadAndImageFromUrl(url("thread1", "..\\agent-skills\\p1\\s.zip"))).status).toBe("ERROR");
     expect((await GetThreadAndImageFromUrl(url(".", "x.png"))).status).toBe("ERROR");
+  });
+});
+
+describe("GetThreadAndImageFromUrl — id and name checks", () => {
+  it("refuses a thread id that is not an id of this app", async () => {
+    expect((await GetThreadAndImageFromUrl(url("thread 1", "a.png"))).status).toBe("ERROR");
+    expect((await GetThreadAndImageFromUrl(url("t%2F..", "a.png"))).status).toBe("ERROR");
+  });
+
+  it("refuses a file name with a separator or control character", async () => {
+    expect((await GetThreadAndImageFromUrl(url("thread1", "a/b.png"))).status).toBe("ERROR");
+    expect((await GetThreadAndImageFromUrl(url("thread1", "a\u0000.png"))).status).toBe("ERROR");
+  });
+});
+
+describe("UploadImageToStore / GetImageFromStore — blob path and content type", () => {
+  const upload = UploadBlob as unknown as ReturnType<typeof vi.fn>;
+  const get = GetBlob as unknown as ReturnType<typeof vi.fn>;
+
+  beforeEach(() => {
+    upload.mockReset();
+    upload.mockResolvedValue({ status: "OK", response: "url" });
+    get.mockReset();
+    get.mockResolvedValue({ status: "NOT_FOUND", errors: [{ message: "x" }] });
+  });
+
+  it("refuses a file name with .. or / and never writes a blob", async () => {
+    for (const name of ["../../agent-skills/p1/s.zip", "..", "a/b.png", "..\\x.png"]) {
+      const res = await UploadImageToStore("thread1", name, Buffer.from("x"));
+      expect(res.status).toBe("ERROR");
+    }
+    expect(upload).not.toHaveBeenCalled();
+  });
+
+  it("refuses a thread id that is not an id of this app and never writes a blob", async () => {
+    for (const threadId of ["..", "t/../x", "", "a b"]) {
+      const res = await UploadImageToStore(threadId, "a.png", Buffer.from("x"));
+      expect(res.status).toBe("ERROR");
+    }
+    expect(upload).not.toHaveBeenCalled();
+  });
+
+  it("stores under threadId/fileName and keeps a raster image type", async () => {
+    await UploadImageToStore("thread1", "a.png", Buffer.from("x"), { contentType: "image/png" });
+    expect(upload).toHaveBeenCalledWith("images", "thread1/a.png", expect.any(Buffer), {
+      contentType: "image/png",
+      metadata: undefined,
+    });
+  });
+
+  it("stores SVG, HTML and unknown types as application/octet-stream", async () => {
+    for (const contentType of ["image/svg+xml", "text/html", "application/xhtml+xml", undefined]) {
+      upload.mockClear();
+      await UploadImageToStore("thread1", "a.bin", Buffer.from("x"), { contentType });
+      expect(upload.mock.calls[0][3].contentType).toBe("application/octet-stream");
+    }
+  });
+
+  it("GetImageFromStore refuses an unsafe path and never reads a blob", async () => {
+    expect((await GetImageFromStore("thread1", "../x.png")).status).toBe("ERROR");
+    expect((await GetImageFromStore("../x", "a.png")).status).toBe("ERROR");
+    expect(get).not.toHaveBeenCalled();
   });
 });

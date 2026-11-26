@@ -274,3 +274,30 @@ describe("/api/code-interpreter/file/[fileId] route", () => {
     expect(res.status).toBe(500);
   });
 });
+
+describe("/api/code-interpreter/file/[fileId] route - Content-Disposition", () => {
+  beforeEach(() => {
+    mockedDownload.mockReset();
+    mockedGetCurrentUser.mockReset();
+    mockedGetCurrentUser.mockResolvedValue(defaultUser);
+    mockFindFile.mockReset();
+    mockFindFile.mockImplementation(async (id: string) => ({
+      threadId: "t1",
+      file: { id, name: "x", type: "code-interpreter", source: "upload" },
+    }));
+  });
+
+  it("serves a non-Latin-1 file name with an RFC 6266 header instead of a 500", async () => {
+    mockedDownload.mockResolvedValue({
+      status: "OK",
+      response: { data: Buffer.from("a,b"), name: "数据 \"Q3\".csv", contentType: "text/csv" },
+    });
+    const res = await GET(makeGetRequest("file-1"), { params: Promise.resolve({ fileId: "file-1" }) });
+    expect(res.status).toBe(200);
+    const value = res.headers.get("content-disposition") ?? "";
+    expect(value).toMatch(/^attachment; filename="[\x20-\x7e]*"; filename\*=UTF-8''/);
+    expect(value).toContain("filename*=UTF-8''%E6%95%B0%E6%8D%AE%20%22Q3%22.csv");
+    expect(value).not.toMatch(/filename="[^"]*"[^;]/);
+    expect(res.headers.get("x-content-type-options")).toBe("nosniff");
+  });
+});

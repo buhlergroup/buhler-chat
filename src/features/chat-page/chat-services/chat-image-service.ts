@@ -1,15 +1,30 @@
-"use server";
 import "server-only";
+
+// No "use server" here: every export of a "use server" module is a Server
+// Action that any signed-in browser can call with its own arguments. This
+// module is only for server code (chat persistence, the /api/images route).
 
 import { ServerActionResponse } from "@/features/common/server-action-response";
 import { BlobDownloadResult, GetBlob, UploadBlob } from "../../common/services/azure-storage";
+import { isSafeBlobFileName, threadBlobPath } from "@/features/common/blob-path";
+import { isValidId } from "@/features/common/odata-filter";
+import { storableContentType } from "@/features/common/safe-content-type";
 
 const IMAGE_CONTAINER_NAME = "images";
 const IMAGE_API_PATH = process.env.NEXTAUTH_URL + "/api/images";
 
+/**
+ * `threadId/blobName` in the images container. Throws when the thread id is
+ * not an id of this app or the name is not a safe single file name.
+ */
 export const GetBlobPath = async (threadId: string, blobName: string): Promise<string> => {
-  return `${threadId}/${blobName}`;
+  return threadBlobPath(threadId, blobName);
 };
+
+const invalidPath = <T>(): ServerActionResponse<T> => ({
+  status: "ERROR",
+  errors: [{ message: "Invalid thread id or file name." }],
+});
 
 export const UploadImageToStore = async (
   threadId: string,
@@ -20,12 +35,20 @@ export const UploadImageToStore = async (
     originalFileName?: string;
   }
 ): Promise<ServerActionResponse<string>> => {
+  let blobPath: string;
+  try {
+    blobPath = threadBlobPath(threadId, fileName);
+  } catch {
+    return invalidPath<string>();
+  }
   return await UploadBlob(
     IMAGE_CONTAINER_NAME,
-    `${threadId}/${fileName}`,
+    blobPath,
     imageData,
     {
-      contentType: options?.contentType,
+      // Only known types are kept; anything else (SVG, HTML, XML, ...) is
+      // stored as application/octet-stream.
+      contentType: storableContentType(options?.contentType),
       metadata: options?.originalFileName
         ? { originalfilename: options.originalFileName }
         : undefined,
@@ -37,13 +60,18 @@ export const GetImageFromStore = async (
   threadId: string,
   fileName: string
 ): Promise<ServerActionResponse<BlobDownloadResult>> => {
-  const blobPath = await GetBlobPath(threadId, fileName);
+  let blobPath: string;
+  try {
+    blobPath = threadBlobPath(threadId, fileName);
+  } catch {
+    return invalidPath<BlobDownloadResult>();
+  }
   return await GetBlob(IMAGE_CONTAINER_NAME, blobPath);
 };
 
 export const GetImageUrl = async (threadId: string, fileName: string): Promise<string> => {
   // add threadId and fileName as query parameters t and img respectively
-  const params = `?t=${threadId}&img=${fileName}`;
+  const params = `?t=${encodeURIComponent(threadId)}&img=${encodeURIComponent(fileName)}`;
 
   return `${IMAGE_API_PATH}${params}`;
 };
@@ -92,7 +120,9 @@ export const GetThreadAndImageFromUrl = async (
   const segments = blobPath.split("/");
   if (
     segments[0] === "agent-skills" ||
-    segments.some((segment) => segment === "." || segment === "..")
+    segments.some((segment) => segment === "." || segment === "..") ||
+    !isValidId(threadId) ||
+    !isSafeBlobFileName(imgName)
   ) {
     return {
       status: "ERROR",

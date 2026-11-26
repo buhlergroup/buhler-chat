@@ -9,6 +9,8 @@
  * same conversation. This module is the single source of truth.
  */
 
+import { toSafeBlobFileName } from "@/features/common/blob-path";
+
 /**
  * The sandbox URLs Azure's Responses API emits look like:
  *   sandbox:/mnt/data/plot-3f7b.png
@@ -95,7 +97,9 @@ export function readContainerFileCitation(
  * by onFinish, before the user can click).
  */
 export function sandboxFallbackUrl(threadId: string, filename: string): string {
-  return `/api/images?t=${encodeURIComponent(threadId)}&img=${encodeURIComponent(filename)}`;
+  // The ingest stores the file under toSafeBlobFileName(filename); the same
+  // transform here keeps both URLs identical.
+  return `/api/images?t=${encodeURIComponent(threadId)}&img=${encodeURIComponent(toSafeBlobFileName(filename))}`;
 }
 
 /**
