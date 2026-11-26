@@ -31,7 +31,7 @@ let queryCapture: any = null;
 const historyContainer = {
   items: {
     upsert: vi.fn(async (doc: any) => ({ resource: doc })),
-    query: vi.fn((q: any) => {
+    query: vi.fn((q: any, _opts?: any) => {
       queryCapture = q;
       return { fetchAll: async () => ({ resources: historyItems }) };
     }),
@@ -132,18 +132,34 @@ describe("chat-page.unit.document-service.003 — CrackDocument returns ERROR if
   });
 });
 
-describe("chat-page.unit.document-service.004 — FindAllChatDocuments filters by type, threadId and isDeleted only", () => {
-  it("scopes documents by thread (intentionally not by userId — documents can be assigned to an agent and shared)", async () => {
+describe("chat-page.unit.document-service.004 — FindAllChatDocuments is a single-partition query in the caller's partition", () => {
+  it("filters by type, threadId, the caller's userId and isDeleted, and passes the partition key", async () => {
+    // CreateChatDocument writes every chat document into the partition of
+    // the user who attached it to their own thread, so the caller's partition
+    // holds all documents of the caller's threads. The partition key skips
+    // the fan-out over every partition.
     await FindAllChatDocuments("t1");
     expect(queryCapture.parameters).toEqual(
       expect.arrayContaining([
         { name: "@type", value: CHAT_DOCUMENT_ATTRIBUTE },
         { name: "@threadId", value: "t1" },
+        { name: "@userId", value: hashedEmail },
         { name: "@isDeleted", value: false },
       ])
     );
-    // Pin design intent: no @userId parameter — documents are agent-scoped, not user-scoped.
-    expect(queryCapture.parameters?.some((p: any) => p.name === "@userId")).toBe(false);
+    expect(queryCapture.query).toMatch(/r\.userId=@userId/);
+    expect(historyContainer.items.query).toHaveBeenCalledWith(
+      expect.anything(),
+      { partitionKey: hashedEmail },
+    );
+  });
+
+  it("returns the rows of the query unchanged", async () => {
+    historyItems = [
+      { id: "d1", type: CHAT_DOCUMENT_ATTRIBUTE, chatThreadId: "t1", userId: hashedEmail, name: "a.pdf" },
+    ];
+    const result = await FindAllChatDocuments("t1");
+    expect(result).toEqual({ status: "OK", response: historyItems });
   });
 
   it("orders deterministically, so the document names in the prompt cannot reshuffle", async () => {

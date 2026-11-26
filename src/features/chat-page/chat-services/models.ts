@@ -941,6 +941,38 @@ export interface ModelAvailability {
   disabledModels: DisabledModels;
 }
 
+interface ModelsApiResult {
+  ok: boolean;
+  data: any;
+}
+
+let modelsApiInFlight: Promise<ModelsApiResult> | null = null;
+
+/**
+ * One GET /api/models for all callers that ask at the same time.
+ *
+ * A chat page mounts several pickers at once (composer and header), and each
+ * asked the route on its own. Every request runs a budget check on the server
+ * (one Cosmos read and one query), so concurrent calls now share one request.
+ * The shared promise is dropped as soon as it settles: a later call (e.g. a
+ * refresh after a budget downgrade) fetches fresh data. Browser only; on the
+ * server every call fetches on its own.
+ */
+function fetchModelsApi(): Promise<ModelsApiResult> {
+  const load = async (): Promise<ModelsApiResult> => {
+    const response = await fetch('/api/models');
+    if (!response.ok) return { ok: false, data: undefined };
+    return { ok: true, data: await response.json() };
+  };
+  if (typeof window === 'undefined') return load();
+  if (!modelsApiInFlight) {
+    modelsApiInFlight = load().finally(() => {
+      modelsApiInFlight = null;
+    });
+  }
+  return modelsApiInFlight;
+}
+
 /**
  * Fetches both the selectable models and any currently-disabled ones (with a
  * reason, e.g. a budget cap) in a single call. Falls back to all models /
@@ -948,11 +980,11 @@ export interface ModelAvailability {
  */
 export async function getModelAvailability(): Promise<ModelAvailability> {
   try {
-    const response = await fetch('/api/models');
+    const response = await fetchModelsApi();
     if (!response.ok) {
       throw new Error('Failed to fetch model availability');
     }
-    const data = await response.json();
+    const data = response.data;
     return {
       availableModels: data.availableModels,
       disabledModels: data.disabledModels ?? {},
@@ -971,11 +1003,11 @@ export async function getModelAvailability(): Promise<ModelAvailability> {
  */
 export async function getAvailableModels(): Promise<Record<ChatModel, ModelConfig>> {
   try {
-    const response = await fetch('/api/models');
+    const response = await fetchModelsApi();
     if (!response.ok) {
       throw new Error('Failed to fetch available models');
     }
-    const data = await response.json();
+    const data = response.data;
     return data.availableModels;
   } catch (error) {
     logError("Error fetching available models", {
@@ -991,11 +1023,11 @@ export async function getAvailableModels(): Promise<Record<ChatModel, ModelConfi
  */
 export async function getAvailableModelIds(): Promise<ChatModel[]> {
   try {
-    const response = await fetch('/api/models');
+    const response = await fetchModelsApi();
     if (!response.ok) {
       throw new Error('Failed to fetch available models');
     }
-    const data = await response.json();
+    const data = response.data;
     return data.availableModelIds;
   } catch (error) {
     logError("Error fetching available model IDs", {
@@ -1011,11 +1043,11 @@ export async function getAvailableModelIds(): Promise<ChatModel[]> {
  */
 export async function getDefaultModel(): Promise<ChatModel> {
   try {
-    const response = await fetch('/api/models');
+    const response = await fetchModelsApi();
     if (!response.ok) {
       throw new Error('Failed to fetch default model');
     }
-    const data = await response.json();
+    const data = response.data;
     return data.defaultModel;
   } catch (error) {
     logError("Error fetching default model", {

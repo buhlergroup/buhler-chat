@@ -196,6 +196,11 @@ export const FindAllChatDocuments = async (
   chatThreadID: string
 ): Promise<ServerActionResponse<ChatDocumentModel[]>> => {
   try {
+    // A chat document is written into the partition of the user who attached
+    // it to their own thread (CreateChatDocument), so the caller's partition
+    // holds every document of the caller's threads. With the partition key
+    // the query runs in that one partition instead of fanning out to all.
+    const userId = await userHashedId();
     const querySpec: SqlQuerySpec = {
       // ORDER BY is load-bearing, not cosmetic. Without it Cosmos returns rows
       // in whatever order the index feed yields, so the document names in the
@@ -204,7 +209,7 @@ export const FindAllChatDocuments = async (
       // createdAt ASC is stable for the life of a thread; callers additionally
       // sort names so a same-millisecond tie can't leak through either.
       query:
-        "SELECT * FROM root r WHERE r.type=@type AND r.chatThreadId = @threadId AND r.isDeleted=@isDeleted ORDER BY r.createdAt ASC",
+        "SELECT * FROM root r WHERE r.type=@type AND r.chatThreadId = @threadId AND r.userId=@userId AND r.isDeleted=@isDeleted ORDER BY r.createdAt ASC",
       parameters: [
         {
           name: "@type",
@@ -215,6 +220,10 @@ export const FindAllChatDocuments = async (
           value: chatThreadID,
         },
         {
+          name: "@userId",
+          value: userId,
+        },
+        {
           name: "@isDeleted",
           value: false,
         },
@@ -222,7 +231,7 @@ export const FindAllChatDocuments = async (
     };
 
     const { resources } = await HistoryContainer()
-      .items.query<ChatDocumentModel>(querySpec)
+      .items.query<ChatDocumentModel>(querySpec, { partitionKey: userId })
       .fetchAll();
 
     if (resources) {
