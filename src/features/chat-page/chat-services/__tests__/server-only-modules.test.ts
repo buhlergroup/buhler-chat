@@ -12,6 +12,7 @@ const SERVER_ONLY_MODULES = [
   "features/chat-page/chat-services/chat-file-store-ingest.ts",
   "features/chat-page/chat-services/code-interpreter-service.ts",
   "features/chat-page/chat-services/images-api.ts",
+  "features/chat-page/chat-services/image-access.ts",
 ];
 
 describe("chat-page.unit.server-only — storage and code interpreter helpers are not Server Actions", () => {

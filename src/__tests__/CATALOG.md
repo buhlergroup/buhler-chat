@@ -1132,6 +1132,12 @@ Source: lines 1-end. Already has 16 cases; add explicit error-path cases.
 | chat-page.unit.images-api.003 | images-api.ts | Returns stream + inline content-disposition for image (positive) | unit | GetImageFromStore OK with PNG | Call URL `?t=t&img=a.png` | 200; `content-type:image/png`; `content-disposition` starts with `inline; filename="a.png"` |
 | chat-page.unit.images-api.004 | images-api.ts | Returns attachment content-disposition for non-image (positive-other-branch) | unit | OK with content-type `text/csv` | Call URL `?t=t&img=data.csv` | `content-disposition` starts with `attachment;` |
 | chat-page.unit.images-api.005 | images-api.ts | Falls back to octet-stream when no contentType + unknown extension (negative-edge) | unit | OK with no contentType, filename `x.unknown` | Call | `content-type:application/octet-stream` |
+| chat-page.unit.images-api.006 | images-api.ts, image-access.ts | Thread owner gets the file (positive) | unit | Fake session = owner; fake history container has the owner's thread row | Call `?t=thread1&img=a.png` | 200; exactly one point read `(thread1, owner partition)`; blob read |
+| chat-page.unit.images-api.007 | images-api.ts, image-access.ts | Other signed-in user gets 404, same body as a missing thread (negative) | unit | Fake session = other user | Call for the owner's thread and for a missing thread | both 404 with equal body; security headers; blob not read |
+| chat-page.unit.images-api.008 | images-api.ts, image-access.ts | Administrator gets any thread's file for the reporting pages (positive) | unit | Fake session = admin | Call | 200; no point read |
+| chat-page.unit.images-api.009 | images-api.ts, image-access.ts | No session gives 401 (negative) | unit | Fake session = null | Call | 401; no point read; blob not read |
+| chat-page.unit.images-api.010 | images-api.ts, image-access.ts | Deleted thread and a non-thread row of the owner give 404 (negative) | unit | Owner's thread `isDeleted:true`; a message row with the requested id | Call both | 404; blob not read |
+| chat-page.unit.images-api.011 | images-api.ts, image-access.ts | Point read error fails closed (negative) | unit | Point read throws (429) | Call | 404; blob not read |
 
 ### chat-page — components gap-fills (negative)
 

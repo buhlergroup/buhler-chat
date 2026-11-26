@@ -110,24 +110,46 @@ export async function UploadFileForCodeInterpreterOnce(
       });
       return { status: "OK", response: { id, name: file.name, uploaded: true } };
     }
-    const store = contentStore();
-    const stored = file.blob
-      ? await store.putBlob(scope, file.blob, { contentType: file.contentType })
-      : await store.put(scope, file.bytes!, { contentType: file.contentType });
-    const { fileId, uploaded } = await store.openAiFile(scope, stored.sha256, {
-      name: file.name,
-      contentType: file.contentType,
-      ...(file.blob ? { blob: file.blob } : { bytes: file.bytes }),
-    });
+    let fileId: string;
+    let uploaded: boolean;
+    let sha256: string | undefined;
+    try {
+      const store = contentStore();
+      const stored = file.blob
+        ? await store.putBlob(scope, file.blob, { contentType: file.contentType })
+        : await store.put(scope, file.bytes!, { contentType: file.contentType });
+      const opened = await store.openAiFile(scope, stored.sha256, {
+        name: file.name,
+        contentType: file.contentType,
+        ...(file.blob ? { blob: file.blob } : { bytes: file.bytes }),
+      });
+      fileId = opened.fileId;
+      uploaded = opened.uploaded;
+      sha256 = stored.sha256;
+    } catch (storeError) {
+      // A storage problem (container, permission, network) must not stop
+      // Code Interpreter: upload directly, as before the content store.
+      logInfo("Code Interpreter: content store failed, uploading directly", {
+        error: storeError instanceof Error ? storeError.message : String(storeError),
+        fileName: file.name,
+      });
+      fileId = await openAiContentFiles().upload(
+        (file.blob ?? file.bytes)!,
+        file.name,
+        file.contentType || "application/octet-stream"
+      );
+      uploaded = true;
+      sha256 = undefined;
+    }
     logInfo("Code Interpreter file ready", {
       fileId,
       fileName: file.name,
-      sha256: stored.sha256,
+      sha256,
       uploaded,
     });
     return {
       status: "OK",
-      response: { id: fileId, name: file.name, sha256: stored.sha256, uploaded },
+      response: { id: fileId, name: file.name, ...(sha256 ? { sha256 } : {}), uploaded },
     };
   } catch (error) {
     logError("Failed to upload file for Code Interpreter", {

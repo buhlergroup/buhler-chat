@@ -34,9 +34,7 @@ import {
 import { persistAssistantFromFinishEvent } from "@/features/chat-page/chat-services/chat-api/persist-assistant";
 import { consumeRateLimitToken } from "@/features/chat-page/chat-services/chat-api/rate-limit";
 import { resolveRateLimitSubject } from "@/features/chat-page/chat-services/chat-api/rate-limit-subject";
-import { createSandboxUrlTransform } from "@/features/chat-page/chat-services/chat-api/sandbox-url-transform";
-import { createImageGenerationStreamRewriter } from "@/features/chat-page/chat-services/chat-api/image-generation-stream-rewriter";
-import { createCodeInterpreterStreamRewriter } from "@/features/chat-page/chat-services/chat-api/code-interpreter-stream-rewriter";
+import { createChatStreamTransforms } from "@/features/chat-page/chat-services/chat-api/chat-stream-transforms";
 import { resolveProvider, getFileIdsSignature } from "@/features/chat-page/chat-services/models/provider-seam";
 import { resolveMaxOutputTokens } from "@/features/chat-page/chat-services/models/max-output-tokens";
 import { ensureCodeInterpreterContainer } from "@/features/chat-page/chat-services/code-interpreter-container";
@@ -751,18 +749,7 @@ export async function POST(req: Request) {
     // instead of letting NoSuchToolError kill the turn.
     repairToolCall: repairExtensionToolCall,
     abortSignal: abortController.signal,
-    experimental_transform: (() => {
-      // Shared map populated by the code-interpreter rewriter when it
-      // persists a data: URL → blob ref; the sandbox text-delta transform
-      // consumes it to substitute matching data: URLs the model echoes
-      // in its prose.
-      const dataUrlToBlobRef = new Map<string, string>();
-      return [
-        createImageGenerationStreamRewriter(ctx.thread.id),
-        createCodeInterpreterStreamRewriter(ctx.thread.id, dataUrlToBlobRef),
-        createSandboxUrlTransform(ctx.thread.id, dataUrlToBlobRef),
-      ];
-    })(),
+    experimental_transform: createChatStreamTransforms(ctx.thread.id),
     providerOptions: resolved.providerOptions,
     onError: ({ error }) => {
       // `Error` objects have non-enumerable `.message` and `.stack`, so
