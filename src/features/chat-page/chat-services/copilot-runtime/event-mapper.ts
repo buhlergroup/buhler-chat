@@ -28,6 +28,25 @@
 import type { UIMessageChunk } from "ai";
 import { COMPACTION_DATA_PART_TYPE, COMPACTION_PART_ID, type CompactionDataPart } from "../chat-api/compaction-part";
 
+/** The Copilot path image tool (provider-tools.ts). */
+export const GENERATE_IMAGE_TOOL = "generate_image";
+
+/**
+ * The markdown that shows a generated image in the answer: the same text the
+ * AI SDK path injects after an image_generation result
+ * (image-generation-stream-rewriter.ts). The chat renders `blob://` refs in
+ * markdown; the tool part alone is collapsed.
+ */
+export const generatedImageMarkdown = (blobRef: string): string => `\n\n![Generated image](${blobRef})\n\n`;
+
+/** The blob:// ref of a generate_image output, or undefined. */
+function generatedImageRef(toolName: string, output: unknown): string | undefined {
+  if (toolName !== GENERATE_IMAGE_TOOL || !output || typeof output !== "object") return undefined;
+  const ref = (output as { result?: unknown }).result;
+  // Only a plain blob://<thread>/<file> ref: nothing that could break the markdown.
+  return typeof ref === "string" && /^blob:\/\/[A-Za-z0-9_-]+\/[A-Za-z0-9_-]+\.[A-Za-z0-9]+$/.test(ref) ? ref : undefined;
+}
+
 /** The runtime's tool that starts a sub-agent, and the tool part the chat shows for it. */
 export const RUNTIME_SUBAGENT_TOOL = "task";
 export const SUBAGENT_PART_TOOL = "sub_agent";
@@ -181,6 +200,8 @@ export class CopilotEventMapper {
     bySubAgent: {},
   };
   private readonly compactionStarts: number[] = [];
+  /** Markdown of the images generate_image made this turn; leads the stored text. */
+  private generatedImagesText = "";
   private lastFinishReason: MappedFinishReason = "stop";
   private error: { message: string; name?: string } | undefined;
   private aborted = false;
@@ -302,7 +323,9 @@ export class CopilotEventMapper {
     const last = this.steps.at(-1);
     const toolCount = this.steps.reduce((n, s) => n + s.toolResults.length, 0);
     return {
-      text: last?.text ?? "",
+      // The image markdown is part of the answer text, live and stored (as the
+      // AI SDK path stores it), so the image shows again after a reload.
+      text: this.generatedImagesText + (last?.text ?? ""),
       reasoningText: last?.reasoningText ? last.reasoningText : undefined,
       toolResults: last?.toolResults ?? [],
       steps: this.steps,
@@ -541,12 +564,25 @@ export class CopilotEventMapper {
         output,
         dynamic: true,
       });
+      const imageRef = generatedImageRef(toolName, output);
+      if (imageRef) this.emitGeneratedImage(toolCallId, imageRef);
       return;
     }
     const errorText =
       this.options.toolErrorText?.(toolCallId) ??
       String(data.error?.message ?? data.result?.content ?? "Tool execution failed");
     this.emit({ type: "tool-output-error", toolCallId, errorText, ...dynamic });
+  }
+
+  /** Shows a generated image in the answer text, right after its tool part. */
+  private emitGeneratedImage(toolCallId: string, blobRef: string): void {
+    const markdown = generatedImageMarkdown(blobRef);
+    const id = `imagegen-${toolCallId}`;
+    this.closeParts();
+    this.emit({ type: "text-start", id });
+    this.emit({ type: "text-delta", id, delta: markdown });
+    this.emit({ type: "text-end", id });
+    this.generatedImagesText += markdown;
   }
 
   private finish(): void {
