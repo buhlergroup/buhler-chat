@@ -162,3 +162,41 @@ describe("common.unit.azure-storage — GetBlob", () => {
     expect(result.status).toBe("ERROR");
   });
 });
+
+describe("common.unit.azure-storage — blob name guard", () => {
+  beforeEach(() => {
+    vi.resetModules();
+    mockUploadData.mockReset();
+    mockDownload.mockReset();
+    mockGetBlockBlobClient.mockClear();
+    vi.stubEnv("AZURE_STORAGE_ACCOUNT_NAME", "teststorage");
+  });
+
+  const UNSAFE = ["t/../agent-skills/p1/s.zip", "../x", "t/./x", "/t/x", "t\\..\\x","t//x", "t/x\u0000", ""];
+
+  it("UploadBlob refuses names with dot segments, backslashes or control characters", async () => {
+    const { UploadBlob } = await import("./azure-storage");
+    for (const name of UNSAFE) {
+      const result = await UploadBlob("images", name, Buffer.from("x"));
+      expect(result.status).toBe("ERROR");
+    }
+    expect(mockGetBlockBlobClient).not.toHaveBeenCalled();
+    expect(mockUploadData).not.toHaveBeenCalled();
+  });
+
+  it("GetBlob and DeleteBlob refuse the same names", async () => {
+    const { GetBlob, DeleteBlob } = await import("./azure-storage");
+    for (const name of UNSAFE) {
+      expect((await GetBlob("images", name)).status).toBe("ERROR");
+      expect((await DeleteBlob("images", name)).status).toBe("ERROR");
+    }
+    expect(mockGetBlockBlobClient).not.toHaveBeenCalled();
+  });
+
+  it("still accepts multi-segment names such as skill packages", async () => {
+    mockUploadData.mockResolvedValue({ errorCode: undefined });
+    const { UploadBlob } = await import("./azure-storage");
+    const result = await UploadBlob("images", "agent-skills/p1/s1-1.zip", Buffer.from("x"));
+    expect(result.status).toBe("OK");
+  });
+});

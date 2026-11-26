@@ -59,7 +59,15 @@ export function CodeInterpreterFilePicker({
 
   useEffect(() => {
     const messageListener = (event: MessageEvent) => {
-      if (event.origin.includes(new URL(tenantUrl).hostname)) {
+      // Exact origin match: a substring test would also accept a look-alike
+      // host such as "tenant.example.com.attacker.test".
+      let tenantOrigin: string | null = null;
+      try {
+        tenantOrigin = new URL(tenantUrl).origin;
+      } catch {
+        tenantOrigin = null;
+      }
+      if (tenantOrigin !== null && event.origin === tenantOrigin) {
         const message = event.data;
 
         if (

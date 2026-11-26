@@ -169,6 +169,18 @@ describe("/api/code-interpreter/file/[fileId] route", () => {
     expect(await res.text()).toMatch(/Unauthorized/i);
   });
 
+  // api.unit.ci-file.004b — GET 401 (not 500) when getCurrentUser throws, as
+  // it does without a session. The proxy matcher once skipped paths ending in
+  // ".png", so /api/code-interpreter/file/x.png reached this handler directly.
+  it("GET returns 401 when getCurrentUser throws (no session)", async () => {
+    mockedGetCurrentUser.mockRejectedValue(new Error("User not found"));
+    const req = makeGetRequest("file.png");
+    const res = await GET(req, { params: Promise.resolve({ fileId: "file.png" }) });
+    expect(res.status).toBe(401);
+    expect(mockFindFile).not.toHaveBeenCalled();
+    expect(mockedDownload).not.toHaveBeenCalled();
+  });
+
   // api.unit.ci-file.005 — GET 400 when fileId is empty string
   it("GET returns 400 when fileId is empty", async () => {
     const req = makeGetRequest("");
@@ -205,6 +217,16 @@ describe("/api/code-interpreter/file/[fileId] route", () => {
     const res = await DELETE(req, { params: Promise.resolve({ fileId: "file123" }) });
     expect(res.status).toBe(401);
     expect(await res.text()).toMatch(/Unauthorized/i);
+  });
+
+  // api.unit.ci-file.008b — DELETE 401 (not 500) when getCurrentUser throws.
+  it("DELETE returns 401 when getCurrentUser throws (no session)", async () => {
+    mockedGetCurrentUser.mockRejectedValue(new Error("User not found"));
+    const req = makeDeleteRequest("file.png");
+    const res = await DELETE(req, { params: Promise.resolve({ fileId: "file.png" }) });
+    expect(res.status).toBe(401);
+    expect(mockFindFile).not.toHaveBeenCalled();
+    expect(mockedDelete).not.toHaveBeenCalled();
   });
 
   // api.unit.ci-file.009 — DELETE 400 when fileId is empty
@@ -250,5 +272,32 @@ describe("/api/code-interpreter/file/[fileId] route", () => {
     const req = makeDeleteRequest("file123");
     const res = await DELETE(req, { params: Promise.resolve({ fileId: "file123" }) });
     expect(res.status).toBe(500);
+  });
+});
+
+describe("/api/code-interpreter/file/[fileId] route - Content-Disposition", () => {
+  beforeEach(() => {
+    mockedDownload.mockReset();
+    mockedGetCurrentUser.mockReset();
+    mockedGetCurrentUser.mockResolvedValue(defaultUser);
+    mockFindFile.mockReset();
+    mockFindFile.mockImplementation(async (id: string) => ({
+      threadId: "t1",
+      file: { id, name: "x", type: "code-interpreter", source: "upload" },
+    }));
+  });
+
+  it("serves a non-Latin-1 file name with an RFC 6266 header instead of a 500", async () => {
+    mockedDownload.mockResolvedValue({
+      status: "OK",
+      response: { data: Buffer.from("a,b"), name: "数据 \"Q3\".csv", contentType: "text/csv" },
+    });
+    const res = await GET(makeGetRequest("file-1"), { params: Promise.resolve({ fileId: "file-1" }) });
+    expect(res.status).toBe(200);
+    const value = res.headers.get("content-disposition") ?? "";
+    expect(value).toMatch(/^attachment; filename="[\x20-\x7e]*"; filename\*=UTF-8''/);
+    expect(value).toContain("filename*=UTF-8''%E6%95%B0%E6%8D%AE%20%22Q3%22.csv");
+    expect(value).not.toMatch(/filename="[^"]*"[^;]/);
+    expect(res.headers.get("x-content-type-options")).toBe("nosniff");
   });
 });
