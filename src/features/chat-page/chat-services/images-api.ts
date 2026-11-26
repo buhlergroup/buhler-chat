@@ -1,9 +1,11 @@
 import "server-only";
 
+import { userSession } from "@/features/auth-page/helpers";
 import {
   GetImageFromStore,
   GetThreadAndImageFromUrl,
 } from "./chat-image-service";
+import { threadImageAccess } from "./image-access";
 import {
   INLINE_IMAGE_TYPES,
   OCTET_STREAM,
@@ -89,6 +91,19 @@ export const ImageAPIEntry = async (request: Request): Promise<Response> => {
   }
 
   const { threadId, imgName } = response.response;
+
+  // One access decision per request, before the blob is read. A caller who
+  // may not see the thread gets the same 404 as for a missing thread, so the
+  // response does not tell whether the thread exists. Who may see a thread:
+  // see image-access.ts.
+  const access = await threadImageAccess(threadId, await userSession());
+  if (access === "unauthenticated") {
+    return textResponse("Unauthorized", 401);
+  }
+  if (access !== "allowed") {
+    return textResponse("Not found.", 404);
+  }
+
   const imageData = await GetImageFromStore(threadId, imgName);
 
   if (imageData.status !== "OK") {
