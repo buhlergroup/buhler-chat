@@ -202,6 +202,25 @@ export async function shutdownCopilotRuntime(): Promise<void> {
   if (client) await (await client).stop().catch(() => undefined);
 }
 
+/** The runtime's event journal; a thread has session state while it exists. */
+const EVENTS_JOURNAL = `${SESSION_STATE_ROOT}/events.jsonl`;
+
+/** Removes the session state (a disconnect may have written some back). */
+export async function clearSessionState(fs: Pick<BlobSessionFs, "readdir" | "rm">): Promise<void> {
+  for (const name of await fs.readdir(SESSION_STATE_ROOT).catch(() => [] as string[])) {
+    await fs.rm(`${SESSION_STATE_ROOT}/${name}`, true, true).catch(() => undefined);
+  }
+}
+
+/** Drops this process's live session of a thread, before its state is removed. */
+export async function discardLiveSession(threadId: string): Promise<void> {
+  const id = `thread-${threadId}`;
+  const live = state.sessions.get(id);
+  if (!live) return;
+  state.sessions.delete(id);
+  await live.session.disconnect().catch(() => undefined);
+}
+
 /** Drops live sessions so the next turn resumes from Blob (restart simulation). */
 export async function forgetLiveSessions(): Promise<void> {
   for (const [id, live] of state.sessions) await dropSession(id, live);
@@ -396,15 +415,22 @@ async function openSession(
   const existing = state.sessions.get(sessionId);
   if (existing) {
     if (existing.namespace !== namespace) throw new Error("Session namespace mismatch");
-    if (existing.client === client && existing.agentSignature === plan.signature) {
+    const stateGone = !(await existing.fs.exists(EVENTS_JOURNAL));
+    if (!stateGone && existing.client === client && existing.agentSignature === plan.signature) {
       // Most recently used goes to the end (LRU order).
       state.sessions.delete(sessionId);
       state.sessions.set(sessionId, existing);
       return { live: existing, mode: "live", seeded: 0 };
     }
     if (existing.busy) throw new Error("A reply is still running in this chat. Wait for it or stop it first.");
-    // Other sub-agents (or a restarted runtime): reopen from the Blob state.
+    // Other sub-agents or a restarted runtime: reopen from the Blob state.
     await dropSession(sessionId, existing);
+    if (stateGone) {
+      // The chat was reset (possibly on another instance): its session state is
+      // gone, so this live session would still answer from the deleted turns.
+      await clearSessionState(existing.fs);
+      logInfo("copilot-runtime: dropped a live session whose state was removed", { threadId: input.threadId });
+    }
   }
 
   const store = input.store ?? (await getAgentWorkspaceStore());
@@ -472,7 +498,7 @@ async function openSession(
 
   // The session state lives in Blob under the thread's namespace. If it is
   // there, the session survives a server restart by resuming from it.
-  const hasState = await fs.exists(`${SESSION_STATE_ROOT}/events.jsonl`);
+  const hasState = await fs.exists(EVENTS_JOURNAL);
   let session: CopilotSession;
   let mode: CopilotTurnResult["sessionMode"];
   let seeded = 0;
@@ -553,9 +579,11 @@ export async function runCopilotTurn(input: CopilotTurnInput): Promise<CopilotTu
     });
     const sessionId = `thread-${input.threadId}`;
     const live = state.sessions.get(sessionId);
-    if (live && lease.previousHolder && lease.previousHolder !== state.instanceId) {
-      // Another instance ran this thread since, or it was reset: our
-      // in-memory session is stale.
+    if (live && lease.previousHolder !== state.instanceId) {
+      // Generation check: this process writes its id on every release, so a
+      // different holder means another instance ran the thread since, or the
+      // chat was rewound / reset (holder `reset-…`, or a new lease blob with
+      // no holder after a full reset). The in-memory session is stale.
       await dropSession(sessionId, live);
       logInfo("copilot-runtime: dropped a stale live session", { threadId: input.threadId });
     }

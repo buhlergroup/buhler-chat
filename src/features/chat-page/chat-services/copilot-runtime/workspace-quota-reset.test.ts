@@ -9,7 +9,7 @@ vi.mock("./copilot-session", () => ({ invalidateThreadSessions: (u: string, t: s
 
 import { BlobSessionFs, DataBlobCache, WorkspaceQuota, WorkspaceQuotaError } from "./blob-session-fs";
 import { FakeBlobStore } from "./fake-blob-store.test-helper";
-import { removeThreadWorkspaceFiles, resetThreadRuntimeQuietly } from "./workspace-files";
+import { removeThreadWorkspaceFiles, removeThreadWorkspaceFilesQuietly } from "./workspace-files";
 import { acquireThreadLease, type LeaseBackend } from "./thread-lease";
 
 const USER = "c".repeat(64);
@@ -81,41 +81,33 @@ function memoryLeases(): LeaseBackend & { meta: Map<string, Record<string, strin
 describe("reset / rewind clean-up", () => {
   beforeEach(() => invalidate.mockClear());
 
-  it("session-state scope removes the journal only; workspace scope removes the model's files", async () => {
+  it("session scope removes the journal only; all removes the whole thread", async () => {
     const store = new FakeBlobStore();
     const fs = fsFor(store, "t4");
-    await fs.writeFile("/session-state/events.jsonl", "{}\n");
+    await fs.writeFile("/session-state/events.jsonl", "{}" + String.fromCharCode(10));
     await fs.writeFile("/session-state/workspace.yaml", "a: 1");
     await fs.writeFile("/workspace/notes/plan.md", "plan");
-    await fs.writeFile("/workspace/uploads/a.pdf", "pdf");
-    await removeThreadWorkspaceFiles(USER, "t4", "session-state", store);
+    await removeThreadWorkspaceFiles(USER, "t4", "session", store);
     expect(await fs.exists("/session-state/events.jsonl")).toBe(false);
     expect(await fs.exists("/session-state/workspace.yaml")).toBe(false);
     expect(await fs.exists("/workspace/notes/plan.md")).toBe(true);
-    await removeThreadWorkspaceFiles(USER, "t4", "workspace", store);
+    await removeThreadWorkspaceFiles(USER, "t4", "all", store);
     expect(await fs.exists("/workspace/notes/plan.md")).toBe(false);
-    expect(await fs.exists("/workspace/uploads/a.pdf")).toBe(false);
-    // No orphaned data blobs are left.
-    expect([...store.blobs.keys()].filter((k) => k.startsWith(`${ns("t4")}/d/`))).toEqual([]);
+    expect([...store.blobs.keys()].filter((k) => k.startsWith(`${ns("t4")}/`))).toEqual([]);
   });
 
-  it("resetThreadRuntimeQuietly: rewind drops the session and the journal, reset also the workspace", async () => {
+  it("removing the session state invalidates the live sessions (all instances); removing uploads does not", async () => {
     const env = { ...process.env };
     process.env.AGENT_RUNTIME = "copilot";
     const store = new FakeBlobStore();
     const { getExistingAgentWorkspaceStore } = await import("./azure-blob-store");
     vi.mocked(getExistingAgentWorkspaceStore).mockResolvedValue(store as never);
-    const fs = fsFor(store, "t5");
-    await fs.writeFile("/session-state/events.jsonl", "{}\n");
-    await fs.writeFile("/workspace/notes.md", "n");
-    await resetThreadRuntimeQuietly(USER, "t5", "rewind");
+    await removeThreadWorkspaceFilesQuietly(USER, "t5", "uploads");
+    expect(invalidate).not.toHaveBeenCalled();
+    await removeThreadWorkspaceFilesQuietly(USER, "t5", "session");
     expect(invalidate).toHaveBeenCalledWith(USER, "t5");
-    expect(await fs.exists("/session-state/events.jsonl")).toBe(false);
-    expect(await fs.exists("/workspace/notes.md")).toBe(true);
-    await fs.writeFile("/session-state/events.jsonl", "{}\n");
-    await resetThreadRuntimeQuietly(USER, "t5", "reset");
-    expect(await fs.exists("/session-state/events.jsonl")).toBe(false);
-    expect(await fs.exists("/workspace/notes.md")).toBe(false);
+    await removeThreadWorkspaceFilesQuietly(USER, "t5", "all");
+    expect(invalidate).toHaveBeenCalledTimes(2);
     process.env = env;
   });
 

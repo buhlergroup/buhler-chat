@@ -206,12 +206,16 @@ export const SoftDeleteChatContentsForCurrentUser = async (
         await HistoryContainer().items.upsert(itemToUpdate);
       });
 
-      // The chat's workspace uploads go with its documents (Copilot path).
-      await removeAgentWorkspaceFiles(chatThreadID, "uploads");
-      // The Copilot runtime must not continue the deleted turns: drop its
-      // live session (all instances) and its journal; a full reset also
-      // clears the agent's files. The next turn reseeds from Cosmos.
-      await resetAgentRuntime(chatThreadID, startIdx === 0 ? "reset" : "rewind");
+      // Copilot path: the uploads go with the documents, the session state
+      // with the messages, or the model would still answer from deleted
+      // turns. A full reset (temporary chat, "Reset chat") clears the whole
+      // workspace; a rewind keeps the files the remaining turns refer to.
+      if (startIdx === 0) {
+        await removeAgentWorkspaceFiles(chatThreadID, "all");
+      } else {
+        await removeAgentWorkspaceFiles(chatThreadID, "uploads");
+        await removeAgentWorkspaceFiles(chatThreadID, "session");
+      }
 
       // Drop the history-compaction row with the messages it describes. It
       // holds both a summary of trimmed turns and the watermark marking where
@@ -236,18 +240,12 @@ export const SoftDeleteChatContentsForCurrentUser = async (
  */
 const removeAgentWorkspaceFiles = async (
   chatThreadId: string,
-  scope: "uploads" | "all",
+  scope: "uploads" | "session" | "all",
 ): Promise<void> => {
   const { removeThreadWorkspaceFilesQuietly } = await import(
     "./copilot-runtime/workspace-files"
   );
   await removeThreadWorkspaceFilesQuietly(await userHashedId(), chatThreadId, scope);
-};
-
-/** See resetThreadRuntimeQuietly (Copilot path); never fails the caller. */
-const resetAgentRuntime = async (chatThreadId: string, mode: "rewind" | "reset"): Promise<void> => {
-  const { resetThreadRuntimeQuietly } = await import("./copilot-runtime/workspace-files");
-  await resetThreadRuntimeQuietly(await userHashedId(), chatThreadId, mode);
 };
 
 export const SoftDeleteChatThreadForCurrentUser = async (
@@ -481,10 +479,6 @@ export const CreateChatThread = async (options?: {
       personaDocumentIds: [],
       isTemporary: options?.temporary ?? false,
     };
-
-    // The temporary chat reuses one id: nothing of an earlier one may carry
-    // over into the agent runtime (Copilot path).
-    if (options?.temporary) await resetAgentRuntime(modelToSave.id, "reset");
 
     // Use upsert to allow both creation of new chat threads and updating existing ones.
     // This ensures that if a thread with the same ID exists, it will be updated instead of failing.
