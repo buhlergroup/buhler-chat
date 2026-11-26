@@ -352,6 +352,7 @@ export async function POST(req: Request) {
         buildUnavailableAgentFilesPrompt(
           ctx.thread.unavailableAgentFiles,
           ctx.thread.notFoundAgentFileCount,
+          ctx.thread.notAvailableAgentFileCount,
         ),
       documentHint: ctx.documentHint,
       trailingStaticBlock:

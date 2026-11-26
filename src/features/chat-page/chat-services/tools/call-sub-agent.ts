@@ -3,7 +3,7 @@ import "server-only";
 import { z } from "zod";
 import { tool, generateText, isStepCount } from "ai";
 import { logInfo, logDebug, logError } from "@/features/common/services/logger";
-import { FindPersonaByID } from "@/features/persona-page/persona-services/persona-service";
+import { findPersonaForCurrentUser } from "@/features/persona-page/persona-services/persona-lookup";
 import { MODEL_CONFIGS, DEFAULT_MODEL, normalizeChatModelId, type ChatModel } from "../models";
 import { resolveProvider } from "../models/provider-seam";
 import { resolveMaxOutputTokens } from "../models/max-output-tokens";
@@ -55,8 +55,9 @@ export function callSubAgentTool(ctx: ToolContext) {
         depth: ctx.depth ?? 0,
       });
 
-      // Any agent the user can open may be called (FindPersonaByID checks
-      // access), but only a configured sub-agent runs with its extensions.
+      // Any agent the user can open may be called (findPersonaForCurrentUser
+      // checks access), but only a configured sub-agent runs with its
+      // extensions.
       const configured = allowedSubAgentIds(ctx).has(args.agent_id);
       if (!configured) {
         logInfo("callSubAgentTool: agent is not a configured sub-agent, running without extensions", {
@@ -66,7 +67,7 @@ export function callSubAgentTool(ctx: ToolContext) {
       }
 
       // Resolve persona
-      const personaResponse = await FindPersonaByID(args.agent_id);
+      const personaResponse = await findPersonaForCurrentUser(args.agent_id);
       if (personaResponse.status !== "OK") {
         logError("callSubAgentTool: persona not found", {
           agentId: args.agent_id,

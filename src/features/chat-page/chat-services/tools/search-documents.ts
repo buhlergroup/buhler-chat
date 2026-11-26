@@ -6,7 +6,7 @@ import { SimilaritySearch } from "../azure-ai-search/azure-ai-search";
 import { CreateCitations, FormatCitations } from "../citation-service";
 import { userHashedId } from "@/features/auth-page/helpers";
 import { logInfo, logDebug, logError } from "@/features/common/services/logger";
-import { AllowedPersonaDocumentIds } from "@/features/persona-page/persona-services/persona-documents-service";
+import { allowedPersonaDocumentIds } from "@/features/persona-page/persona-services/persona-document-graph-check";
 import type { ToolContext } from "./tool-context";
 import { odataEq, odataSearchIn } from "@/features/common/odata-filter";
 
@@ -77,13 +77,13 @@ export function searchDocumentsTool(ctx: ToolContext) {
       const skip = args.skip ?? 0;
       const userId = await userHashedId();
 
-      const allowedPersonaDocumentIds =
-        (await AllowedPersonaDocumentIds(ctx.personaDocumentIds)) ?? [];
+      const allowedDocumentIds =
+        (await allowedPersonaDocumentIds(ctx.personaDocumentIds)) ?? [];
 
       const filter = BuildDocumentSearchFilter(
         userId,
         ctx.threadId,
-        allowedPersonaDocumentIds
+        allowedDocumentIds
       );
 
       const searchPromise = SimilaritySearch(args.query, top, filter, skip, true);

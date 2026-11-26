@@ -48,7 +48,9 @@ export async function addPersonaFileSource(
   try {
     // Owner check on the SERVER, before any Graph call.
     const access = await resolveSkillAccess(personaId);
-    if (!access) return { status: "NOT_FOUND", errors: [{ message: "Agent not found." }] };
+    if (!access || !access.canUse) {
+      return { status: "NOT_FOUND", errors: [{ message: "Agent not found." }] };
+    }
     if (!access.canEdit) {
       return {
         status: "UNAUTHORIZED",
@@ -118,6 +120,23 @@ export async function addPersonaFileSource(
       return { status: "ERROR", errors: [{ message: "The SharePoint source could not be saved." }] };
     }
     await HistoryContainer().items.upsert<PersonaFileSourceModel>(model);
+
+    // Adds of several requests at the same time each saw fewer sources than
+    // the limit: counted again after the insert. Over the limit, this add is
+    // undone, so the agent never keeps more than the limit.
+    const after = await queryFileSourcesByPersonaId(personaId);
+    if (after.length > maxSources) {
+      await HistoryContainer().item(model.id, model.userId).delete();
+      logInfo("sharepoint files: add undone, limit reached by a concurrent add", {
+        personaId,
+        sources: after.length,
+        maxSources,
+      });
+      return {
+        status: "ERROR",
+        errors: [{ message: `An agent can have up to ${maxSources} SharePoint folders and files.` }],
+      };
+    }
     logInfo("sharepoint files: source added", { personaId, sourceId: model.id, kind: model.kind });
     return { status: "OK", response: toFileSourceSummary(model) };
   } catch (error) {

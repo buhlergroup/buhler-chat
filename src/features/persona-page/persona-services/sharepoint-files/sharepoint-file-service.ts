@@ -35,8 +35,10 @@ export async function DeletePersonaFileSource(
   sourceId: string,
 ): Promise<ServerActionResponse<boolean>> {
   try {
+    // Open rights first: for an agent the user cannot open, the answer is
+    // the one of an unknown agent. Then edit rights.
     const access = await resolveSkillAccess(personaId);
-    if (!access) return notFound();
+    if (!access || !access.canUse) return notFound();
     if (!access.canEdit) return notAllowed();
     const source = (await queryFileSourcesByPersonaId(personaId)).find((s) => s.id === sourceId);
     if (!source) return { status: "NOT_FOUND", errors: [{ message: "Source not found." }] };
