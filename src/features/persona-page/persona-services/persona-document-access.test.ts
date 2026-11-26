@@ -87,15 +87,8 @@ vi.mock("./persona-service", () => ({
   FindPersonaByID: vi.fn(),
 }));
 
-import {
-  PersonaDocumentById,
-  UpdateOrAddPersonaDocuments,
-} from "./persona-documents-service";
-import {
-  PersonaCIDocumentById,
-  PersonaCIDocumentsByIds,
-  UpdateOrAddPersonaCIDocuments,
-} from "./persona-ci-documents-service";
+import { PersonaDocumentById } from "./persona-documents-service";
+import { PersonaCIDocumentsByIds } from "./persona-ci-documents-service";
 import { FindPersonaByID } from "./persona-service";
 
 const personaDoc = (id: string, userId: string) => ({
@@ -129,17 +122,6 @@ const canOpen = (...personas: any[]) => {
       : ({ status: "UNAUTHORIZED", errors: [{ message: "no access" }] } as any);
   });
 };
-
-const file = (id: string | undefined, documentId = "sp-new") => ({
-  id,
-  documentId,
-  name: `${documentId}.pdf`,
-  createdBy: "user",
-  createdDateTime: "2024-01-01",
-  parentReference: { driveId: "drive-1" },
-});
-
-const SERVER_ID = /^[0-9A-Za-z]{36}$/;
 
 beforeEach(() => {
   store = [];
@@ -196,16 +178,16 @@ describe("PersonaDocumentById checks type and access", () => {
   });
 });
 
-describe("PersonaCIDocumentById checks type and access", () => {
+describe("PersonaCIDocumentsByIds checks type and access", () => {
   it("returns NOT_FOUND for a document of another type with that id", async () => {
     store.push({ id: "ext1", userId: OTHER, type: "EXTENSION" });
-    expect((await PersonaCIDocumentById("ext1")).status).toBe("NOT_FOUND");
+    expect(await PersonaCIDocumentsByIds(["ext1"])).toEqual({ status: "OK", response: [] });
   });
 
   it("returns NOT_FOUND for a document of an agent the caller cannot open", async () => {
     store.push(ciDoc("ci1", OTHER));
     store.push(persona("p1", OTHER, { codeInterpreterDocumentIds: ["ci1"] }));
-    expect((await PersonaCIDocumentById("ci1")).status).toBe("NOT_FOUND");
+    expect(await PersonaCIDocumentsByIds(["ci1"])).toEqual({ status: "OK", response: [] });
   });
 
   it("PersonaCIDocumentsByIds returns only documents of agents the caller can open", async () => {
@@ -218,78 +200,5 @@ describe("PersonaCIDocumentById checks type and access", () => {
     if (result.status === "OK") {
       expect(result.response.map((d) => d.id)).toEqual(["ci1"]);
     }
-  });
-});
-
-describe("UpdateOrAddPersonaDocuments chooses document ids on the server", () => {
-  it("does not store a client id that contains a comma", async () => {
-    const result = await UpdateOrAddPersonaDocuments(
-      [file("own1,victimDoc")],
-      ["own1,victimDoc"]
-    );
-    expect(result.status).toBe("OK");
-    const stored = upsert.mock.calls[0][0];
-    expect(stored.id).not.toContain(",");
-    expect(stored.id).toMatch(SERVER_ID);
-  });
-
-  it("does not store the id of another user's document", async () => {
-    store.push(personaDoc("victimDoc", OTHER));
-    const result = await UpdateOrAddPersonaDocuments(
-      [file("victimDoc")],
-      ["victimDoc"]
-    );
-    expect(result.status).toBe("OK");
-    const stored = upsert.mock.calls[0][0];
-    expect(stored.id).not.toBe("victimDoc");
-    expect(stored.id).toMatch(SERVER_ID);
-    expect(stored.userId).toBe(ME);
-  });
-
-  it("keeps the id of the caller's own document of this persona", async () => {
-    store.push(personaDoc("own1", ME));
-    const result = await UpdateOrAddPersonaDocuments([file("own1")], ["own1"]);
-    expect(result.status).toBe("OK");
-    expect(upsert.mock.calls[0][0].id).toBe("own1");
-  });
-
-  it("gives a new id when the document is not one of the persona's current documents", async () => {
-    store.push(personaDoc("own1", ME));
-    const result = await UpdateOrAddPersonaDocuments([file("own1")], []);
-    expect(result.status).toBe("OK");
-    expect(upsert.mock.calls[0][0].id).not.toBe("own1");
-  });
-
-  it("gives a new id to a second file with the same client id", async () => {
-    store.push(personaDoc("own1", ME));
-    const result = await UpdateOrAddPersonaDocuments(
-      [file("own1", "sp-a"), file("own1", "sp-b")],
-      ["own1"]
-    );
-    expect(result.status).toBe("OK");
-    const ids = upsert.mock.calls.map((c) => c[0].id);
-    expect(ids[0]).toBe("own1");
-    expect(ids[1]).not.toBe("own1");
-  });
-});
-
-describe("UpdateOrAddPersonaCIDocuments chooses document ids on the server", () => {
-  it("does not store the id of another user's document", async () => {
-    store.push(ciDoc("victimCi", OTHER));
-    const result = await UpdateOrAddPersonaCIDocuments(
-      [file("victimCi")],
-      ["victimCi"]
-    );
-    expect(result.status).toBe("OK");
-    const stored = upsert.mock.calls[0][0];
-    expect(stored.id).not.toBe("victimCi");
-    expect(stored.id).toMatch(SERVER_ID);
-  });
-
-  it("keeps the id of the caller's own document of this persona", async () => {
-    store.push(ciDoc("ownCi", ME));
-    const result = await UpdateOrAddPersonaCIDocuments([file("ownCi")], ["ownCi"]);
-    expect(result.status).toBe("OK");
-    expect(upsert.mock.calls[0][0].id).toBe("ownCi");
   });
 });

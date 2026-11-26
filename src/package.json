@@ -8,6 +8,7 @@
     "dev:turbo-debug": "next dev --inspect",
     "build": "next build",
     "check:server-actions": "node scripts/check-server-actions.mjs",
+    "check:unauth": "node scripts/check-unauthenticated-access.mjs",
     "start": "next start",
     "lint": "eslint .",
     "test": "vitest run",

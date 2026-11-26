@@ -23,10 +23,20 @@ test.describe("persona-end-to-end", () => {
     await page.getByPlaceholder(/^Short description$/i).fill(personaDescription);
     await page.getByPlaceholder(/Instructions for your agent/i).fill(personaInstructions);
 
-    // Save closes the sheet (server action `AddOrUpdatePersona` then revalidates).
+    // The first save of a new agent keeps the sheet open on the saved agent
+    // (server action `AddOrUpdatePersona` then revalidates), so files can be
+    // added right away: the Files section becomes active.
     await page.getByRole("button", { name: /^save$/i }).click();
+    const files = page.getByTestId("persona-files");
+    await expect(files).toBeVisible({ timeout: 15_000 });
+    await expect(files.getByText("Save the agent to add files.")).toBeHidden({
+      timeout: 15_000,
+    });
+    await expect(nameInput).toBeVisible();
+    await expect(nameInput).toHaveValue(personaName);
 
-    // Sheet has closed — the name field placeholder is no longer in the DOM.
+    // Close the sheet — the name field placeholder is no longer in the DOM.
+    await page.getByRole("button", { name: /^close$/i }).click();
     await expect(nameInput).toBeHidden({ timeout: 15_000 });
 
     // RevalidateCache({page:"agent"}) invalidates the route cache server-side

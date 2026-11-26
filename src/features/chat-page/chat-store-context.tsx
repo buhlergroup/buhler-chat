@@ -37,6 +37,7 @@ import {
 import { setActiveChatStore } from "./active-chat-store";
 import type { ChatModel, ChatThreadModel, ReasoningEffort } from "./chat-services/models";
 import type { ChatMessageMetadata } from "./chat-services/chat-api/usage-data";
+import { notifyUsageChanged } from "@/features/main-menu/usage-events";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -290,6 +291,7 @@ export function ChatStoreProvider({
     // Thread running totals are accumulated client-side here (the per-request
     // block carries only this turn); a reload reconciles from persisted usage.
     onFinish: ({ message }) => {
+      notifyUsageChanged();
       const usage = (message.metadata as ChatMessageMetadata | undefined)?.usage;
       if (!usage) return;
       const s = store.getState();

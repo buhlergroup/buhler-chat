@@ -1,0 +1,382 @@
+import { describe, it, expect, vi, beforeEach } from "vitest";
+import { render, screen, waitFor, within } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
+
+vi.hoisted(() => {
+  process.env.NEXT_PUBLIC_SHAREPOINT_URL = "https://contoso.sharepoint.com/";
+});
+
+vi.mock("next-auth/react", () => ({
+  useSession: () => ({ data: { user: { accessToken: "token" } } }),
+}));
+
+const actions = vi.hoisted(() => ({
+  ListAgentFiles: vi.fn(),
+  AddAgentFiles: vi.fn(),
+  ChangeAgentFileUse: vi.fn(),
+  RemoveAgentFile: vi.fn(),
+  CheckPersonaSkillNow: vi.fn(),
+  UploadPersonaSkill: vi.fn(),
+}));
+
+vi.mock("../persona-services/agent-files/agent-file-service", () => ({
+  ListAgentFiles: actions.ListAgentFiles,
+  AddAgentFiles: actions.AddAgentFiles,
+  ChangeAgentFileUse: actions.ChangeAgentFileUse,
+  RemoveAgentFile: actions.RemoveAgentFile,
+}));
+vi.mock("../persona-services/skills/persona-skill-service", () => ({
+  CheckPersonaSkillNow: actions.CheckPersonaSkillNow,
+  UploadPersonaSkill: actions.UploadPersonaSkill,
+}));
+
+// The SharePoint picker is an iframe; here a button that "picks" two items.
+vi.mock("./code-interpreter-file-picker", () => ({
+  CodeInterpreterFilePicker: (props: any) => (
+    <div data-testid="picker" data-mode={props.mode} data-single={String(Boolean(props.single))}>
+      {props.trigger(() =>
+        props.onFilesSelected([
+          { documentId: "ITEM1", parentReference: { driveId: "b!d" } },
+          { documentId: "ITEM2", parentReference: { driveId: "b!d" } },
+        ]),
+      )}
+    </div>
+  ),
+}));
+
+vi.mock("@/features/ui/use-toast", () => ({ toast: vi.fn() }));
+
+import { PersonaFiles, FILES_SUBTITLE } from "./persona-files";
+
+const item = (over: Record<string, unknown> = {}) => ({
+  ref: { kind: "document", id: "doc-1" },
+  name: "Handbook.pdf",
+  webUrl: "https://contoso.sharepoint.com/Handbook.pdf",
+  isFolder: false,
+  use: "search",
+  status: "ok",
+  sizeBytes: 2000,
+  allowedUses: ["search", "code"],
+  ...over,
+});
+
+const editorList = (items = [item()], needsCodeInterpreter = false) => ({
+  status: "OK",
+  response: { canEdit: true, count: items.length, items, needsCodeInterpreter },
+});
+
+beforeEach(() => {
+  actions.ListAgentFiles.mockResolvedValue(editorList());
+});
+
+describe("PersonaFiles", () => {
+  it("one section with the plain-English subtitle (decision 1)", () => {
+    render(<PersonaFiles personaId="" />);
+    expect(screen.getByText("Files")).toBeInTheDocument();
+    expect(screen.getByText(FILES_SUBTITLE)).toBeInTheDocument();
+    expect(FILES_SUBTITLE).toBe(
+      "Add files and folders from SharePoint. The app chooses how the agent uses each item. You can change it.",
+    );
+  });
+
+  it("a new agent: 'Save the agent to add files.' and no server call (decision 7)", () => {
+    const onNeeds = vi.fn();
+    render(<PersonaFiles personaId="" onNeedsCodeInterpreterChange={onNeeds} />);
+    expect(screen.getByText("Save the agent to add files.")).toBeInTheDocument();
+    expect(actions.ListAgentFiles).not.toHaveBeenCalled();
+    expect(onNeeds).toHaveBeenCalledWith(false);
+  });
+
+  it("a viewer sees only the number of files (decision 9)", async () => {
+    actions.ListAgentFiles.mockResolvedValue({
+      status: "OK",
+      response: { canEdit: false, count: 3, items: [], needsCodeInterpreter: true },
+    });
+    render(<PersonaFiles personaId="p1" />);
+    expect(await screen.findByText("This agent uses 3 files.")).toBeInTheDocument();
+    expect(screen.queryByText(/Add from SharePoint/)).not.toBeInTheDocument();
+    expect(screen.queryByRole("link")).not.toBeInTheDocument();
+  });
+
+  it("an editor sees each item with its name, link and use", async () => {
+    const onNeeds = vi.fn();
+    actions.ListAgentFiles.mockResolvedValue(
+      editorList(
+        [
+          item(),
+          item({
+            ref: { kind: "file-source", id: "src-1" },
+            name: "Reports",
+            isFolder: true,
+            use: "on-demand",
+            allowedUses: ["on-demand"],
+            webUrl: undefined,
+          }),
+        ],
+        true,
+      ),
+    );
+    render(<PersonaFiles personaId="p1" onNeedsCodeInterpreterChange={onNeeds} />);
+    expect(await screen.findByRole("link", { name: "Handbook.pdf" })).toHaveAttribute(
+      "href",
+      "https://contoso.sharepoint.com/Handbook.pdf",
+    );
+    const rows = screen.getAllByTestId("persona-file-item");
+    expect(within(rows[0]).getByTestId("persona-file-use")).toHaveTextContent("Search");
+    expect(within(rows[0]).getByTestId("persona-file-use")).toHaveAttribute(
+      "title",
+      "The model searches the text. The app copies the text when you add the file.",
+    );
+    expect(within(rows[1]).getByTestId("persona-file-use")).toHaveTextContent("On demand");
+    expect(onNeeds).toHaveBeenLastCalledWith(true);
+  });
+
+  it("the use menu lists only the item's allowed uses and changes the use (decision 5)", async () => {
+    actions.ChangeAgentFileUse.mockResolvedValue({ status: "OK", response: {} });
+    render(<PersonaFiles personaId="p1" />);
+    await userEvent.click(await screen.findByTestId("persona-file-use"));
+    const menu = await screen.findByRole("menu");
+    const options = within(menu).getAllByRole("menuitemradio").map((o) => o.textContent);
+    expect(options).toEqual([
+      "SearchThe model searches the text. The app copies the text when you add the file.",
+      "CodeThe file is in the code interpreter when a chat starts.",
+    ]);
+    expect(within(menu).queryByText("On demand")).not.toBeInTheDocument();
+    await userEvent.click(within(menu).getByText("Code"));
+    await waitFor(() =>
+      expect(actions.ChangeAgentFileUse).toHaveBeenCalledWith("p1", { kind: "document", id: "doc-1" }, "code"),
+    );
+  });
+
+  it("removes an item from its menu", async () => {
+    actions.RemoveAgentFile.mockResolvedValue({ status: "OK", response: {} });
+    render(<PersonaFiles personaId="p1" />);
+    await userEvent.click(await screen.findByTestId("persona-file-use"));
+    await userEvent.click(await screen.findByText("Remove"));
+    await waitFor(() =>
+      expect(actions.RemoveAgentFile).toHaveBeenCalledWith("p1", { kind: "document", id: "doc-1" }),
+    );
+  });
+
+  it("one 'Add from SharePoint' button opens one picker for files and folders (decision 2)", async () => {
+    actions.AddAgentFiles.mockResolvedValue({
+      status: "OK",
+      response: [
+        { driveId: "b!d", itemId: "ITEM1", status: "added", name: "a.pdf", use: "search", ref: { kind: "document", id: "d2" } },
+        { driveId: "b!d", itemId: "ITEM2", status: "rejected", name: "setup.exe", reason: "Files of type .exe cannot be added." },
+      ],
+    });
+    render(<PersonaFiles personaId="p1" />);
+    const picker = await screen.findByTestId("picker");
+    expect(picker.dataset.mode).toBe("all");
+    expect(picker.dataset.single).toBe("false");
+    await userEvent.click(screen.getByRole("button", { name: /Add from SharePoint/ }));
+    await waitFor(() =>
+      expect(actions.AddAgentFiles).toHaveBeenCalledWith("p1", [
+        { driveId: "b!d", itemId: "ITEM1" },
+        { driveId: "b!d", itemId: "ITEM2" },
+      ]),
+    );
+    const notAdded = await screen.findByTestId("persona-files-not-added");
+    expect(notAdded).toHaveTextContent("setup.exe: Files of type .exe cannot be added.");
+    expect(actions.ListAgentFiles).toHaveBeenCalledTimes(2);
+  });
+
+  it("keeps the skill upload as a small secondary link", async () => {
+    actions.UploadPersonaSkill.mockResolvedValue({ status: "OK", response: { name: "brand" } });
+    render(<PersonaFiles personaId="p1" />);
+    const link = await screen.findByRole("button", { name: /Upload a skill zip/ });
+    expect(link.tagName).toBe("BUTTON");
+    const input = screen.getByTestId("persona-files-zip") as HTMLInputElement;
+    const zip = new File([new Uint8Array([1, 2, 3])], "brand.zip", { type: "application/zip" });
+    await userEvent.upload(input, zip);
+    await waitFor(() => expect(actions.UploadPersonaSkill).toHaveBeenCalled());
+    const form = actions.UploadPersonaSkill.mock.calls[0][0] as FormData;
+    expect(form.get("personaId")).toBe("p1");
+  });
+
+  it("offers 'Check now' for a linked skill and 'Replace zip' for an uploaded one", async () => {
+    actions.ListAgentFiles.mockResolvedValue(
+      editorList([
+        item({ ref: { kind: "skill", id: "s1" }, name: "brand.zip", use: "skill", allowedUses: ["skill", "code"], linkedSkill: true }),
+      ]),
+    );
+    render(<PersonaFiles personaId="p1" />);
+    await userEvent.click(await screen.findByTestId("persona-file-use"));
+    expect(await screen.findByText("Check now")).toBeInTheDocument();
+    expect(screen.queryByText("Replace zip")).not.toBeInTheDocument();
+  });
+
+  it("'Check now' shows the server's error when SharePoint did not answer", async () => {
+    const { toast } = await import("@/features/ui/use-toast");
+    vi.mocked(toast).mockClear();
+    actions.ListAgentFiles.mockResolvedValue(
+      editorList([
+        item({ ref: { kind: "skill", id: "s1" }, name: "brand.zip", use: "skill", allowedUses: ["skill", "code"], linkedSkill: true }),
+      ]),
+    );
+    actions.CheckPersonaSkillNow.mockResolvedValue({
+      status: "ERROR",
+      errors: [{ message: "SharePoint did not answer. Try again in a moment." }],
+    });
+    render(<PersonaFiles personaId="p1" />);
+    await userEvent.click(await screen.findByTestId("persona-file-use"));
+    await userEvent.click(await screen.findByText("Check now"));
+    await waitFor(() => expect(actions.CheckPersonaSkillNow).toHaveBeenCalledWith("p1", "s1"));
+    await waitFor(() =>
+      expect(toast).toHaveBeenCalledWith(
+        expect.objectContaining({
+          description: "SharePoint did not answer. Try again in a moment.",
+          variant: "destructive",
+        }),
+      ),
+    );
+  });
+
+  it("tells 'SharePoint did not answer' apart from 'no access'", async () => {
+    actions.ListAgentFiles.mockResolvedValue(
+      editorList([
+        item({ ref: { kind: "document", id: "d-busy" }, name: "Unknown file", status: "unavailable", webUrl: undefined, allowedUses: ["search"] }),
+        item({ ref: { kind: "document", id: "d-locked" }, name: "Unknown file", status: "no-access", webUrl: undefined, allowedUses: ["search"] }),
+      ]),
+    );
+    render(<PersonaFiles personaId="p1" />);
+    const texts = (await screen.findAllByTestId("persona-file-status")).map((s) => s.textContent);
+    expect(texts).toEqual([
+      "SharePoint did not answer. Try again in a moment.",
+      "Ask the owner of this item in SharePoint for access.",
+    ]);
+  });
+  it("shows the error and 'Try again' when the files cannot be loaded, and loads again", async () => {
+    actions.ListAgentFiles.mockResolvedValueOnce({
+      status: "ERROR",
+      errors: [{ message: "The files could not be loaded." }],
+    });
+    render(<PersonaFiles personaId="p1" />);
+    const alert = await screen.findByTestId("persona-files-load-error");
+    expect(alert).toHaveTextContent("The files could not be loaded.");
+    expect(screen.queryByText("Loading files...")).not.toBeInTheDocument();
+    await userEvent.click(within(alert).getByRole("button", { name: "Try again" }));
+    expect(await screen.findByRole("link", { name: "Handbook.pdf" })).toBeInTheDocument();
+    expect(screen.queryByTestId("persona-files-load-error")).not.toBeInTheDocument();
+    expect(actions.ListAgentFiles).toHaveBeenCalledTimes(2);
+  });
+
+  it("shows the error and 'Try again' when the list call throws", async () => {
+    actions.ListAgentFiles.mockRejectedValueOnce(new Error("network"));
+    render(<PersonaFiles personaId="p1" />);
+    const alert = await screen.findByTestId("persona-files-load-error");
+    expect(alert).toHaveTextContent("The files could not be loaded.");
+    expect(within(alert).getByRole("button", { name: "Try again" })).toBeInTheDocument();
+  });
+
+  it("shows the server's warning when a removed file's stored copy stays", async () => {
+    const { toast } = await import("@/features/ui/use-toast");
+    vi.mocked(toast).mockClear();
+    actions.RemoveAgentFile.mockResolvedValue({
+      status: "OK",
+      response: { warning: "The file is removed from the agent and is no longer used. Its stored copy could not be deleted." },
+    });
+    render(<PersonaFiles personaId="p1" />);
+    await userEvent.click(await screen.findByTestId("persona-file-use"));
+    await userEvent.click(await screen.findByText("Remove"));
+    await waitFor(() =>
+      expect(toast).toHaveBeenCalledWith(
+        expect.objectContaining({ description: expect.stringMatching(/stored copy could not be deleted/) }),
+      ),
+    );
+  });
+  it("shows 'Copying text…' on the item while it moves to Search, with its menu disabled", async () => {
+    let finish: (v: unknown) => void = () => {};
+    actions.ListAgentFiles.mockResolvedValue(
+      editorList([item({ ref: { kind: "ci-document", id: "ci-1" }, use: "code", allowedUses: ["search", "code"] })]),
+    );
+    actions.ChangeAgentFileUse.mockReturnValue(new Promise((r) => (finish = r)));
+    const onBusy = vi.fn();
+    render(<PersonaFiles personaId="p1" onBusyChange={onBusy} />);
+    await userEvent.click(await screen.findByTestId("persona-file-use"));
+    await userEvent.click(within(await screen.findByRole("menu")).getByText("Search"));
+    const busy = await screen.findByTestId("persona-file-busy");
+    expect(busy).toHaveTextContent("Copying text…");
+    expect(screen.getByTestId("persona-file-use")).toBeDisabled();
+    expect(onBusy).toHaveBeenLastCalledWith(true);
+    finish({ status: "OK", response: { ref: { kind: "document", id: "d1" }, use: "search" } });
+    await waitFor(() => expect(screen.queryByTestId("persona-file-busy")).not.toBeInTheDocument());
+    expect(onBusy).toHaveBeenLastCalledWith(false);
+  });
+
+  it("shows 'Working…' on the item while it is removed", async () => {
+    let finish: (v: unknown) => void = () => {};
+    actions.RemoveAgentFile.mockReturnValue(new Promise((r) => (finish = r)));
+    render(<PersonaFiles personaId="p1" />);
+    await userEvent.click(await screen.findByTestId("persona-file-use"));
+    await userEvent.click(await screen.findByText("Remove"));
+    expect(await screen.findByTestId("persona-file-busy")).toHaveTextContent("Working…");
+    finish({ status: "OK", response: {} });
+    await waitFor(() => expect(screen.queryByTestId("persona-file-busy")).not.toBeInTheDocument());
+  });
+
+  it("asks before removing an uploaded skill; Cancel keeps it", async () => {
+    actions.ListAgentFiles.mockResolvedValue(
+      editorList([item({ ref: { kind: "skill", id: "s-up" }, name: "notes.zip", use: "skill", allowedUses: ["skill"], uploadedSkill: true, webUrl: undefined })]),
+    );
+    actions.RemoveAgentFile.mockResolvedValue({ status: "OK", response: {} });
+    render(<PersonaFiles personaId="p1" />);
+    await userEvent.click(await screen.findByTestId("persona-file-use"));
+    await userEvent.click(await screen.findByText("Remove"));
+    const dialog = await screen.findByTestId("persona-files-confirm-remove");
+    expect(dialog).toHaveTextContent(
+      'Remove the skill "notes.zip"? An uploaded skill cannot be added again from SharePoint. You must upload the zip again.',
+    );
+    expect(actions.RemoveAgentFile).not.toHaveBeenCalled();
+    await userEvent.click(within(dialog).getByRole("button", { name: "Cancel" }));
+    await waitFor(() => expect(screen.queryByTestId("persona-files-confirm-remove")).not.toBeInTheDocument());
+    expect(actions.RemoveAgentFile).not.toHaveBeenCalled();
+  });
+
+  it("removes an uploaded skill after the confirmation", async () => {
+    actions.ListAgentFiles.mockResolvedValue(
+      editorList([item({ ref: { kind: "skill", id: "s-up" }, name: "notes.zip", use: "skill", allowedUses: ["skill"], uploadedSkill: true, webUrl: undefined })]),
+    );
+    actions.RemoveAgentFile.mockResolvedValue({ status: "OK", response: {} });
+    render(<PersonaFiles personaId="p1" />);
+    await userEvent.click(await screen.findByTestId("persona-file-use"));
+    await userEvent.click(await screen.findByText("Remove"));
+    const dialog = await screen.findByTestId("persona-files-confirm-remove");
+    await userEvent.click(within(dialog).getByRole("button", { name: "Remove" }));
+    await waitFor(() => expect(actions.RemoveAgentFile).toHaveBeenCalledWith("p1", { kind: "skill", id: "s-up" }));
+  });
+
+  it("removes a linked skill and other items without a confirmation", async () => {
+    actions.ListAgentFiles.mockResolvedValue(
+      editorList([item({ ref: { kind: "skill", id: "s-link" }, name: "brand.zip", use: "skill", allowedUses: ["skill", "code"], linkedSkill: true })]),
+    );
+    actions.RemoveAgentFile.mockResolvedValue({ status: "OK", response: {} });
+    render(<PersonaFiles personaId="p1" />);
+    await userEvent.click(await screen.findByTestId("persona-file-use"));
+    await userEvent.click(await screen.findByText("Remove"));
+    await waitFor(() => expect(actions.RemoveAgentFile).toHaveBeenCalledWith("p1", { kind: "skill", id: "s-link" }));
+    expect(screen.queryByTestId("persona-files-confirm-remove")).not.toBeInTheDocument();
+  });
+  it("an uploaded skill has its own help text; a linked skill keeps the SharePoint text", async () => {
+    actions.ListAgentFiles.mockResolvedValue(
+      editorList([
+        item({ ref: { kind: "skill", id: "s-up" }, name: "notes.zip", use: "skill", allowedUses: ["skill"], uploadedSkill: true, webUrl: undefined }),
+        item({ ref: { kind: "skill", id: "s-link" }, name: "brand.zip", use: "skill", allowedUses: ["skill", "code"], linkedSkill: true }),
+      ]),
+    );
+    render(<PersonaFiles personaId="p1" />);
+    const buttons = await screen.findAllByTestId("persona-file-use");
+    const uploaded = buttons.find((b) => b.getAttribute("aria-label")?.startsWith("notes.zip"))!;
+    const linked = buttons.find((b) => b.getAttribute("aria-label")?.startsWith("brand.zip"))!;
+    expect(uploaded).toHaveAttribute(
+      "title",
+      "Skill instructions from an uploaded zip. Upload the zip again to change it.",
+    );
+    expect(linked).toHaveAttribute("title", "Skill instructions. Uses the latest file from SharePoint.");
+    await userEvent.click(uploaded);
+    const menu = await screen.findByRole("menu");
+    expect(menu).toHaveTextContent("Skill instructions from an uploaded zip. Upload the zip again to change it.");
+    expect(menu).not.toHaveTextContent("Uses the latest file from SharePoint");
+  });
+});

@@ -1,9 +1,9 @@
 "use client";
 
-import { useState, useEffect, useRef } from "react";
+import { useState, useEffect, useRef, type ReactNode } from "react";
 import { v4 as uuid } from "uuid";
 import { Button } from "@/features/ui/button";
-import { Edit, ExternalLink, icons, XIcon } from "lucide-react";
+import { Edit, ExternalLink } from "lucide-react";
 import { toast } from "@/features/ui/use-toast";
 import {
   Dialog,
@@ -14,33 +14,60 @@ import {
 } from "@/features/ui/dialog";
 import { SharePointFile } from "../persona-services/models";
 import {
-  SupportedFileExtensionsDocumentIntellicence,
-  SupportedFileExtensionsTextFiles,
-} from "@/features/chat-page/chat-services/models";
+  CODE_INTERPRETER_SUPPORTED_EXTENSIONS,
+  getCodeInterpreterFileLimit,
+} from "@/features/chat-page/chat-services/code-interpreter-constants";
 import { logInfo } from "@/features/common/services/logger";
 
-interface SharePointFilePickerSelectorProps {
+interface CodeInterpreterFilePickerProps {
   tenantUrl: string;
   token: string;
   onFilesSelected: (files: SharePointFile[]) => void;
+  /** File extensions to offer (".zip"); default: the code interpreter types. */
+  filters?: string[];
+  /** One file instead of several (default: several). */
+  single?: boolean;
+  /**
+   * What can be picked (picker v8 typesAndSources.mode); default files.
+   * "all" offers files and folders together, without a type filter.
+   */
+  mode?: "files" | "folders" | "all";
+  /** Most items in one multiple pick; default the code interpreter file limit. */
+  maxCount?: number;
+  title?: string;
+  description?: ReactNode;
+  /** Own trigger instead of the edit icon. */
+  trigger?: (open: () => void) => ReactNode;
 }
 
-export function SharePointFilePicker({
+export function CodeInterpreterFilePicker({
   tenantUrl,
   token,
   onFilesSelected,
-}: SharePointFilePickerSelectorProps) {
+  filters: fileFilters,
+  single = false,
+  mode = "files",
+  maxCount,
+  title,
+  description,
+  trigger,
+}: CodeInterpreterFilePickerProps) {
   const [showPicker, setShowPicker] = useState(false);
   const iframeRef = useRef<HTMLIFrameElement>(null);
   const portRef = useRef<MessagePort | null>(null);
   const channelIdRef = useRef<string>(uuid());
 
   useEffect(() => {
-    // Set up message listener for the picker
     const messageListener = (event: MessageEvent) => {
-      // For iframe, we check if the origin matches our tenant URL
-      // This is a security measure to ensure we only process messages from our iframe
-      if (event.origin.includes(new URL(tenantUrl).hostname)) {
+      // Exact origin match: a substring test would also accept a look-alike
+      // host such as "tenant.example.com.attacker.test".
+      let tenantOrigin: string | null = null;
+      try {
+        tenantOrigin = new URL(tenantUrl).origin;
+      } catch {
+        tenantOrigin = null;
+      }
+      if (tenantOrigin !== null && event.origin === tenantOrigin) {
         const message = event.data;
 
         if (
@@ -74,13 +101,12 @@ export function SharePointFilePicker({
         const notification = payload.data;
 
         if (notification.notification === "page-loaded") {
-          logInfo("Picker page loaded and ready");
+          logInfo("Code Interpreter file picker page loaded and ready");
         }
 
         break;
 
       case "command":
-        // Acknowledge all commands
         portRef.current?.postMessage({
           type: "acknowledge",
           id: message.data.id,
@@ -104,81 +130,38 @@ export function SharePointFilePicker({
                 },
               });
             } catch (error) {
-              toast({
-                title: "Error",
-                description: "Unable to open file picker. Please try again.",
-                variant: "destructive",
-              });
+              console.error("Authentication failed:", error);
               portRef.current?.postMessage({
                 type: "result",
                 id: message.data.id,
                 data: {
                   result: "error",
                   error: {
-                    code: "unableToObtainToken",
-                    message:
-                      error instanceof Error ? error.message : "Unknown error",
+                    code: "tokenExpired",
+                    message: "Authentication failed",
                   },
                 },
               });
             }
+            break;
+
+          case "pick":
+            logInfo("Code Interpreter files picked", { items: command.items });
+            const pickedFiles: SharePointFile[] = command.items.map(
+              (item: any) => ({
+                documentId: item.id,
+                parentReference: {
+                  driveId: item.parentReference.driveId,
+                },
+              })
+            );
+
+            onFilesSelected(pickedFiles);
+            setShowPicker(false);
             break;
 
           case "close":
             setShowPicker(false);
-            break;
-
-          case "pick":
-            try {
-              const files = command.items.map((item: any) => {
-                const file: SharePointFile = {
-                  documentId: item.id,
-                  parentReference: {
-                    driveId: item.parentReference.driveId,
-                  },
-                };
-                return file;
-              });
-
-              onFilesSelected(files);
-
-              portRef.current?.postMessage({
-                type: "result",
-                id: message.data.id,
-                data: {
-                  result: "success",
-                },
-              });
-
-              setShowPicker(false);
-            } catch (error) {
-              portRef.current?.postMessage({
-                type: "result",
-                id: message.data.id,
-                data: {
-                  result: "error",
-                  error: {
-                    code: "unusableItem",
-                    message:
-                      error instanceof Error ? error.message : "Unknown error",
-                  },
-                },
-              });
-            }
-            break;
-
-          default:
-            portRef.current?.postMessage({
-              type: "result",
-              id: message.data.id,
-              data: {
-                result: "error",
-                error: {
-                  code: "unsupportedCommand",
-                  message: command.command,
-                },
-              },
-            });
             break;
         }
         break;
@@ -189,10 +172,15 @@ export function SharePointFilePicker({
     try {
       setShowPicker(true);
 
-      const documentLimit = Number(process.env.NEXT_PUBLIC_MAX_PERSONA_DOCUMENT_LIMIT);
+      const documentLimit = getCodeInterpreterFileLimit(
+        process.env.NEXT_PUBLIC_MAX_PERSONA_CI_DOCUMENT_LIMIT
+      );
 
-      // Schema for the file picker options
-      // https://learn.microsoft.com/en-us/onedrive/developer/controls/file-pickers/v8-schema?view=odsp-graph-online
+      // Filter for Code Interpreter supported extensions
+      const filters =
+        fileFilters ??
+        CODE_INTERPRETER_SUPPORTED_EXTENSIONS.map((ext) => `.${ext.toLowerCase()}`);
+
       const options = {
         sdk: "8.0",
         entry: {},
@@ -201,22 +189,15 @@ export function SharePointFilePicker({
           channelId: channelIdRef.current,
         },
         search: { enabled: true },
-        typesAndSources: {
-          mode: "files",
-          filters: [
-            ...Object.values(SupportedFileExtensionsDocumentIntellicence).map(
-              (ext) => `.${ext}`
-            ),
-            ...Object.values(SupportedFileExtensionsTextFiles).map(
-              (ext) => `.${ext}`
-            ),
-          ],
-        },
-        selection: {
-          mode: "multiple",
-          enablePersistence: true,
-          maximumCount: documentLimit || 25,
-        },
+        typesAndSources:
+          mode === "files" ? { mode: "files", filters: filters } : { mode },
+        selection: single
+          ? { mode: "single" }
+          : {
+              mode: "multiple",
+              enablePersistence: true,
+              maximumCount: maxCount ?? documentLimit,
+            },
       };
 
       const queryString = new URLSearchParams({
@@ -226,7 +207,6 @@ export function SharePointFilePicker({
 
       const url = `${tenantUrl}_layouts/15/FilePicker.aspx?${queryString}`;
 
-      // We need to wait for the iframe to be in the DOM
       setTimeout(() => {
         if (iframeRef.current) {
           const iframeDoc =
@@ -238,7 +218,6 @@ export function SharePointFilePicker({
             form.setAttribute("action", url);
             form.setAttribute("method", "POST");
 
-            // Add the token as a hidden input
             const tokenInput = iframeDoc.createElement("input");
             tokenInput.setAttribute("type", "hidden");
             tokenInput.setAttribute("name", "access_token");
@@ -262,50 +241,45 @@ export function SharePointFilePicker({
 
   return (
     <div className="relative">
-      <Button
-        size={"icon"}
-        onClick={openFilePicker}
-        className="p-1 cursor-pointer"
-        variant={"ghost"}
-        type="button"
-      >
-        <Edit size={15} />
-      </Button>
+      {trigger ? (
+        trigger(openFilePicker)
+      ) : (
+        <Button
+          size={"icon"}
+          onClick={openFilePicker}
+          className="p-1 cursor-pointer"
+          variant={"ghost"}
+          type="button"
+        >
+          <Edit size={15} />
+        </Button>
+      )}
 
       <Dialog open={showPicker} onOpenChange={setShowPicker}>
         <DialogContent className="w-[90vw] max-w-[1500px]">
           <DialogHeader>
             <DialogTitle className="text-xl font-semibold">
-              Select Files
+              {title ?? "Select Code Interpreter Files"}
             </DialogTitle>
             <DialogDescription className="">
-              <span className="gap-2 flex">
+              {description ?? (
+              <span className="gap-2 flex flex-col">
                 <span>
-                  Do not upload documents with a classification higher than B2.
+                  Select files for Code Interpreter (Excel, CSV, JSON, images, etc.).
+                  These files will be automatically loaded when starting a chat with this persona.
                 </span>
-                <a
-                  href={process.env.NEXT_PUBLIC_AI_RULES ?? ""}
-                  target="_blank"
-                >
-                  <Button
-                    variant={"link"}
-                    className="gap-1 p-0 h-auto"
-                    type="button"
-                  >
-                    Bühler AI Policy <ExternalLink size={14} />
-                  </Button>
-                </a>
+                <span>
+                  Files can not be larger than <b>512MB</b> each.
+                </span>
               </span>
-              <span>
-                Files can not be larger than <b>10mb</b> each.
-              </span>
+              )}
             </DialogDescription>
           </DialogHeader>
           <div className="h-[50vh] max-h-[1000px]">
             <iframe
               ref={iframeRef}
               className="inset-0 w-full h-full border-0 rounded-lg"
-              title="OneDrive File Picker"
+              title="OneDrive File Picker - Code Interpreter"
             />
           </div>
         </DialogContent>

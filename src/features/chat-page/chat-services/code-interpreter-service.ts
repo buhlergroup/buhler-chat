@@ -1,10 +1,14 @@
-"use server";
 import "server-only";
+
+// No "use server" here: every export of a "use server" module is a Server
+// Action that any signed-in browser can call with its own arguments. This
+// module is only for server code.
 
 import { OpenAIV1Instance } from "@/features/common/services/openai";
 import { ServerActionResponse } from "@/features/common/server-action-response";
 import { logInfo, logError, logDebug } from "@/features/common/services/logger";
 import { CODE_INTERPRETER_SUPPORTED_EXTENSIONS } from "./code-interpreter-constants";
+import { storableContentType } from "@/features/common/safe-content-type";
 
 /**
  * Upload a file to OpenAI for use with Code Interpreter
@@ -92,11 +96,12 @@ export async function DownloadFileFromCodeInterpreter(
       "jpeg": "image/jpeg",
       "gif": "image/gif",
       "txt": "text/plain",
-      "html": "text/html",
+      "webp": "image/webp",
       "zip": "application/zip"
     };
     
-    const contentType = contentTypeMap[extension] || "application/octet-stream";
+    // Unknown extensions (svg, html, ...) never get a type a browser renders.
+    const contentType = storableContentType(contentTypeMap[extension]);
 
     logInfo("File downloaded successfully", { 
       fileId, 
@@ -208,11 +213,13 @@ export async function DownloadContainerFile(
       "jpeg": "image/jpeg",
       "gif": "image/gif",
       "txt": "text/plain",
-      "html": "text/html",
+      "webp": "image/webp",
       "zip": "application/zip"
     };
     
-    const contentType = contentTypeMap[extension] || response.headers.get('content-type') || "application/octet-stream";
+    // Only the extension map decides the type; the upstream content-type is
+    // not trusted. Unknown extensions (svg, html, ...) become octet-stream.
+    const contentType = storableContentType(contentTypeMap[extension]);
 
     logInfo("Container file downloaded successfully", { 
       containerId,

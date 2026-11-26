@@ -277,7 +277,12 @@ export class SharePointFileSession {
 
   // ── find ─────────────────────────────────────────────────────────────────
 
-  async find(args: { query?: unknown; path?: unknown }) {
+  /**
+   * Lists the files that match, one page of maxFindResults at a time, in a
+   * fixed order (source name, then path). `offset` is the number of matches
+   * to skip; the result tells the total and the offset of the next page.
+   */
+  async find(args: { query?: unknown; path?: unknown; offset?: unknown }) {
     const query = typeof args?.query === "string" ? args.query.trim().slice(0, MAX_QUERY_CHARS) : "";
     const path =
       typeof args?.path === "string"
@@ -297,12 +302,27 @@ export class SharePointFileSession {
         : a.source.name < b.source.name ? -1 : 1,
     );
     const max = SHAREPOINT_FILE_RULES.maxFindResults;
+    const total = matches.length;
+    const offset =
+      typeof args?.offset === "number" && Number.isInteger(args.offset) && args.offset > 0
+        ? args.offset
+        : 0;
+    const page = matches.slice(offset, offset + max);
+    const nextOffset = offset + page.length < total ? offset + page.length : undefined;
+    let note: string | undefined;
+    if (offset > 0 && offset >= total) {
+      note = `Offset ${offset} is past the last match: ${total} file(s) match. Use an offset below ${total}.`;
+    } else if (nextOffset !== undefined) {
+      note = `Files ${offset + 1} to ${offset + page.length} of ${total}. For the next files, call find_sharepoint_files again with the same query and path and offset ${nextOffset}.`;
+    } else if (offset > 0) {
+      note = `Files ${offset + 1} to ${offset + page.length} of ${total}. This is the last page.`;
+    }
     return {
-      files: matches.slice(0, max).map(describe),
-      total: matches.length,
-      ...(matches.length > max
-        ? { note: `Only the first ${max} of ${matches.length} files are listed. Narrow the query or path.` }
-        : {}),
+      files: page.map(describe),
+      total,
+      offset,
+      ...(nextOffset !== undefined ? { nextOffset } : {}),
+      ...(note ? { note } : {}),
       ...(listing.truncated ? { listingIncomplete: incompleteListingText(listing) } : {}),
       ...(listing.problems.length > 0 ? { problems: listing.problems } : {}),
     };

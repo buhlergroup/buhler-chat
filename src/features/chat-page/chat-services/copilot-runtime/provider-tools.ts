@@ -28,6 +28,7 @@
 import { tool } from "ai";
 import type { Tool as AiTool } from "@ai-sdk/provider-utils";
 import { z } from "zod";
+import { sniffRasterImageType } from "@/features/common/safe-content-type";
 import { ToolUserError } from "../tools/tool-user-error";
 import type { WorkspaceEntry } from "./blob-session-fs";
 import { normalizeSessionPath, WORKSPACE_ROOT } from "./session-path";
@@ -41,8 +42,19 @@ const MAX_INPUT_FILES = 20;
 const MAX_INPUT_FILE_BYTES = 50 * 1024 * 1024;
 const MAX_OUTPUT_FILES = 20;
 const MAX_OUTPUT_FILE_BYTES = 50 * 1024 * 1024;
-const IMAGE_MIME: Record<string, string> = { png: "image/png", jpg: "image/jpeg", jpeg: "image/jpeg", gif: "image/gif", webp: "image/webp" };
+const IMAGE_EXTS: ReadonlySet<string> = new Set(["png", "jpg", "jpeg", "gif", "webp"]);
+const RASTER_EXT: Record<string, string> = { "image/png": "png", "image/jpeg": "jpg", "image/gif": "gif", "image/webp": "webp" };
 const LF = String.fromCharCode(10);
+
+/**
+ * A PNG, JPEG, GIF or WebP image as a data: URL with the type its bytes show
+ * (what /api/images serves inline); undefined for anything else.
+ */
+function rasterImage(data: Uint8Array): { ext: string; dataUrl: string } | undefined {
+  const type = sniffRasterImageType(data);
+  if (!type || !RASTER_EXT[type]) return undefined;
+  return { ext: RASTER_EXT[type], dataUrl: `data:${type};base64,${Buffer.from(data).toString("base64")}` };
+}
 
 export interface ProviderToolToggles {
   imageGeneration: boolean;
@@ -176,10 +188,14 @@ function generateImageTool(deps: ProviderToolDeps, clients: () => Promise<Provid
       const base64 = image.base64.replace(/^data:[^,]*,/, "");
       if (!base64) throw new ToolUserError("generate_image: the image model returned no image.");
       const data = Buffer.from(base64, "base64");
-      const file = await freeName(deps.fs, IMAGES_DIR, `${(name ?? "").trim() || "image"}.png`.replace(/\.png\.png$/i, ".png"));
+      // Stored with the type its bytes show: /api/images serves it inline only then.
+      const raster = rasterImage(data);
+      if (!raster) throw new ToolUserError("generate_image: the image model returned no PNG, JPEG, GIF or WebP image.");
+      const base = (name ?? "").trim().replace(/\.(png|jpe?g|gif|webp)$/i, "") || "image";
+      const file = await freeName(deps.fs, IMAGES_DIR, `${base}.${raster.ext}`);
       const path = `${IMAGES_DIR}/${file}`;
       await deps.fs.writeFileBytes(path, data);
-      const result = await c.persistImage(`data:image/png;base64,${base64}`);
+      const result = await c.persistImage(raster.dataUrl);
       return { result, path, ...(image.revisedPrompt ? { revisedPrompt: image.revisedPrompt } : {}) };
     },
     // The model gets the path, not the blob ref: the chat already shows the
@@ -345,18 +361,23 @@ function runCodeTool(deps: ProviderToolDeps, clients: () => Promise<ProviderClie
         const path = `${OUTPUTS_DIR}/${await freeName(deps.fs, OUTPUTS_DIR, name)}`;
         await deps.fs.writeFileBytes(path, data);
         files.push(path);
-        const mime = IMAGE_MIME[extOf(path)];
-        if (mime) images.push(await c.persistImage(`data:${mime};base64,${data.toString("base64")}`));
+        // Shown in the chat only when the bytes are a raster image too.
+        const raster = IMAGE_EXTS.has(extOf(path)) ? rasterImage(data) : undefined;
+        if (raster) images.push(await c.persistImage(raster.dataUrl));
       }
       // Displayed plots that were not saved as files.
       if (images.length === 0) {
         for (const [i, url] of run.images.entries()) {
-          const m = /^data:(image\/(png|jpeg|gif|webp));base64,(.*)$/s.exec(url);
+          const m = /^data:image\/[a-z.+-]+;base64,(.*)$/is.exec(url);
           if (!m) continue;
-          const path = `${OUTPUTS_DIR}/${await freeName(deps.fs, OUTPUTS_DIR, `figure-${i + 1}.${m[2] === "jpeg" ? "jpg" : m[2]}`)}`;
-          await deps.fs.writeFileBytes(path, Buffer.from(m[3], "base64"));
+          const data = Buffer.from(m[1], "base64");
+          // The declared type is not trusted: the bytes decide.
+          const raster = rasterImage(data);
+          if (!raster) continue;
+          const path = `${OUTPUTS_DIR}/${await freeName(deps.fs, OUTPUTS_DIR, `figure-${i + 1}.${raster.ext}`)}`;
+          await deps.fs.writeFileBytes(path, data);
           files.push(path);
-          images.push(await c.persistImage(url));
+          images.push(await c.persistImage(raster.dataUrl));
         }
       }
 

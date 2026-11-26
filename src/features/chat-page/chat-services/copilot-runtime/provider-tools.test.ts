@@ -13,7 +13,10 @@ import {
 } from "./provider-tools";
 import { stripExtensionKeyPrefix } from "../../tool-display-name";
 
-const PNG_BASE64 = Buffer.from("\x89PNG fake image bytes").toString("base64");
+/** A PNG signature plus some bytes: enough for the type sniffing. */
+const png = (rest: string) => Buffer.concat([Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]), Buffer.from(rest)]);
+const PNG_BASE64 = png("fake image bytes").toString("base64");
+const JPEG_BASE64 = Buffer.concat([Buffer.from([0xff, 0xd8, 0xff, 0xe0]), Buffer.from("jpeg bytes")]).toString("base64");
 const ALL: ProviderToolToggles = { imageGeneration: true, webSearch: true, codeInterpreter: true };
 
 function fakeClients(overrides: Partial<ProviderClients> = {}) {
@@ -43,8 +46,8 @@ function fakeClients(overrides: Partial<ProviderClients> = {}) {
       // The "code" copies the input to its name, writes a chart and a CSV,
       // and the interpreter keeps a copy of the displayed plot.
       containerFiles.push({ id: `f${nextId++}`, path: "/mnt/data/data.csv", bytes: 8, data: Buffer.from("x,y\n1,2\n") });
-      containerFiles.push({ id: `f${nextId++}`, path: "/mnt/data/cfile_6b08a1.png", bytes: 4, data: Buffer.from("plt!") });
-      containerFiles.push({ id: `f${nextId++}`, path: "/mnt/data/chart.png", bytes: 4, data: Buffer.from("png!") });
+      containerFiles.push({ id: `f${nextId++}`, path: "/mnt/data/cfile_6b08a1.png", bytes: 4, data: png("plt!") });
+      containerFiles.push({ id: `f${nextId++}`, path: "/mnt/data/chart.png", bytes: 4, data: png("png!") });
       containerFiles.push({ id: `f${nextId++}`, path: "/mnt/data/summary.csv", bytes: 3, data: Buffer.from("a,b") });
       return { logs: "rows: 3\n", text: "Done.", code: ["print('rows: 3')"], images: [] };
     }),
@@ -122,6 +125,22 @@ describe("generate_image", () => {
     expect(res.resultType).toBe("failure");
     expect(t.records[0].uiError).toBe("generate_image: the image model returned no image.");
   });
+
+  it("stores the type the bytes show (what /api/images serves inline)", async () => {
+    const t = setup(ALL, { generateImage: vi.fn(async () => ({ base64: JPEG_BASE64 })) });
+    await t.call("generate_image", { prompt: "a cat", name: "cat.png" });
+    expect(t.persisted).toEqual([`data:image/jpeg;base64,${JPEG_BASE64}`]);
+    expect((t.records[0].output as { path: string }).path).toBe("/workspace/images/cat.jpg");
+  });
+
+  it("refuses bytes that are no raster image (e.g. SVG) and stores nothing", async () => {
+    const svg = Buffer.from("<svg xmlns='http://www.w3.org/2000/svg'/>").toString("base64");
+    const t = setup(ALL, { generateImage: vi.fn(async () => ({ base64: svg })) });
+    const res = await t.call("generate_image", { prompt: "a cat", name: "cat" });
+    expect(res.resultType).toBe("failure");
+    expect(t.persisted).toEqual([]);
+    expect(await t.fs.listEntries("/workspace/images")).toEqual([]);
+  });
 });
 
 describe("web_search", () => {
@@ -155,7 +174,7 @@ describe("run_code", () => {
     expect((t.records[0].output as { inputs: unknown }).inputs).toEqual([
       { workspacePath: "/workspace/uploads/data.csv", containerPath: "/mnt/data/data.csv" },
     ]);
-    expect(t.persisted[0]).toBe(`data:image/png;base64,${Buffer.from("png!").toString("base64")}`);
+    expect(t.persisted[0]).toBe(`data:image/png;base64,${png("png!").toString("base64")}`);
     expect(out.stdout).toBe("rows: 3\n");
     expect(out.summary).toBe("Done.");
     expect(res.textResultForLlm).not.toContain("blob://");
@@ -180,12 +199,28 @@ describe("run_code", () => {
     expect(out.images).toHaveLength(1);
   });
 
+  it("shows only images whose bytes are a raster image, whatever the declared type or extension", async () => {
+    const svg = Buffer.from("<svg xmlns='http://www.w3.org/2000/svg'/>");
+    const t = setup(ALL, {
+      runCode: vi.fn(async () => ({ logs: "", text: "", code: [], images: [`data:image/png;base64,${svg.toString("base64")}`] })),
+    });
+    (t.clients.listContainerFiles as ReturnType<typeof vi.fn>)
+      .mockImplementationOnce(async () => [])
+      .mockImplementationOnce(async () => [{ id: "s1", path: "/mnt/data/chart.png", bytes: svg.length }]);
+    (t.clients.downloadContainerFile as ReturnType<typeof vi.fn>).mockImplementationOnce(async () => svg);
+    await t.call("run_code", { task: "plot" });
+    const out = t.records[0].output as { files: string[]; images: string[] };
+    expect(out.files).toEqual([`${OUTPUTS_DIR}/chart.png`]);
+    expect(out.images).toEqual([]);
+    expect(t.persisted).toEqual([]);
+  });
+
   it("keeps the interpreter's plot copy as a figure when the code saved no image", async () => {
     const t = setup(ALL, { runCode: vi.fn(async () => ({ logs: "", text: "", code: [], images: [] })) });
     (t.clients.listContainerFiles as ReturnType<typeof vi.fn>)
       .mockImplementationOnce(async () => [])
       .mockImplementationOnce(async () => [{ id: "p1", path: "/mnt/data/cfile_6b08a1.png", bytes: 4 }]);
-    (t.clients.downloadContainerFile as ReturnType<typeof vi.fn>).mockImplementationOnce(async () => Buffer.from("plt!"));
+    (t.clients.downloadContainerFile as ReturnType<typeof vi.fn>).mockImplementationOnce(async () => png("plt!"));
     await t.call("run_code", { task: "plot" });
     const out = t.records[0].output as { files: string[]; images: string[] };
     expect(out.files).toEqual([`${OUTPUTS_DIR}/figure-1.png`]);

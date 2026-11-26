@@ -86,14 +86,26 @@ export async function loadUsableFileSources(
 
 /** Deletes every source row of an agent. Best effort. */
 export async function deleteFileSourcesForPersona(personaId: string): Promise<void> {
+  let sources: PersonaFileSourceModel[];
   try {
-    for (const source of await queryFileSourcesByPersonaId(personaId)) {
-      await HistoryContainer().item(source.id, source.userId).delete();
-    }
+    sources = await queryFileSourcesByPersonaId(personaId);
   } catch (error) {
     logError("sharepoint files: cleanup after agent delete failed", {
       personaId,
       error: error instanceof Error ? error.message : String(error),
     });
+    return;
+  }
+  // Each row in its own partition; one that fails does not stop the others.
+  for (const source of sources) {
+    try {
+      await HistoryContainer().item(source.id, source.userId).delete();
+    } catch (error) {
+      logError("sharepoint files: cleanup after agent delete failed", {
+        personaId,
+        sourceId: source.id,
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
   }
 }

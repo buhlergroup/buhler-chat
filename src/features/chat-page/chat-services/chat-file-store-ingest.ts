@@ -1,5 +1,8 @@
-"use server";
 import "server-only";
+
+// No "use server" here: every export of a "use server" module is a Server
+// Action that any signed-in browser can call with its own arguments. This
+// module is only for server code.
 
 import {
   GetImageUrlPath,
@@ -10,6 +13,7 @@ import { isImageReference } from "./chat-image-persistence-utils";
 import { DownloadContainerFile } from "./code-interpreter-service";
 import { logError, logInfo } from "@/features/common/services/logger";
 import { readContainerFileCitation } from "./chat-api/sandbox-rewrite-core";
+import { toSafeBlobFileName } from "@/features/common/blob-path";
 
 /**
  * The subset of AI SDK's `Source` discriminated union we actually use.
@@ -68,7 +72,10 @@ export async function ingestContainerFileSourceToChatStore(
   }
 
   const { data, name, contentType } = downloaded.response;
-  const upload = await UploadImageToStore(threadId, name, data, {
+  // The code interpreter chooses the file name: keep it as the download
+  // name, but store the blob under a safe single file name.
+  const blobName = toSafeBlobFileName(name);
+  const upload = await UploadImageToStore(threadId, blobName, data, {
     contentType,
     originalFileName: name,
   });
@@ -81,7 +88,7 @@ export async function ingestContainerFileSourceToChatStore(
     return null;
   }
 
-  const url = await GetImageUrlPath(threadId, name);
+  const url = await GetImageUrlPath(threadId, blobName);
   logInfo("ingestContainerFileSourceToChatStore: ingested", {
     threadId,
     filename: name,
