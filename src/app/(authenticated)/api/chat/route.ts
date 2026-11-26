@@ -72,6 +72,10 @@ import {
 } from "@/features/persona-page/persona-services/skills/skill-models";
 import { loadUsableFileSources } from "@/features/persona-page/persona-services/sharepoint-files/sharepoint-file-store";
 import { type UserPrompt } from "@/features/chat-page/chat-services/models";
+import {
+  copilotProviderFor,
+  getAgentRuntime,
+} from "@/features/chat-page/chat-services/copilot-runtime/runtime-flag";
 
 // Allow streaming responses to run for up to 10 minutes (600 seconds)
 export const maxDuration = 600;
@@ -228,6 +232,11 @@ export async function POST(req: Request) {
   // is the one placement the Azure /anthropic surface may reject outright.
   // Idempotent, and a no-op when the two already agree.
   ctx = applyDocumentHintPlacement(ctx, modelConfig.provider);
+
+  // AGENT_RUNTIME=copilot runs this turn on the Copilot runtime
+  // (copilot-runtime/). Models it cannot serve stay on the AI SDK path.
+  const useCopilotRuntime =
+    getAgentRuntime() === "copilot" && copilotProviderFor(modelConfig) !== undefined;
   if (ctx.documentHintPlacement !== "none") {
     logInfo("/api/chat document hint placement", {
       threadId: ctx.thread.id,
@@ -262,7 +271,10 @@ export async function POST(req: Request) {
   //     needs the separate Anthropic Files API — deferred).
   //   - foundry (Chat Completions): no server tools; the seam ignores toggles.
   // Custom registry tools (RAG, sub-agents, extensions) are unaffected.
-  const effectiveToolsSafe = modelConfig.supportsResponsesAPI
+  const effectiveToolsSafe = useCopilotRuntime
+    ? // Provider-hosted built-ins are not available on the Copilot path.
+      { codeInterpreter: false, imageGeneration: false, webSearch: false }
+    : modelConfig.supportsResponsesAPI
     ? effectiveTools
     : modelConfig.provider === "anthropic"
       ? { codeInterpreter: false, imageGeneration: false, webSearch: effectiveTools.webSearch }
@@ -348,7 +360,8 @@ export async function POST(req: Request) {
       personaMessage:
         (ctx.thread.personaMessage ?? "") +
         buildSkillCatalogPrompt(agentSkills, unavailableSkills),
-      documentHint: ctx.documentHint,
+      // The Copilot session keeps one system message; it sends the hint per turn.
+      documentHint: useCopilotRuntime ? undefined : ctx.documentHint,
       trailingStaticBlock:
         // Generative UI: GPT-5.5 reliably declines a UI *tool* under tool_choice
         // auto (it prefers to emit markdown), but it WILL emit a fenced code block.
@@ -399,6 +412,22 @@ export async function POST(req: Request) {
       },
     }),
   });
+
+  if (useCopilotRuntime) {
+    const { runCopilotChatTurn } = await import(
+      "@/features/chat-page/chat-services/copilot-runtime/chat-turn"
+    );
+    return runCopilotChatTurn({
+      ctx,
+      payload,
+      modelConfig,
+      effectiveModel,
+      reasoningEffort: effectiveReasoningEffort,
+      fallbackInfo: fallbackInfo.fellBack ? fallbackInfo : undefined,
+      systemMessage: system,
+      toolset: tools,
+    });
+  }
 
   // Code-interpreter file IDs the user attached this turn. The chat-store
   // sends them as `codeInterpreterFileIds` (OpenAI file IDs from

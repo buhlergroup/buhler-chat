@@ -7,6 +7,8 @@ const nextConfig = {
   },
   serverExternalPackages: [
     "@azure/storage-blob",
+    // Spawns its own runtime binary from a platform package; never bundle it.
+    "@microsoft/copilot-sdk",
     "@azure/monitor-opentelemetry",
     "@opentelemetry/api",
     "@opentelemetry/instrumentation",
