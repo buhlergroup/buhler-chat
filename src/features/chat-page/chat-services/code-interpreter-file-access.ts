@@ -113,13 +113,40 @@ export async function findCodeInterpreterFileOfCurrentUser(
 }
 
 /**
+ * Number of the caller's (not deleted) threads that list the file id. The
+ * content store gives the same bytes of a user one OpenAI file, so one id
+ * can be attached to several threads; it is deleted from OpenAI only when
+ * the last thread lets go of it.
+ */
+export async function countThreadsWithCodeInterpreterFile(fileId: string): Promise<number> {
+  if (!fileId) return 0;
+  const userId = await userHashedId();
+  const { resources } = await HistoryContainer()
+    .items.query<number>(
+      {
+        query:
+          "SELECT VALUE COUNT(1) FROM root r WHERE r.type = @type AND r.userId = @userId AND r.isDeleted = @isDeleted AND ARRAY_CONTAINS(r.attachedFiles, { \"id\": @fileId }, true)",
+        parameters: [
+          { name: "@type", value: CHAT_THREAD_ATTRIBUTE },
+          { name: "@userId", value: userId },
+          { name: "@isDeleted", value: false },
+          { name: "@fileId", value: fileId },
+        ],
+      },
+      { partitionKey: userId },
+    )
+    .fetchAll();
+  return resources?.[0] ?? 0;
+}
+
+/**
  * Records an uploaded code interpreter file on the caller's thread
  * (source "upload"). Returns false when the thread is not the caller's or
  * the write failed. Retries on a concurrent write (etag).
  */
 export async function recordCodeInterpreterUpload(
   threadId: string,
-  file: { id: string; name: string },
+  file: { id: string; name: string; sha256?: string },
 ): Promise<boolean> {
   const userId = await userHashedId();
   for (let attempt = 0; attempt < 3; attempt++) {
@@ -142,6 +169,7 @@ export async function recordCodeInterpreterUpload(
       type: "code-interpreter",
       uploadedAt: new Date(),
       source: "upload",
+      ...(file.sha256 ? { sha256: file.sha256 } : {}),
     };
     try {
       await HistoryContainer().items.upsert<ChatThreadModel>(

@@ -24,7 +24,8 @@ import { getCurrentUser } from "@/features/auth-page/helpers";
 import { getGraphClient } from "@/features/common/services/microsoft-graph-client";
 import { HistoryContainer } from "@/features/common/services/cosmos";
 import { uniqueId } from "@/features/common/util";
-import { DocumentIntelligenceInstance } from "@/features/common/services/document-intelligence";
+import { contentStore } from "@/features/common/services/content-store";
+import { extractTextWithDocumentIntelligence } from "@/features/common/services/document-extraction";
 import {
   DeleteSearchDocumentByPersonaDocumentId,
   IndexDocuments,
@@ -47,14 +48,37 @@ const isNotFound = (error: unknown) =>
 const maxSearchFileBytes = () => Number(process.env.MAX_PERSONA_DOCUMENT_SIZE) || 10485760;
 
 /**
- * Adds one Search file: a PERSONA_DOCUMENT row in the owner's partition, then
- * the text chunks in the index (user = owner). When the indexing fails, the
- * row and the chunks written so far are deleted again. Returns the row id.
+ * Adds one Search file: the bytes from SharePoint into the content store
+ * (scope = owner), a PERSONA_DOCUMENT row with the content hash in the
+ * owner's partition, then the text chunks in the index (user = owner). The
+ * text is extracted once per content: the same file added again (to this or
+ * another agent of the owner) reuses the stored Markdown. When the indexing
+ * fails, the row and the chunks written so far are deleted again. Returns the
+ * row id.
  */
 export async function addSearchDocument(
   file: DocumentMetadata,
   ownerUserId: string
 ): Promise<ServerActionResponse<string>> {
+  let bytes: Buffer;
+  try {
+    bytes = await sharePointFileBytes(file);
+  } catch (error) {
+    return {
+      status: "ERROR",
+      errors: [{ message: `Failed to download files from SharePoint. Error: ${errorText(error)}` }],
+    };
+  }
+  let sha256: string;
+  try {
+    ({ sha256 } = await contentStore().put(ownerUserId, bytes));
+  } catch (error) {
+    return {
+      status: "ERROR",
+      errors: [{ message: `The file could not be stored. Error: ${errorText(error)}` }],
+    };
+  }
+
   const row: PersonaDocument = {
     id: uniqueId(),
     userId: ownerUserId,
@@ -62,6 +86,7 @@ export async function addSearchDocument(
       documentId: file.documentId,
       parentReference: { driveId: file.parentReference.driveId },
     },
+    sha256,
     source: EXTERNAL_SOURCE,
     type: PERSONA_DOCUMENT_ATTRIBUTE,
   };
@@ -79,7 +104,7 @@ export async function addSearchDocument(
     };
   }
 
-  const indexed = await indexSearchDocument(row.id, file, ownerUserId);
+  const indexed = await indexSearchDocument(row.id, file, ownerUserId, bytes, sha256);
   if (indexed.status !== "OK") {
     await deleteSearchDocument(row);
     return indexed;
@@ -112,44 +137,72 @@ export async function deleteSearchDocument(
   return errors.length === 0 ? { status: "OK", response: true } : { status: "ERROR", errors };
 }
 
-/** Downloads the file, extracts the text and indexes its chunks. */
+/**
+ * Extracts the text (once per content, cached in the content store) and
+ * indexes its chunks for the persona document.
+ */
 async function indexSearchDocument(
   personaDocumentId: string,
   file: DocumentMetadata,
-  ownerUserId: string
+  ownerUserId: string,
+  bytes: Buffer,
+  sha256: string
 ): Promise<ServerActionResponse<void>> {
-  let paragraphs: string[];
-  try {
-    paragraphs = await sharePointFileToText(file);
-  } catch (error) {
-    return {
-      status: "ERROR",
-      errors: [{ message: `Failed to download files from SharePoint. Error: ${errorText(error)}` }],
-    };
-  }
-
+  const store = contentStore();
   const noText: ServerActionResponse<void> = {
     status: "ERROR",
     errors: [{ message: `${file.name}: Document contains no text that can be indexed.` }],
   };
-  const chunks = await ChunkDocumentWithOverlap(paragraphs.join("\n"));
-  if (!chunks) return noText;
+  let outcome: ServerActionResponse<void> = { status: "OK", response: undefined };
 
-  const results = await IndexDocuments(chunks, file.name, undefined, personaDocumentId, ownerUserId);
-  if (results.length === 0) return noText;
+  try {
+    await store.ensureIndexed(
+      ownerUserId,
+      sha256,
+      // A new row id has no chunks yet: the target is always indexed once.
+      { key: `persona-document:${personaDocumentId}`, isIndexed: async () => false },
+      async () => {
+        const text = isTextFile(file.name)
+          ? new TextDecoder().decode(bytes)
+          : (
+              await store.markdown(ownerUserId, sha256, () =>
+                extractTextWithDocumentIntelligence(bytes)
+              )
+            ).markdown;
 
-  const failed = results.flatMap((r) => (r.status === "OK" ? [] : r.errors));
-  if (failed.length > 0) {
-    const messages = failed.map((e) => `${file.name}: ${e.message}`);
+        const chunks = await ChunkDocumentWithOverlap(text);
+        if (!chunks) {
+          outcome = noText;
+          return;
+        }
+
+        const results = await IndexDocuments(chunks, file.name, undefined, personaDocumentId, ownerUserId);
+        if (results.length === 0) {
+          outcome = noText;
+          return;
+        }
+
+        const failed = results.flatMap((r) => (r.status === "OK" ? [] : r.errors));
+        if (failed.length > 0) {
+          const messages = failed.map((e) => `${file.name}: ${e.message}`);
+          outcome = {
+            status: "ERROR",
+            errors: [...new Set(messages)].map((message) => ({ message })),
+          };
+        }
+      }
+    );
+  } catch (error) {
     return {
       status: "ERROR",
-      errors: [...new Set(messages)].map((message) => ({ message })),
+      errors: [{ message: `The text of ${file.name} could not be extracted. Error: ${errorText(error)}` }],
     };
   }
-  return { status: "OK", response: undefined };
+  return outcome;
 }
 
-async function sharePointFileToText(document: DocumentMetadata): Promise<string[]> {
+/** The file's bytes from SharePoint (current user's token), size checked. */
+async function sharePointFileBytes(document: DocumentMetadata): Promise<Buffer> {
   const { token } = await getCurrentUser();
   const client = getGraphClient(token);
   const response = (await client
@@ -167,12 +220,7 @@ async function sharePointFileToText(document: DocumentMetadata): Promise<string[
       )} MB. Choose a smaller document or split the document into two documents.`
     );
   }
-  if (isTextFile(document.name)) {
-    return [new TextDecoder().decode(response)];
-  }
-  const poller = await DocumentIntelligenceInstance().beginAnalyzeDocument("prebuilt-read", response);
-  const { paragraphs } = await poller.pollUntilDone();
-  return (paragraphs ?? []).map((p) => p.content);
+  return Buffer.from(response);
 }
 
 const isTextFile = (fileName: string) => {

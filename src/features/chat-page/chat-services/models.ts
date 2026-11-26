@@ -1122,6 +1122,8 @@ export interface AttachedFileModel {
   type: AttachedFileType;
   uploadedAt?: Date;
   source?: AttachedFileSource;
+  /** SHA-256 of the uploaded bytes (content store); absent on older entries. */
+  sha256?: string;
 }
 
 export interface ThreadUsage {
@@ -1337,6 +1339,12 @@ export interface ChatDocumentModel {
   isDeleted: boolean;
   createdAt: Date;
   type: typeof CHAT_DOCUMENT_ATTRIBUTE;
+  /**
+   * SHA-256 of the file content in the content store. Absent on rows written
+   * before the content store: they keep working, nothing is deduplicated
+   * against them.
+   */
+  sha256?: string;
 }
 
 export interface ToolsInterface {

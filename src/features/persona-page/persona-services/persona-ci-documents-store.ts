@@ -85,6 +85,27 @@ export async function deleteCodeDocument(
 }
 
 /**
+ * Stores the content hash of the file version a chat loaded on the row (in
+ * its own partition), so the content store entry has a reference and the
+ * cleanup keeps it. Rows written before the content store get their hash
+ * here, on the first chat that loads the file. Best effort: a failure is
+ * logged, the chat goes on.
+ */
+export async function recordCodeDocumentHash(
+  row: Pick<PersonaCIDocument, "id" | "userId">,
+  sha256: string
+): Promise<void> {
+  try {
+    await HistoryContainer()
+      .item(row.id, row.userId)
+      .patch([{ op: "set", path: "/sha256", value: sha256 }]);
+  } catch (error) {
+    if (isNotFound(error)) return;
+    logError("Code file hash could not be stored", { documentId: row.id, error: errorText(error) });
+  }
+}
+
+/**
  * Error code of downloadCodeInterpreterFile when SharePoint did not show the
  * file to the user (no access, moved, deleted, or no answer). The caller
  * must not tell the user the file's name then.

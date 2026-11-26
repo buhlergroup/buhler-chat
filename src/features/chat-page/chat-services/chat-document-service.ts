@@ -24,6 +24,11 @@ import {
   SupportedFileExtensionsDocumentIntellicence,
   SupportedFileExtensionsTextFiles,
 } from "./models";
+import { chunkTextWithOverlap } from "./chat-document-chunks";
+import {
+  ingestChatDocument,
+  type ChatDocumentUploadResult,
+} from "./chat-document-ingest";
 
 const DEFAULT_MAX_UPLOAD_DOCUMENT_SIZE: number = 10485760; // 10MB in bytes
 
@@ -39,9 +44,6 @@ const getMaxUploadDocumentSize = (): number => {
 
 const formatMegabytes = (bytes: number): string =>
   `${Math.round((bytes / (1024 * 1024)) * 10) / 10} MB`;
-const CHUNK_SIZE = 2300;
-// 25% overlap
-const CHUNK_OVERLAP = CHUNK_SIZE * 0.25;
 
 export const CrackDocument = async (
   formData: FormData
@@ -346,26 +348,68 @@ export const IndexChatDocuments = async (
   return IndexDocuments(docs, fileName, chatThreadId);
 };
 
+/**
+ * Uploads a file the user attached to one of their own chat threads: the
+ * server stores it in the content store (by its SHA-256, per user),
+ * extracts the text once per content and indexes it once per thread, and
+ * records the CHAT_DOCUMENT row with the hash. FormData: "file", "id" (the
+ * thread id).
+ */
+export const UploadChatDocument = async (
+  formData: FormData
+): Promise<ServerActionResponse<ChatDocumentUploadResult>> => {
+  const invalid = (message: string): ServerActionResponse<ChatDocumentUploadResult> => ({
+    status: "ERROR",
+    errors: [{ message }],
+  });
+  try {
+    const userId = await userHashedId();
+
+    const file = formData?.get?.("file");
+    const chatThreadId = formData?.get?.("id");
+    if (!(file instanceof File) || !file.name) return invalid("No file provided");
+    if (!isValidId(chatThreadId)) return invalid("Chat thread not found");
+
+    const { resource } = await HistoryContainer()
+      .item(chatThreadId, userId)
+      .read<ChatThreadModel>();
+    if (
+      !resource ||
+      resource.type !== CHAT_THREAD_ATTRIBUTE ||
+      resource.isDeleted ||
+      resource.userId !== userId
+    ) {
+      return invalid("Chat thread not found");
+    }
+
+    const maxSize = getMaxUploadDocumentSize();
+    if (file.size >= maxSize) {
+      return invalid(`File is too large and must be less than ${formatMegabytes(maxSize)}.`);
+    }
+
+    const response = await ingestChatDocument({
+      userId,
+      threadId: chatThreadId,
+      fileName: file.name,
+      bytes: Buffer.from(await file.arrayBuffer()),
+      contentType: file.type,
+    });
+    if (response.status === "OK") {
+      RevalidateCache({ page: "chat", params: chatThreadId });
+    }
+    return response;
+  } catch (e) {
+    logError("UploadChatDocument failed", {
+      error: e instanceof Error ? e.message : String(e),
+      errorType: e instanceof RestError ? "RestError" : (e as any)?.constructor?.name,
+      statusCode: e instanceof RestError ? e.statusCode : undefined,
+    });
+    return invalid(`${e}`);
+  }
+};
+
 export async function ChunkDocumentWithOverlap(
   document: string
 ): Promise<string[]> {
-  const chunks: string[] = [];
-
-  if (document.length <= CHUNK_SIZE) {
-    // If the document is smaller than the desired chunk size, return it as a single chunk.
-    chunks.push(document);
-    return chunks;
-  }
-
-  let startIndex = 0;
-
-  // Split the document into chunks of the desired size, with overlap.
-  while (startIndex < document.length) {
-    const endIndex = startIndex + CHUNK_SIZE;
-    const chunk = document.substring(startIndex, endIndex);
-    chunks.push(chunk);
-    startIndex = endIndex - CHUNK_OVERLAP;
-  }
-
-  return chunks;
+  return chunkTextWithOverlap(document);
 }
