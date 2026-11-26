@@ -235,3 +235,34 @@ describe("common.unit.content-store.cleanup", () => {
     expect(blobs.stats.deletes).toBe(0);
   });
 });
+
+describe("common.unit.content-store.putBlob (streamed uploads)", () => {
+  it("stores a Blob under the same key as the same bytes, once", async () => {
+    const { store, blobs } = setup();
+    const viaBlob = await store.putBlob(userA, new Blob([bytes("upload")]));
+    const viaBytes = await store.put(userA, bytes("upload"));
+    expect(viaBlob.sha256).toBe(sha256Hex(bytes("upload")));
+    expect(viaBlob.blobKey).toBe(viaBytes.blobKey);
+    expect(viaBlob.created).toBe(true);
+    expect(viaBytes.created).toBe(false);
+    expect(blobs.stats.writes).toBe(1);
+    expect((await blobs.read(viaBlob.blobKey))?.toString()).toBe("upload");
+  });
+
+  it("two streamed puts racing write one blob", async () => {
+    const { store, blobs } = setup();
+    await Promise.all([
+      store.putBlob(userA, new Blob([bytes("race")])),
+      store.putBlob(userA, new Blob([bytes("race")])),
+    ]);
+    expect(blobs.stats.writes).toBe(1);
+  });
+
+  it("openAiFile uploads the Blob itself (no copy into a buffer)", async () => {
+    const { store, openAi } = setup();
+    const blob = new Blob([bytes("csv")]);
+    const { sha256 } = await store.putBlob(userA, blob);
+    await store.openAiFile(userA, sha256, { name: "a.csv", blob });
+    expect((openAi.upload.mock.calls[0] as unknown[])[0]).toBe(blob);
+  });
+});
