@@ -23,7 +23,7 @@ jobs:
       - name: 🍏 Set up Node.js version
         uses: actions/setup-node@v4
         with:
-          node-version: "22.x"
+          node-version: "24.x"
 
       - name: ⚙️ npm install and build
         env:
@@ -65,6 +65,20 @@ jobs:
           # Move public folder to standalone
           cp -R ./src/public ./site-deploy/
 
+      - name: 🧪 Load every native module of the bundle
+        run: |
+          # The App Service runs the same Node.js major version as this job
+          # (infra/resources.bicep linuxFxVersion). A native addon built for
+          # another version fails only at run time, so load each one here.
+          cd ./site-deploy
+          node --version
+          found=0
+          while IFS= read -r f; do
+            found=$((found + 1))
+            node -e 'require(process.argv[1])' "$PWD/$f" || { echo "::error::cannot load $f"; exit 1; }
+          done < <(find . -name '*.node' -path '*/build/Release/*')
+          echo "native modules loaded: $found"
+
       - name: 📦 Package Next application
         run: |
           cd ./site-deploy
@@ -96,7 +110,7 @@ jobs:
       - name: 🍏 Set up Node.js version
         uses: actions/setup-node@v4
         with:
-          node-version: "22.x"
+          node-version: "24.x"
 
       - name: ⬇️ Download artifact from build job
         uses: actions/download-artifact@v4
