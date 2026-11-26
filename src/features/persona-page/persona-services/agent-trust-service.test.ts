@@ -12,6 +12,7 @@ vi.mock("@/features/common/services/microsoft-graph-client", () => ({
 const mockGetCurrentUser = vi.fn();
 vi.mock("@/features/auth-page/helpers", () => ({
   getCurrentUser: (...args: any[]) => mockGetCurrentUser(...args),
+  userHashedId: async () => "verifier-hash",
 }));
 
 // ── Cosmos mock ──────────────────────────────────────────────────────────────
@@ -144,6 +145,26 @@ describe("persona.unit.agent-trust — SetAgentTrustLevel", () => {
     const result = await SetAgentTrustLevel("missing", "verified");
     expect(result.status).toBe("NOT_FOUND");
     expect(mockPatch).not.toHaveBeenCalled();
+  });
+});
+
+describe("persona.unit.agent-trust — answer without editor-only fields", () => {
+  it("trust.011: a verifier who cannot edit the agent gets no file or sub-agent ids", async () => {
+    mockPatch.mockImplementation(async () => ({
+      resource: seedPersonaDoc({
+        personaDocumentIds: ["doc-1"],
+        codeInterpreterDocumentIds: ["ci-1"],
+        subAgentIds: ["sub-1"],
+      }),
+    }));
+    for (const result of [await SetAgentTrustLevel("p1", "verified"), await UnpublishAgent("p1")]) {
+      expect(result.status).toBe("OK");
+      const response = (result as { response: Record<string, unknown> }).response;
+      expect(response.name).toBe("Agent");
+      expect(response).not.toHaveProperty("personaDocumentIds");
+      expect(response).not.toHaveProperty("codeInterpreterDocumentIds");
+      expect(response).not.toHaveProperty("subAgentIds");
+    }
   });
 });
 

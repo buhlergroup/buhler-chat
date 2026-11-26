@@ -13,12 +13,20 @@ describe("buildUnavailableAgentFilesPrompt", () => {
     expect(buildUnavailableAgentFilesPrompt(["  ", "\n"])).toBe("");
   });
 
-  it("names the files, sorted, and says the user may lack access", () => {
+  it("names the files that could not be loaded, sorted", () => {
     const text = buildUnavailableAgentFilesPrompt(["sales.xlsx", "budget.csv"]);
     expect(text).toContain("## Agent files not loaded");
     expect(text).toContain('"budget.csv", "sales.xlsx"');
-    expect(text).toMatch(/no access/);
     expect(text).toMatch(/not in the code interpreter/);
+  });
+
+  it("tells only the number of files that are not available to the user (no names)", () => {
+    const text = buildUnavailableAgentFilesPrompt(undefined, undefined, 2);
+    expect(text).toContain("2 file(s) of this agent are not available to the user.");
+    expect(buildUnavailableAgentFilesPrompt(["big.csv"], 1, 2)).toContain(
+      '"big.csv". 2 file(s) of this agent are not available to the user. 1 further agent file(s) could not be found.',
+    );
+    expect(buildUnavailableAgentFilesPrompt([], 0, 0)).toBe("");
   });
 
   it("is the same text for the same names in any order (prompt cache)", () => {

@@ -83,13 +83,25 @@ vi.mock("@/features/chat-page/chat-services/chat-document-service", () => ({
   ChunkDocumentWithOverlap: vi.fn(),
 }));
 
-vi.mock("./persona-service", () => ({
-  FindPersonaByID: vi.fn(),
+// The access rule opens the agent with the server-only lookup (whole row).
+vi.mock("./persona-lookup", () => ({
+  findPersonaForCurrentUser: vi.fn(),
 }));
 
-import { PersonaDocumentById } from "./persona-documents-service";
-import { PersonaCIDocumentsByIds } from "./persona-ci-documents-service";
-import { FindPersonaByID } from "./persona-service";
+import {
+  FindAccessiblePersonaDocument,
+  personaCodeDocumentsByIds as PersonaCIDocumentsByIds,
+} from "./persona-document-access";
+import { findPersonaForCurrentUser as FindPersonaByID } from "./persona-lookup";
+
+// The Search file row reader is server code only (no Server Action returns
+// whole rows); the same access rule as before.
+const PersonaDocumentById = async (id: string) => {
+  const row = await FindAccessiblePersonaDocument<{ id: string; userId: string }>(id, "PERSONA_DOCUMENT");
+  return row
+    ? ({ status: "OK", response: row } as const)
+    : ({ status: "NOT_FOUND", errors: [{ message: "Persona Document not found" }] } as const);
+};
 
 const personaDoc = (id: string, userId: string) => ({
   id,

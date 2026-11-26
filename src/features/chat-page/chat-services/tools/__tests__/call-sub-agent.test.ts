@@ -46,8 +46,12 @@ vi.mock("@/features/persona-page/persona-services/skills/persona-skill-store", (
   readSkillFile: vi.fn(),
 }));
 vi.mock("@/features/persona-page/persona-services/persona-service", () => ({
-  FindPersonaByID: mockFindPersonaByID,
   FindAllPersonaForCurrentUser: vi.fn(async () => ({ status: "OK", response: [] })),
+}));
+// The sub-agent needs the whole persona row (file and sub-agent ids): the
+// server-only lookup, not the FindPersonaByID action.
+vi.mock("@/features/persona-page/persona-services/persona-lookup", () => ({
+  findPersonaForCurrentUser: mockFindPersonaByID,
 }));
 
 // call-sub-agent now goes through the provider seam, which resolves all three

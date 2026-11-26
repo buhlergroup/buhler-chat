@@ -1209,7 +1209,8 @@ export interface ChatThreadModel {
   personaId?: string;
   /**
    * Names (no ids, no URLs) of the agent's code interpreter files that could
-   * not be loaded when the chat started. Set by the server only; the chat
+   * not be loaded when the chat started, although SharePoint showed them to
+   * the user (too large, upload failed). Set by the server only; the chat
    * route tells the model about them (unavailable-agent-files.ts).
    */
   unavailableAgentFiles?: string[];
@@ -1219,6 +1220,13 @@ export interface ChatThreadModel {
    * only; the chat route tells the model the number.
    */
   notFoundAgentFileCount?: number;
+  /**
+   * Number of the agent's code interpreter files SharePoint did not show to
+   * the user when the chat started (no access, moved, deleted). A number
+   * only: the names of files the user may not open are never stored. Set by
+   * the server only; the chat route tells the model the number.
+   */
+  notAvailableAgentFileCount?: number;
 }
 
 export interface UserPrompt {

@@ -11,8 +11,8 @@ vi.mock("@/features/auth-page/helpers", () => ({
   userHashedId: vi.fn(async () => "hashed-user"),
 }));
 
-vi.mock("@/features/persona-page/persona-services/persona-documents-service", () => ({
-  AllowedPersonaDocumentIds: vi.fn(async () => []),
+vi.mock("@/features/persona-page/persona-services/persona-document-graph-check", () => ({
+  allowedPersonaDocumentIds: vi.fn(async () => []),
 }));
 
 vi.mock("../../azure-ai-search/azure-ai-search", () => ({
@@ -27,7 +27,7 @@ vi.mock("../../citation-service", () => ({
 import { searchDocumentsTool } from "../search-documents";
 import type { ToolContext } from "../tool-context";
 import { SimilaritySearch } from "../../azure-ai-search/azure-ai-search";
-import { AllowedPersonaDocumentIds } from "@/features/persona-page/persona-services/persona-documents-service";
+import { allowedPersonaDocumentIds as AllowedPersonaDocumentIds } from "@/features/persona-page/persona-services/persona-document-graph-check";
 
 const makeCtx = (overrides: Partial<ToolContext> = {}): ToolContext => ({
   user: "hashed-user",

@@ -27,17 +27,21 @@ import {
 } from "./models";
 import { deleteAgentFileRows } from "./persona-file-rows";
 import { retryOnEtagConflict } from "./persona-row";
-import { PersonaCIDocumentsByIds } from "./persona-ci-documents-service";
-import { downloadCodeInterpreterFile } from "./persona-ci-documents-store";
+import { personaCodeDocumentsByIds } from "./persona-document-access";
+import {
+  CODE_FILE_NOT_VISIBLE,
+  downloadCodeInterpreterFile,
+} from "./persona-ci-documents-store";
 import { UploadFileForCodeInterpreter } from "@/features/chat-page/chat-services/code-interpreter-service";
 import { UserAccessGroups } from "./access-group-service";
 import {
   canOpenPersona,
   checkPersonaEdit,
   currentPersonaViewer,
-  findPersonaDocument,
   isListedForViewer,
+  personaForViewer,
 } from "./persona-access";
+import { findPersonaForCurrentUser } from "./persona-lookup";
 import {
   DeleteAgentStats,
   RecordAgentChatStarted,
@@ -73,45 +77,22 @@ interface PersonaInput {
   defaultTools?: DefaultTools;
 }
 
-// Same answer for "does not exist" and "you may not open it", so an id does
-// not reveal that a private agent exists (see persona-access.ts).
-const personaNotFound = (): ServerActionResponse<PersonaModel> => ({
-  status: "NOT_FOUND",
-  errors: [
-    {
-      message: "Persona not found",
-    },
-  ],
-});
-
+/**
+ * The agent for the current user, when the user may open it (canOpenPersona;
+ * NOT_FOUND otherwise, also for a private agent). A user who cannot edit the
+ * agent gets it without the ids of its files and sub-agents
+ * (personaForViewer). Server code that needs them uses
+ * findPersonaForCurrentUser (persona-lookup.ts).
+ */
 export const FindPersonaByID = async (
   id: string
 ): Promise<ServerActionResponse<PersonaModel>> => {
-  try {
-    const persona = await findPersonaDocument(id);
-
-    if (!persona) {
-      return personaNotFound();
-    }
-
-    if (!(await canOpenPersona(await currentPersonaViewer(), persona))) {
-      return personaNotFound();
-    }
-
-    return {
-      status: "OK",
-      response: withNormalizedSelectedModel(persona),
-    };
-  } catch (error) {
-    return {
-      status: "ERROR",
-      errors: [
-        {
-          message: `Error creating persona: ${error}`,
-        },
-      ],
-    };
-  }
+  const found = await findPersonaForCurrentUser(id);
+  if (found.status !== "OK") return found;
+  return {
+    status: "OK",
+    response: personaForViewer(await currentPersonaViewer(), found.response),
+  };
 };
 
 export const CreatePersona = async (
@@ -223,10 +204,11 @@ export const DeletePersona = async (
     const personaResponse = await EnsurePersonaOperation(personaId);
 
     if (personaResponse.status === "OK") {
-      // The agent's files: Search and Code rows (each in its own partition,
-      // with the Search index chunks), skills and SharePoint sources. A
-      // failure is logged and does not stop the agent delete.
-      await deleteAgentFileRows(personaResponse.response);
+      // The agent's files: Search and Code rows (in the owner's partition,
+      // or an old row in the caller's or an admin's, with the Search index
+      // chunks), skills and SharePoint sources. A failure is logged and
+      // does not stop the agent delete.
+      await deleteAgentFileRows(personaResponse.response, await userHashedId());
       await deleteSkillsForPersona(personaId);
       await deleteFileSourcesForPersona(personaId);
 
@@ -428,7 +410,7 @@ export const FindAllPersonaForCurrentUser = async (): Promise<
       await Promise.all(
         resources.map(async (e) =>
           isListedForViewer(viewer, e) && (await canOpenPersona(viewer, e))
-            ? withNormalizedSelectedModel(e)
+            ? personaForViewer(viewer, withNormalizedSelectedModel(e))
             : null
         )
       )
@@ -453,8 +435,9 @@ export const FindAllPersonaForCurrentUser = async (): Promise<
 export const CreatePersonaChat = async (
   personaId: string
 ): Promise<ServerActionResponse<ChatThreadModel>> => {
-  // FindPersonaByID applies canOpenPersona: a denied agent is NOT_FOUND.
-  const personaResponse = await FindPersonaByID(personaId);
+  // canOpenPersona applies: a denied agent is NOT_FOUND. The whole row (the
+  // file lists), the thread is built on the server.
+  const personaResponse = await findPersonaForCurrentUser(personaId);
   const user = await getCurrentUser();
 
   if (personaResponse.status === "OK") {
@@ -462,9 +445,14 @@ export const CreatePersonaChat = async (
 
     // Download and upload Code Interpreter documents from SharePoint
     let attachedFiles: AttachedFileModel[] = [];
-    // Names of the documents that could not be loaded; the model is told
-    // about them (thread.unavailableAgentFiles), the user may lack access.
+    // Names of the documents that could not be loaded although SharePoint
+    // showed them to the user (too large, upload failed); the model is told
+    // about them (thread.unavailableAgentFiles).
     const notLoadedFileNames: string[] = [];
+    // Documents SharePoint did not show to the user (no access, moved,
+    // deleted, no answer): only the number is kept, never the name, so a
+    // user does not learn the names of files SharePoint denies them.
+    let notAvailableFileCount = 0;
     // Listed ids whose row the user cannot get (deleted, or not readable by
     // the access rule): no name to tell, only the number.
     let notFoundFileCount = 0;
@@ -476,7 +464,7 @@ export const CreatePersonaChat = async (
         ciDocumentCount: ciDocumentIds.length
       });
 
-      const ciDocsResponse = await PersonaCIDocumentsByIds(ciDocumentIds);
+      const ciDocsResponse = await personaCodeDocumentsByIds(ciDocumentIds);
       notFoundFileCount =
         ciDocsResponse.status === "OK"
           ? ciDocumentIds.length - new Set(ciDocsResponse.response.map((d) => d.id)).size
@@ -492,6 +480,8 @@ export const CreatePersonaChat = async (
         const ciDocs = ciDocsResponse.response;
         
         for (const doc of ciDocs) {
+          // True once SharePoint answered the download for this user.
+          let visible = false;
           try {
             // Download file from SharePoint
             const downloadResult = await downloadCodeInterpreterFile(
@@ -502,12 +492,16 @@ export const CreatePersonaChat = async (
             if (downloadResult.status !== "OK") {
               logError("Failed to download CI document from SharePoint", {
                 documentId: doc.id,
-                fileName: doc.fileName,
                 error: downloadResult.errors
               });
-              notLoadedFileNames.push(doc.fileName);
+              if (downloadResult.errors.some((e) => e.code === CODE_FILE_NOT_VISIBLE)) {
+                notAvailableFileCount++;
+              } else {
+                notLoadedFileNames.push(doc.fileName);
+              }
               continue;
             }
+            visible = true;
 
             const { buffer, name, contentType } = downloadResult.response;
             
@@ -542,10 +536,11 @@ export const CreatePersonaChat = async (
           } catch (error) {
             logError("Error processing CI document", {
               documentId: doc.id,
-              fileName: doc.fileName,
               error: error instanceof Error ? error.message : String(error)
             });
-            notLoadedFileNames.push(doc.fileName);
+            // A name only when SharePoint showed the file to the user.
+            if (visible) notLoadedFileNames.push(doc.fileName);
+            else notAvailableFileCount++;
           }
         }
       }
@@ -604,6 +599,7 @@ export const CreatePersonaChat = async (
       defaultTools: persona.defaultTools,
       ...(unavailableAgentFiles.length > 0 ? { unavailableAgentFiles } : {}),
       ...(notFoundFileCount > 0 ? { notFoundAgentFileCount: notFoundFileCount } : {}),
+      ...(notAvailableFileCount > 0 ? { notAvailableAgentFileCount: notAvailableFileCount } : {}),
     }).catch((error) => {
       logError("Failed to create the agent chat", {
         personaId,

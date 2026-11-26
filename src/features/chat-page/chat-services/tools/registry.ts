@@ -82,7 +82,7 @@ export async function buildToolset(
   // guard). There is no "fixed assignment" — any persona the user has
   // access to can be called as a sub-agent. `search_sub_agent` lets
   // the model discover candidates via `FindAllPersonaForCurrentUser`;
-  // `call_sub_agent` resolves the chosen id via `FindPersonaByID`,
+  // `call_sub_agent` resolves the chosen id via `findPersonaForCurrentUser`,
   // which enforces access control. Hiding the tools when the thread
   // doesn't pre-declare `subAgentIds` was a #37 regression — it
   // prevented discovery entirely. The #37 root cause was a test-fake
