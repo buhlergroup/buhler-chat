@@ -32,6 +32,8 @@ import {
   type TurnToolBinding,
 } from "./tool-adapter";
 import { COPILOT_FILE_TOOLS, SUBAGENT_TOOL, permissionGate, preToolGate } from "./session-gates";
+import { historyToImportEvents, prepareHistoryImages, readCapped, type SeedImages } from "./history-seed";
+import { GetImageFromStore } from "../chat-image-service";
 import { buildSubAgentPlan, SubAgentTurnGate, type SubAgentPlan, type SubAgentPlanInput } from "./subagents";
 import {
   idleSessionsToEvict,
@@ -46,10 +48,6 @@ import {
 } from "./runtime-limits";
 
 export { COPILOT_FILE_TOOLS } from "./session-gates";
-
-export type HistoryImportConversationEvent = Parameters<
-  CopilotSession["rpc"]["history"]["importConversation"]
->[0]["events"][number];
 
 /** Share of the prompt limit at which the runtime starts compacting in the background. */
 export const COMPACTION_THRESHOLD = 0.9;
@@ -316,67 +314,6 @@ async function toolSignature(toolset: Record<string, AiTool>, family: SearchTool
   return parts.join("\n");
 }
 
-const textOf = (message: UIMessage): string =>
-  message.parts
-    .filter((p): p is { type: "text"; text: string } => p.type === "text")
-    .map((p) => p.text)
-    .join("\n");
-
-const MAX_SEED_TOOL_CHARS = 20_000;
-
-/**
- * Seeds a NEW session with the visible thread history (Cosmos rows), for a
- * thread that started on the AI SDK path or whose session state is gone.
- * Text and tool calls are imported; images are not.
- */
-export function historyToImportEvents(history: UIMessage[]): HistoryImportConversationEvent[] {
-  const events: HistoryImportConversationEvent[] = [];
-  let n = 0;
-  for (const message of history) {
-    if (message.role === "user") {
-      const content = textOf(message);
-      if (content) events.push({ type: "user.message", data: { content } });
-      continue;
-    }
-    if (message.role !== "assistant") continue;
-    const tools = message.parts.filter(
-      (p) => p.type === "dynamic-tool" || p.type.startsWith("tool-"),
-    ) as Array<{ toolCallId: string; toolName?: string; type: string; input?: unknown; output?: unknown; state?: string }>;
-    const toolRequests = tools.map((t) => ({
-      toolCallId: t.toolCallId,
-      name: t.toolName ?? t.type.replace(/^tool-/, ""),
-      arguments: (t.input ?? {}) as Record<string, unknown>,
-    }));
-    if (toolRequests.length > 0) {
-      events.push({
-        type: "assistant.message",
-        data: { messageId: `seed-${n++}`, content: "", toolRequests },
-      } as HistoryImportConversationEvent);
-      for (const t of toolRequests) {
-        const part = tools.find((p) => p.toolCallId === t.toolCallId);
-        const text = JSON.stringify(part?.output ?? null) ?? "null";
-        events.push({
-          type: "tool.execution_start",
-          data: { toolCallId: t.toolCallId, toolName: t.name, arguments: t.arguments },
-        } as HistoryImportConversationEvent);
-        events.push({
-          type: "tool.execution_complete",
-          data: {
-            toolCallId: t.toolCallId,
-            success: true,
-            result: { content: text.slice(0, MAX_SEED_TOOL_CHARS) },
-          },
-        } as HistoryImportConversationEvent);
-      }
-    }
-    const content = textOf(message);
-    if (content) {
-      events.push({ type: "assistant.message", data: { messageId: `seed-${n++}`, content } } as HistoryImportConversationEvent);
-    }
-  }
-  return events;
-}
-
 export interface CopilotTurnInput {
   threadId: string;
   /** Opaque, stable per user (the hashed user id): first part of the blob namespace. */
@@ -411,6 +348,8 @@ export interface CopilotTurnInput {
   /** Tests / smoke: another store, and a view of every file operation. */
   store?: BlobStore;
   onFsOp?: SessionFsOpListener;
+  /** Tests / smoke: another chat image store (images of earlier turns, seeding only). */
+  readThreadImage?: (fileName: string, maxBytes: number) => Promise<Uint8Array | undefined>;
   /** Tests / smoke: another lease backend, other lease timings. */
   leases?: LeaseBackend;
   leaseOptions?: Partial<Omit<ThreadLeaseOptions, "holder" | "onLost">>;
@@ -463,6 +402,47 @@ function planFor(input: CopilotTurnInput, family: SearchToolFamily): SubAgentPla
     workspaceToolNames: names.all,
     readOnlyWorkspaceToolNames: names.readOnly,
   });
+}
+
+/** True when the model accepts image input (its "vision" capability). */
+const modelTakesImages = (modelId: ChatModel): boolean =>
+  MODEL_CONFIGS[modelId]?.capabilities?.includes("vision") === true;
+
+/** An image of this thread from the chat image store, at most `maxBytes`. */
+async function readChatImage(threadId: string, fileName: string, maxBytes: number): Promise<Uint8Array | undefined> {
+  const res = await GetImageFromStore(threadId, fileName);
+  if (res.status !== "OK") return undefined;
+  return readCapped(res.response.stream as unknown as AsyncIterable<unknown>, maxBytes);
+}
+
+/**
+ * Images of earlier turns for a new session (history-seed.ts). Only images
+ * of this thread, read and written through its own namespace. A failure
+ * costs the images, never the turn.
+ */
+async function seedImages(input: CopilotTurnInput, fs: BlobSessionFs, vision: boolean): Promise<SeedImages | undefined> {
+  const skipped: Record<string, number> = {};
+  try {
+    const images = await prepareHistoryImages(input.priorHistory, {
+      threadId: input.threadId,
+      vision,
+      fs,
+      readThreadImage: input.readThreadImage ?? ((name, max) => readChatImage(input.threadId, name, max)),
+      onSkip: (reason) => void (skipped[reason] = (skipped[reason] ?? 0) + 1),
+    });
+    if (images.size > 0) {
+      const kinds: Record<string, number> = {};
+      for (const seed of [...images.values()].flat()) kinds[seed.kind] = (kinds[seed.kind] ?? 0) + 1;
+      logInfo("copilot-runtime: earlier images seeded", { threadId: input.threadId, vision, ...kinds, skipped });
+    }
+    return images;
+  } catch (err) {
+    logWarn("copilot-runtime: earlier images not seeded", {
+      threadId: input.threadId,
+      error: err instanceof Error ? err.message : String(err),
+    });
+    return undefined;
+  }
 }
 
 async function openSession(
@@ -571,7 +551,9 @@ async function openSession(
   } else {
     session = await client.createSession({ ...config, sessionId });
     mode = "created";
-    const events = historyToImportEvents(input.priorHistory);
+    const vision = modelTakesImages(input.modelId);
+    const images = await seedImages(input, fs, vision);
+    const events = historyToImportEvents(input.priorHistory, images, { vision });
     if (events.length > 0) {
       await session.rpc.history.importConversation({ events });
       seeded = events.length;
