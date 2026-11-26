@@ -63,7 +63,6 @@ export const openAiContentFiles = (): ContentOpenAiFiles => {
 };
 
 declare global {
-  // eslint-disable-next-line no-var
   var __contentStore: ContentStore | undefined;
 }
 

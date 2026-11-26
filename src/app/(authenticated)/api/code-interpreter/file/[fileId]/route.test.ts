@@ -10,7 +10,7 @@ const mockFindFile = vi.fn();
 const mockCountThreads = vi.fn(async () => 1);
 vi.mock("@/features/chat-page/chat-services/code-interpreter-file-access", () => ({
   findCodeInterpreterFileOfCurrentUser: (...a: unknown[]) => mockFindFile(...a),
-  countThreadsWithCodeInterpreterFile: (...a: unknown[]) => mockCountThreads(...(a as [])),
+  countUsesOfCodeInterpreterFile: (...a: unknown[]) => mockCountThreads(...(a as [])),
   mayDeleteCodeInterpreterFile: (file: { source?: string }) => file.source === "upload",
 }));
 

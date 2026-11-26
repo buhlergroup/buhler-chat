@@ -4,7 +4,7 @@ import { logError, logDebug } from "@/features/common/services/logger";
 import { NextRequest } from "next/server";
 import { contentDisposition } from "@/features/common/safe-content-type";
 import {
-  countThreadsWithCodeInterpreterFile,
+  countUsesOfCodeInterpreterFile,
   findCodeInterpreterFileOfCurrentUser,
   mayDeleteCodeInterpreterFile,
 } from "@/features/chat-page/chat-services/code-interpreter-file-access";
@@ -86,8 +86,9 @@ export async function DELETE(
     if (!owned || !mayDeleteCodeInterpreterFile(owned.file)) return notFound();
 
     // The same upload (same bytes) can be attached to several threads of
-    // the user: only the last one deletes it from OpenAI.
-    if ((await countThreadsWithCodeInterpreterFile(fileId)) > 1) {
+    // the user, or be the file of the user's agent: only the last user
+    // deletes it from OpenAI.
+    if ((await countUsesOfCodeInterpreterFile(fileId, owned.file.sha256)) > 1) {
       logDebug("Code Interpreter file kept: other threads use it", { fileId });
       return new Response(JSON.stringify({ success: true }), {
         status: 200,

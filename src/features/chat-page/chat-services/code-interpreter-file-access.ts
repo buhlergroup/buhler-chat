@@ -26,6 +26,7 @@ import {
   type AttachedFileModel,
   type ChatThreadModel,
 } from "./models";
+import { PERSONA_CI_DOCUMENT_ATTRIBUTE } from "@/features/persona-page/persona-services/models";
 
 const isCodeInterpreterEntry = (f: Pick<AttachedFileModel, "type">) =>
   f.type !== "search-indexed";
@@ -113,24 +114,31 @@ export async function findCodeInterpreterFileOfCurrentUser(
 }
 
 /**
- * Number of the caller's (not deleted) threads that list the file id. The
- * content store gives the same bytes of a user one OpenAI file, so one id
- * can be attached to several threads; it is deleted from OpenAI only when
- * the last thread lets go of it.
+ * How many places of the caller use an OpenAI file: the caller's (not
+ * deleted) threads that list the id, plus the caller's agent Code files with
+ * the same content (`sha256` of the attached entry). The content store gives
+ * the same bytes of one owner one OpenAI file, so an upload can be attached
+ * to several threads, or be the file of the owner's agent; it is deleted
+ * from OpenAI only when the thread that asks is its last user (count 1).
  */
-export async function countThreadsWithCodeInterpreterFile(fileId: string): Promise<number> {
+export async function countUsesOfCodeInterpreterFile(
+  fileId: string,
+  sha256?: string,
+): Promise<number> {
   if (!fileId) return 0;
   const userId = await userHashedId();
   const { resources } = await HistoryContainer()
     .items.query<number>(
       {
         query:
-          "SELECT VALUE COUNT(1) FROM root r WHERE r.type = @type AND r.userId = @userId AND r.isDeleted = @isDeleted AND ARRAY_CONTAINS(r.attachedFiles, { \"id\": @fileId }, true)",
+          "SELECT VALUE COUNT(1) FROM root r WHERE r.userId = @userId AND ((r.type = @threadType AND r.isDeleted = false AND ARRAY_CONTAINS(r.attachedFiles, { \"id\": @fileId }, true)) OR (r.type = @codeFileType AND r.sha256 = @sha256))",
         parameters: [
-          { name: "@type", value: CHAT_THREAD_ATTRIBUTE },
           { name: "@userId", value: userId },
-          { name: "@isDeleted", value: false },
+          { name: "@threadType", value: CHAT_THREAD_ATTRIBUTE },
+          { name: "@codeFileType", value: PERSONA_CI_DOCUMENT_ATTRIBUTE },
           { name: "@fileId", value: fileId },
+          // No hash (an entry from before the content store): no agent match.
+          { name: "@sha256", value: sha256 || "-" },
         ],
       },
       { partitionKey: userId },
