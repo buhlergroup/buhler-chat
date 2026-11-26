@@ -53,6 +53,8 @@ interface LiveSession {
   contextNote?: string;
   busy: boolean;
   lastUsed: number;
+  /** Runtime compactions of this session (they also run between turns). */
+  compactions: CopilotTurnResult["compactions"];
 }
 
 interface RuntimeState {
@@ -282,6 +284,8 @@ export interface CopilotTurnResult extends MappedTurnResult {
   reasoningDurationMs?: number;
   /** ms from send to the first text or reasoning chunk. */
   firstChunkMs?: number;
+  /** Runtime compactions that finished during this turn. */
+  compactions: Array<{ success: boolean; preTokens?: number; postTokens?: number }>;
 }
 
 export interface CopilotTurnHandle {
@@ -363,7 +367,14 @@ async function openSession(input: CopilotTurnInput): Promise<{ live: LiveSession
     reasoningEffort: input.reasoningEffort,
     busy: false,
     lastUsed: Date.now(),
+    compactions: [],
   };
+  session.on((event) => {
+    if (event.type !== "session.compaction_complete") return;
+    const d = event.data as { success?: boolean; preCompactionTokens?: number; postCompactionTokens?: number };
+    live.compactions.push({ success: d.success === true, preTokens: d.preCompactionTokens, postTokens: d.postCompactionTokens });
+    logInfo("copilot-runtime: compaction", { threadId: input.threadId, ...live.compactions.at(-1) });
+  });
   state.sessions.set(sessionId, live);
   logInfo("copilot-runtime: session opened", { threadId: input.threadId, mode, seeded });
   return { live, mode, seeded };
@@ -443,6 +454,7 @@ export async function runCopilotTurn(input: CopilotTurnInput): Promise<CopilotTu
 
   let settle!: () => void;
   const settled = new Promise<void>((resolve) => (settle = resolve));
+  const compactionsBefore = live.compactions.length;
   const unsubscribe = live.session.on((event) => {
     try {
       if (mapper.handle(event)) settle();
@@ -511,6 +523,7 @@ export async function runCopilotTurn(input: CopilotTurnInput): Promise<CopilotTu
       turnUsage: { ...mapper.turnUsage },
       reasoningDurationMs,
       firstChunkMs,
+      compactions: live.compactions.slice(compactionsBefore),
     };
   });
 
@@ -523,4 +536,9 @@ export async function liveSessionToolNames(threadId: string): Promise<string[] |
   if (!live) return undefined;
   const current = await live.session.rpc.tools.getCurrentMetadata();
   return (current.tools ?? []).map((t) => t.name);
+}
+
+/** Diagnostics: runtime compactions seen in a live session. */
+export function liveSessionCompactions(threadId: string): CopilotTurnResult["compactions"] | undefined {
+  return state.sessions.get(`thread-${threadId}`)?.compactions;
 }

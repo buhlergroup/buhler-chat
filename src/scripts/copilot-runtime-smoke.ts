@@ -100,7 +100,6 @@ async function main() {
       threadDocumentIds: [],
       personaDocumentIds: [],
       defaultTools: {},
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
       extensions: [{ extension: mcpExtension as any, headerSecrets: {}, mcp: { url: mcpUrl, transport: "auto", headers: {} } }],
       clientDateTime: new Date().toISOString(),
       depth: 0,
@@ -178,7 +177,7 @@ async function main() {
     console.log(
       `  usage: calls=${u.calls} input=${u.inputTokens} cacheRead=${u.cacheReadTokens} cacheWrite=${u.cacheWriteTokens} output=${u.outputTokens} lastPrompt=${u.lastInputTokens} ttft(runtime)=${u.firstTimeToFirstTokenMs}ms firstChunk=${result.firstChunkMs}ms wall=${Date.now() - started}ms finish=${result.finishReason}${result.error ? ` error=${result.error.message}` : ""}`,
     );
-    console.log(`  fs ops: ${JSON.stringify(opCounts)}`);
+    console.log(`  fs ops: ${JSON.stringify(opCounts)}${result.compactions.length ? ` compactions=${JSON.stringify(result.compactions)}` : ""}`);
     if (workspaceOps.length > 0) {
       console.log(`  non-state paths: ${JSON.stringify([...new Set(workspaceOps.map((o) => `${o.op} ${o.path}`))].slice(0, 20))}`);
     }
@@ -303,6 +302,35 @@ tools offered to ${claudeModel}: ${(await session.liveSessionToolNames(threadB))
       { id: "a1", role: "assistant", parts: [{ type: "text", text: "Noted: teal." }] },
     ],
   });
+
+  // ── Compaction: a small prompt limit makes the runtime compact ──────────
+  {
+    process.env.COPILOT_MAX_PROMPT_TOKENS = "6000";
+    const threadF = `smoke-f-${runId}`;
+    const words = ["pump", "valve", "sensor", "motor", "belt", "silo", "mixer", "dryer", "sieve", "scale"];
+    const filler = (n: number) =>
+      Array.from({ length: 900 }, (_, i) => words[(i * 7 + n) % words.length]).join(" ");
+    for (let n = 1; n <= 5; n++) {
+      await turn(`F${n} compaction load`, {
+        threadId: threadF,
+        user: "frank",
+        model: gptModel,
+        prompt:
+          (n === 1 ? "Remember the code word: KINGFISHER-58. " : "") +
+          `Note ${n}: ${filler(n)}
+Reply only with: ok ${n}`,
+      });
+    }
+    await turn("F6 recall after compaction", {
+      threadId: threadF,
+      user: "frank",
+      model: gptModel,
+      prompt: "Without tools: what was the code word from the first note?",
+    });
+    console.log(`
+compactions in thread F: ${JSON.stringify(session.liveSessionCompactions(threadF))}`);
+    delete process.env.COPILOT_MAX_PROMPT_TOKENS;
+  }
 
   // ── First call: Copilot path vs AI SDK path, system message modes ──────
   if (process.env.SMOKE_SKIP_BASELINE !== "true") {

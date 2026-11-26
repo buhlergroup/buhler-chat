@@ -26,7 +26,6 @@ export interface CopilotEventLike {
   type: string;
   agentId?: string;
   // Event payloads differ per type; each branch below reads its own fields.
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
   data?: any;
 }
 
@@ -321,7 +320,6 @@ export class CopilotEventMapper {
     this.emit({ type: "text-delta", id, delta });
   }
 
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
   private onMessage(data: any): void {
     const id = String(data.messageId ?? `text-${this.steps.length}`);
     const content = typeof data.content === "string" ? data.content : "";
@@ -355,7 +353,6 @@ export class CopilotEventMapper {
     this.stepState = "closed";
   }
 
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
   private onUsage(data: any): void {
     const num = (v: unknown) => (typeof v === "number" && Number.isFinite(v) ? v : 0);
     const input = num(data.inputTokens);
@@ -390,7 +387,6 @@ export class CopilotEventMapper {
     return !this.options.appToolNames.has(toolName);
   }
 
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
   private onToolStart(data: any): void {
     const toolCallId = String(data.toolCallId);
     const toolName = String(data.toolName ?? "unknown");
@@ -410,7 +406,6 @@ export class CopilotEventMapper {
     });
   }
 
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
   private onToolComplete(data: any): void {
     const toolCallId = String(data.toolCallId);
     const call = this.toolCalls.get(toolCallId);

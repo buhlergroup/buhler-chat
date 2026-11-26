@@ -94,6 +94,8 @@ export function buildCopilotInference(): {
   );
   const names = new Set(providers.map((p) => p.name));
   const models: ProviderModelConfig[] = [];
+  // Test knob: a small prompt limit makes the runtime compact early.
+  const maxPromptTokens = Number(process.env.COPILOT_MAX_PROMPT_TOKENS) || undefined;
   for (const config of Object.values(MODEL_CONFIGS)) {
     const provider = copilotProviderFor(config);
     if (!provider || !names.has(provider) || !config.deploymentName) continue;
@@ -103,6 +105,7 @@ export function buildCopilotInference(): {
       wireModel: config.deploymentName,
       name: config.name,
       maxContextWindowTokens: config.contextWindow,
+      ...(maxPromptTokens ? { maxPromptTokens } : {}),
       ...(config.maxOutputTokens ? { maxOutputTokens: config.maxOutputTokens } : {}),
       capabilities: {
         supports: {
