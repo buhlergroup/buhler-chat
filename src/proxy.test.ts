@@ -301,3 +301,87 @@ describe("proxy - every non-public endpoint requires a session", () => {
     }
   );
 });
+
+// ---------------------------------------------------------------------------
+// Server Actions and public prefixes. A Server Action is a POST with a
+// "Next-Action" header to a page path; Next dispatches it on any page that
+// imports the action, including the public /embed/* pages. Probed with
+// scripts/check-unauthenticated-access.mjs against a production build.
+// ---------------------------------------------------------------------------
+
+function makeActionRequest(path: string) {
+  return new NextRequest(`http://localhost${path}`, {
+    method: "POST",
+    headers: { "next-action": "0123456789abcdef", "content-type": "text/plain;charset=UTF-8" },
+    body: "[]",
+  });
+}
+
+describe("proxy - Server Actions need a session on every path", () => {
+  beforeEach(() => {
+    mockedGetToken.mockReset();
+  });
+
+  it.each(["/", "/embed/chat/abc", "/embed/agent/abc", "/embed/auth/start", "/health", "/api/auth/session", "/chat/abc"])(
+    "anonymous Server Action POST to %s returns 401",
+    async (path) => {
+      mockedGetToken.mockResolvedValue(null);
+      const res = await proxy(makeActionRequest(path));
+      expect(res.status).toBe(401);
+    }
+  );
+
+  it("a signed-in Server Action POST to /embed/chat/abc passes through", async () => {
+    mockedGetToken.mockResolvedValue({ isAdmin: false });
+    const res = await proxy(makeActionRequest("/embed/chat/abc"));
+    expect(res.status).not.toBe(401);
+    expect(res.headers.get("location")).toBeNull();
+  });
+
+  it("a plain anonymous GET of /embed/chat/abc stays public (sign-in card)", async () => {
+    mockedGetToken.mockResolvedValue(null);
+    const res = await proxy(makeRequest("/embed/chat/abc"));
+    expect(res.status).not.toBe(401);
+    expect(res.headers.get("location")).toBeNull();
+  });
+});
+
+describe("proxy - public prefixes match whole segments only", () => {
+  beforeEach(() => {
+    mockedGetToken.mockReset();
+  });
+
+  it.each(["/embedded", "/embed-admin/x"])("anonymous %s is redirected to /", async (path) => {
+    mockedGetToken.mockResolvedValue(null);
+    const res = await proxy(makeRequest(path));
+    expect(res.status).toBeGreaterThanOrEqual(300);
+    expect(res.status).toBeLessThan(400);
+    expect(res.headers.get("location")).toMatch(/\/$/);
+  });
+
+  it("anonymous /api/authx returns 401", async () => {
+    mockedGetToken.mockResolvedValue(null);
+    const res = await proxy(makeRequest("/api/authx"));
+    expect(res.status).toBe(401);
+  });
+});
+
+describe("proxy - matcher skips root-level static files only", () => {
+  it.each([
+    "/chat/x.png",
+    "/chat/x.js",
+    "/chat/x.css",
+    "/embed/chat/x.png",
+    "/api/code-interpreter/file/x.png",
+    "/persona/x.svg/chat",
+  ])("runs the proxy for %s (dynamic segment that looks like a file)", (path) => {
+    expect(matcherMatches(path)).toBe(true);
+  });
+
+  it.each(["/ai-icon.png", "/user-icon.png", "/hero.png", "/app.css"])(
+    "skips root-level static file %s",
+    (path) => {
+      expect(matcherMatches(path)).toBe(false);
+    }
+  );
+});

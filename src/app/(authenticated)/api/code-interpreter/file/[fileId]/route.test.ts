@@ -169,6 +169,18 @@ describe("/api/code-interpreter/file/[fileId] route", () => {
     expect(await res.text()).toMatch(/Unauthorized/i);
   });
 
+  // api.unit.ci-file.004b — GET 401 (not 500) when getCurrentUser throws, as
+  // it does without a session. The proxy matcher once skipped paths ending in
+  // ".png", so /api/code-interpreter/file/x.png reached this handler directly.
+  it("GET returns 401 when getCurrentUser throws (no session)", async () => {
+    mockedGetCurrentUser.mockRejectedValue(new Error("User not found"));
+    const req = makeGetRequest("file.png");
+    const res = await GET(req, { params: Promise.resolve({ fileId: "file.png" }) });
+    expect(res.status).toBe(401);
+    expect(mockFindFile).not.toHaveBeenCalled();
+    expect(mockedDownload).not.toHaveBeenCalled();
+  });
+
   // api.unit.ci-file.005 — GET 400 when fileId is empty string
   it("GET returns 400 when fileId is empty", async () => {
     const req = makeGetRequest("");
@@ -205,6 +217,16 @@ describe("/api/code-interpreter/file/[fileId] route", () => {
     const res = await DELETE(req, { params: Promise.resolve({ fileId: "file123" }) });
     expect(res.status).toBe(401);
     expect(await res.text()).toMatch(/Unauthorized/i);
+  });
+
+  // api.unit.ci-file.008b — DELETE 401 (not 500) when getCurrentUser throws.
+  it("DELETE returns 401 when getCurrentUser throws (no session)", async () => {
+    mockedGetCurrentUser.mockRejectedValue(new Error("User not found"));
+    const req = makeDeleteRequest("file.png");
+    const res = await DELETE(req, { params: Promise.resolve({ fileId: "file.png" }) });
+    expect(res.status).toBe(401);
+    expect(mockFindFile).not.toHaveBeenCalled();
+    expect(mockedDelete).not.toHaveBeenCalled();
   });
 
   // api.unit.ci-file.009 — DELETE 400 when fileId is empty
