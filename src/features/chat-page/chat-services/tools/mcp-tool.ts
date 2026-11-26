@@ -14,6 +14,7 @@ import {
   type McpSessionFactory,
 } from "@/features/extensions-page/extension-services/mcp/mcp-client";
 import { buildExtensionToolKey } from "./tool-key";
+import { ToolUserError } from "./tool-user-error";
 
 /** Most characters of tool output handed back to the model. */
 export const MAX_MCP_TOOL_OUTPUT_CHARS = 100_000;
@@ -123,6 +124,10 @@ export function mcpTool(
   return tool({
     description: truncate(info.description ?? `Tool ${info.name} of ${extension.name}`, MAX_DESCRIPTION_CHARS),
     inputSchema: jsonSchema(normalizeMcpInputSchema(info.inputSchema) as Parameters<typeof jsonSchema>[0]),
+    // The server writes the schema, not us. Strict decoding makes the model
+    // fill every optional field with a placeholder, and servers that check
+    // field combinations then reject the call. The model may omit fields.
+    strict: false,
     execute: async (rawArgs: unknown, { abortSignal }: { abortSignal?: AbortSignal }) => {
       const args =
         typeof rawArgs === "object" && rawArgs !== null && !Array.isArray(rawArgs)
@@ -151,13 +156,13 @@ export function mcpTool(
           host: safeHost(connection.url),
           errorName: (error as { name?: string })?.name,
         });
-        throw new Error(`${extension.name} / ${info.name}: ${describeMcpError(error)}`);
+        throw new ToolUserError(`${extension.name} / ${info.name}: ${describeMcpError(error)}`);
       }
 
       const mapped = mapMcpCallResult(result);
       if (result.isError) {
         // The server reports a tool-level error; the model gets its text.
-        throw new Error(
+        throw new ToolUserError(
           `${extension.name} / ${info.name} returned an error: ${truncate(mapped.text, 1_000)}`
         );
       }

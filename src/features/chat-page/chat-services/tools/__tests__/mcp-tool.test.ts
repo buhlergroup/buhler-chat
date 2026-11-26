@@ -16,6 +16,7 @@ import {
   MAX_MCP_TOOL_OUTPUT_CHARS,
   normalizeMcpInputSchema,
 } from "../mcp-tool";
+import { ToolUserError, uiErrorText } from "../tool-user-error";
 import type {
   McpConnectionOptions,
   McpSession,
@@ -133,6 +134,31 @@ describe("mcpExtensionTools", () => {
       text: expect.stringContaining('Connect Market'),
       mcpConnect: { extensionId: "AbCdEfGh000000000000000000000000000", extensionName: "Market", personaId: "agent-9" },
     });
+  });
+
+  it("sends the server schema without strict decoding, so the model may omit optional fields", async () => {
+    const [[, t]] = await mcpExtensionTools(extension({ toolAllowList: ["get_price"] }), connection, openSession);
+    expect((t as { strict?: boolean }).strict).toBe(false);
+  });
+
+  it("marks tool-level and transport errors as safe to show in the chat", async () => {
+    session.callTool = vi.fn(async () => ({ isError: true, content: [{ type: "text", text: "Use overview without patterns." }] }));
+    const [[, t]] = await mcpExtensionTools(extension({ toolAllowList: ["get_price"] }), connection, openSession);
+    const toolError = await execute(t, {}).catch((e: unknown) => e);
+    expect(toolError).toBeInstanceOf(ToolUserError);
+    expect(uiErrorText(toolError)).toBe("Market / get_price returned an error: Use overview without patterns.");
+
+    session.callTool = vi.fn(async () => {
+      throw new Error("socket hang up at https://mcp.example.com/mcp?api_key=fake");
+    });
+    const transportError = await execute(t, {}).catch((e: unknown) => e);
+    expect(uiErrorText(transportError)).toBe("Market / get_price: The MCP server request failed.");
+    expect(uiErrorText(transportError)).not.toContain("fake");
+  });
+
+  it("keeps the generic text for errors that are not marked as safe", () => {
+    expect(uiErrorText(new Error("Cosmos 500 at https://internal.example"))).toBe("An error occurred.");
+    expect(uiErrorText("boom")).toBe("An error occurred.");
   });
 
   it("maps a timeout", async () => {
