@@ -1,15 +1,14 @@
 import { userHashedId } from "@/features/auth-page/helpers";
-import { ChatPage } from "@/features/chat-page/chat-page";
+import { TemporaryChatPage } from "@/features/chat-page/temporary-chat-page";
 import { DEFAULT_MODEL } from "@/features/chat-page/chat-services/models";
 import { FindAllChatDocuments } from "@/features/chat-page/chat-services/chat-document-service";
 import { FindAllChatMessagesForCurrentUser } from "@/features/chat-page/chat-services/chat-message-service";
 import {
   CreateChatThread,
   FindChatThreadForCurrentUser,
-  ResetChatThread,
 } from "@/features/chat-page/chat-services/chat-thread-service";
 import { FindAllExtensionForCurrentUserAndIds } from "@/features/extensions-page/extension-services/extension-service";
-import { AI_NAME, TEMPORARY_CHAT_NAME, TEMPORARY_CHAT_ROUTE } from "@/features/theme/theme-config";
+import { AI_NAME, TEMPORARY_CHAT_NAME } from "@/features/theme/theme-config";
 import { DisplayError } from "@/features/ui/error/display-error";
 
 export const metadata = {
@@ -31,9 +30,11 @@ export default async function Home(props: HomeParams) {
     FindAllChatDocuments(userIdAsChatThreadId),
   ]);
 
-  if (chatThreadResponse.status === "OK" && chatResponse.status === "OK" && chatResponse.response.length) {
-    chatThreadResponse = await ResetChatThread(userIdAsChatThreadId);
-  } else if (chatThreadResponse.status === "NOT_FOUND") {
+  // Do not reset the thread here. This render runs again on every
+  // router.refresh() and on every server action that revalidates the chat
+  // layout, also after the first turn; a reset here deleted the conversation
+  // the user was reading. TemporaryChatPage resets once, when the page mounts.
+  if (chatThreadResponse.status === "NOT_FOUND") {
     chatThreadResponse = await CreateChatThread({ name: TEMPORARY_CHAT_NAME, temporary: true });
   }
 
@@ -58,8 +59,9 @@ export default async function Home(props: HomeParams) {
   }
 
   return (
-    <ChatPage
-      messages={[]}
+    <TemporaryChatPage
+      resetOnEntry={chatResponse.response.length > 0}
+      messages={chatResponse.response}
       chatThread={chatThreadResponse.response}
       chatDocuments={docsResponse.response}
       extensions={extensionResponse.response}
