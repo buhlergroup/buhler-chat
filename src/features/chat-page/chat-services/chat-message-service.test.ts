@@ -303,11 +303,20 @@ describe("chat-page.unit.message-service.007 — UpsertChatMessage preserves pro
 
 describe("chat-page.unit.message-service.008 — UpdateChatMessage returns NOT_FOUND when no message matches", () => {
   it("returns NOT_FOUND", async () => {
-    historyContainer.items.query.mockImplementationOnce(() => ({
-      fetchAll: async () => ({ resources: [] }),
-    }));
     const result = await UpdateChatMessage("nonexistent", { content: "new" });
     expect(result.status).toBe("NOT_FOUND");
+    expect(historyContainer.items.upsert).not.toHaveBeenCalled();
+  });
+
+  it("returns NOT_FOUND for a deleted row, a row of another type or an empty id", async () => {
+    historyItems = [
+      { id: "gone", userId: hashedEmail, type: MESSAGE_ATTRIBUTE, isDeleted: true },
+      { id: "thread", userId: hashedEmail, type: "CHAT_THREAD", isDeleted: false },
+    ];
+    expect((await UpdateChatMessage("gone", { content: "x" })).status).toBe("NOT_FOUND");
+    expect((await UpdateChatMessage("thread", { content: "x" })).status).toBe("NOT_FOUND");
+    expect((await UpdateChatMessage("", { content: "x" })).status).toBe("NOT_FOUND");
+    expect(historyContainer.items.upsert).not.toHaveBeenCalled();
   });
 });
 
@@ -324,9 +333,7 @@ describe("chat-page.unit.message-service.009 — UpdateChatMessage merges update
       type: MESSAGE_ATTRIBUTE,
       isDeleted: false,
     };
-    historyContainer.items.query.mockImplementationOnce(() => ({
-      fetchAll: async () => ({ resources: [existingMsg] }),
-    }));
+    historyItems = [existingMsg];
     const result = await UpdateChatMessage("m1", { content: "new" });
     expect(result.status).toBe("OK");
     const doc = historyContainer.items.upsert.mock.calls[0][0];
@@ -336,19 +343,52 @@ describe("chat-page.unit.message-service.009 — UpdateChatMessage merges update
     expect(doc.type).toBe(MESSAGE_ATTRIBUTE);
     expect(doc.isDeleted).toBe(false);
   });
+
+  it("keeps the row in the caller's partition even when the update names another userId", async () => {
+    historyItems = [
+      { id: "m1", userId: hashedEmail, type: MESSAGE_ATTRIBUTE, isDeleted: false, content: "old" },
+    ];
+    const result = await UpdateChatMessage("m1", { content: "new", userId: "someone-else" });
+    expect(result.status).toBe("OK");
+    expect(historyContainer.items.upsert.mock.calls[0][0].userId).toBe(hashedEmail);
+  });
 });
 
-describe("chat-page.unit.message-service.010 — UpdateChatMessage enforces userId filter", () => {
-  it("includes userId in query", async () => {
-    let captured: any;
-    historyContainer.items.query.mockImplementationOnce((q: any, _opts?: any) => {
-      captured = q;
-      return { fetchAll: async () => ({ resources: [] }) };
-    });
+describe("chat-page.unit.message-service.010 — UpdateChatMessage reads the row with a point read in the caller's partition", () => {
+  it("uses item(id, userId).read() and no query", async () => {
+    historyItems = [
+      { id: "m1", userId: hashedEmail, type: MESSAGE_ATTRIBUTE, isDeleted: false },
+    ];
     await UpdateChatMessage("m1", { content: "new" });
-    expect(captured).toBeDefined();
-    const userParam = captured.parameters.find((p: any) => p.name === "@userId");
-    expect(userParam?.value).toBe(hashedEmail);
+    expect(historyContainer.item).toHaveBeenCalledWith("m1", hashedEmail);
+    expect(historyContainer.items.query).not.toHaveBeenCalled();
+  });
+
+  it("returns NOT_FOUND for a row of another user", async () => {
+    historyItems = [
+      { id: "m1", userId: "other-user", type: MESSAGE_ATTRIBUTE, isDeleted: false },
+    ];
+    const result = await UpdateChatMessage("m1", { content: "new" });
+    expect(result.status).toBe("NOT_FOUND");
+    expect(historyContainer.items.upsert).not.toHaveBeenCalled();
+  });
+});
+
+describe("chat-page.unit.message-service.017 — the message queries are single-partition queries", () => {
+  it("FindAllChatMessagesForCurrentUser passes the caller's partition key", async () => {
+    await FindAllChatMessagesForCurrentUser("thread-1");
+    expect(historyContainer.items.query).toHaveBeenCalledWith(
+      expect.objectContaining({ query: expect.stringContaining("r.userId=@userId") }),
+      { partitionKey: hashedEmail },
+    );
+  });
+
+  it("FindTopChatMessagesForCurrentUser passes the caller's partition key", async () => {
+    await FindTopChatMessagesForCurrentUser("thread-1", 5);
+    expect(historyContainer.items.query).toHaveBeenCalledWith(
+      expect.objectContaining({ query: expect.stringContaining("r.userId=@userId") }),
+      { partitionKey: hashedEmail },
+    );
   });
 });
 

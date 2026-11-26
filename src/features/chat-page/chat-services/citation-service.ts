@@ -2,7 +2,6 @@ import { userHashedId } from "@/features/auth-page/helpers";
 import { ServerActionResponse } from "@/features/common/server-action-response";
 import { HistoryContainer } from "@/features/common/services/cosmos";
 import { uniqueId } from "@/features/common/util";
-import { SqlQuerySpec } from "@azure/cosmos";
 import { DocumentSearchResponse } from "./azure-ai-search/azure-ai-search";
 import { CHAT_CITATION_ATTRIBUTE, ChatCitationModel } from "./models";
 
@@ -58,30 +57,18 @@ export const FindCitationByID = async (
   id: string
 ): Promise<ServerActionResponse<ChatCitationModel>> => {
   try {
-    const querySpec: SqlQuerySpec = {
-      query:
-        "SELECT * FROM root r WHERE r.type=@type AND r.id=@id AND r.userId=@userId ",
-      parameters: [
-        {
-          name: "@type",
-          value: CHAT_CITATION_ATTRIBUTE,
-        },
-        {
-          name: "@id",
-          value: id,
-        },
-        {
-          name: "@userId",
-          value: await userHashedId(),
-        },
-      ],
-    };
+    // A point read in the caller's own partition (1 RU) instead of a
+    // cross-partition query. Same answer: only a citation row of the caller.
+    const userId = await userHashedId();
+    const { resource } = id
+      ? await HistoryContainer().item(id, userId).read<ChatCitationModel>()
+      : { resource: undefined };
 
-    const { resources } = await HistoryContainer()
-      .items.query<ChatCitationModel>(querySpec)
-      .fetchAll();
-
-    if (resources.length === 0) {
+    if (
+      !resource ||
+      resource.type !== CHAT_CITATION_ATTRIBUTE ||
+      resource.userId !== userId
+    ) {
       return {
         status: "ERROR",
         errors: [{ message: "Citation not found" }],
@@ -90,7 +77,7 @@ export const FindCitationByID = async (
 
     return {
       status: "OK",
-      response: resources[0],
+      response: resource,
     };
   } catch (error) {
     return {

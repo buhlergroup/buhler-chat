@@ -50,7 +50,6 @@ import "server-only";
  * bit of old context, not their answer.
  */
 
-import { SqlQuerySpec } from "@azure/cosmos";
 import { userHashedId } from "@/features/auth-page/helpers";
 import { HistoryContainer } from "@/features/common/services/cosmos";
 import { generateText } from "ai";
@@ -65,6 +64,7 @@ import {
   HISTORY_SUMMARY_SYSTEM_PROMPT,
   buildHistorySummaryPrompt,
   buildHistorySummaryRow,
+  historySummaryRowId,
   type ChatHistorySummaryModel,
 } from "./history-summary";
 
@@ -315,22 +315,24 @@ export async function FindChatHistorySummary(
   threadId: string,
 ): Promise<ChatHistorySummaryModel | null> {
   try {
-    const querySpec: SqlQuerySpec = {
-      query:
-        "SELECT * FROM root r WHERE r.type=@type AND r.threadId=@threadId AND r.userId=@userId AND r.isDeleted=@isDeleted",
-      parameters: [
-        { name: "@type", value: HISTORY_SUMMARY_ATTRIBUTE },
-        { name: "@threadId", value: threadId },
-        { name: "@userId", value: await userHashedId() },
-        { name: "@isDeleted", value: false },
-      ],
-    };
-
-    const { resources } = await HistoryContainer()
-      .items.query<ChatHistorySummaryModel>(querySpec)
-      .fetchAll();
-
-    return resources[0] ?? null;
+    // The row id is derived from the thread (historySummaryRowId), so this is
+    // a point read in the caller's own partition (1 RU), not a query. The
+    // checks below are the filters of the former query.
+    const userId = await userHashedId();
+    if (!threadId) return null;
+    const { resource } = await HistoryContainer()
+      .item(historySummaryRowId(threadId), userId)
+      .read<ChatHistorySummaryModel>();
+    if (
+      !resource ||
+      resource.type !== HISTORY_SUMMARY_ATTRIBUTE ||
+      resource.threadId !== threadId ||
+      resource.userId !== userId ||
+      resource.isDeleted !== false
+    ) {
+      return null;
+    }
+    return resource;
   } catch (e) {
     logWarn("history-summary: failed to read compaction row", {
       threadId,
