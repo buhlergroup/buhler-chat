@@ -74,8 +74,9 @@ vi.mock("./persona-document-access", () => ({
 // The agent panel of a chat: the thread (own partition) and the agent (open
 // rule) are looked up by the server.
 const FindChatThreadForCurrentUser = vi.fn();
-vi.mock("@/features/chat-page/chat-services/chat-thread-service", () => ({
-  FindChatThreadForCurrentUser: (id: string) => FindChatThreadForCurrentUser(id),
+vi.mock("@/features/chat-page/chat-services/chat-thread-read", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/features/chat-page/chat-services/chat-thread-read")>()),
+  readChatThreadRow: (id: string) => FindChatThreadForCurrentUser(id),
 }));
 const findPersonaForCurrentUser = vi.fn();
 vi.mock("./persona-lookup", () => ({
@@ -409,7 +410,25 @@ describe("AgentDocumentDetailsForThread: the agent panel of a chat", () => {
     expect(JSON.stringify(result)).not.toContain("doc-2");
   });
 
-  it("a thread without an agent, or an agent the user cannot open, gives nothing", async () => {
+  it("a legacy thread (no agent id) uses the Search file ids stored on its row", async () => {
+    answerAll();
+    FindChatThreadForCurrentUser.mockResolvedValue({
+      status: "OK",
+      response: { id: "t1", type: "CHAT_THREAD", personaDocumentIds: ["doc-1", "doc-3"] },
+    });
+    denied.add("doc-3");
+
+    const result = await AgentDocumentDetailsForThread("t1");
+
+    expect(findPersonaForCurrentUser).not.toHaveBeenCalled();
+    expect(result.status).toBe("OK");
+    if (result.status !== "OK") return;
+    expect(result.response.documents.map((d) => d.name)).toEqual(["doc-1.pdf"]);
+    expect(result.response.notAvailableCount).toBe(1);
+    for (const doc of result.response.documents) expect(doc).not.toHaveProperty("id");
+  });
+
+  it("a thread without agent files, or an agent the user cannot open, gives nothing", async () => {
     FindChatThreadForCurrentUser.mockResolvedValue(thread(undefined));
     expect(await AgentDocumentDetailsForThread("t1")).toEqual({
       status: "OK",

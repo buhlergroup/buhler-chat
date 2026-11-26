@@ -807,12 +807,13 @@ export function withNormalizedSelectedModel<T extends { selectedModel?: string }
 }
 
 /**
- * Id lists of an agent that a CHAT_THREAD row must not hold. Threads created
- * before the chat route resolved the agent on every turn stored copies of the
- * agent's Search file ids and sub-agent ids. Those ids are editor-only fields
- * of the agent (PERSONA_EDITOR_ONLY_FIELDS in persona-access.ts), and the
- * thread row goes to the browser. The server ignores these fields on read,
- * drops them on the next save, and never sends them to the client.
+ * Id lists of an agent that a thread sent to the client must not hold. Threads
+ * created before the chat route resolved the agent on every turn stored
+ * copies of the agent's Search file ids and sub-agent ids. Those ids are
+ * editor-only fields of the agent (PERSONA_EDITOR_ONLY_FIELDS in
+ * persona-access.ts). New rows do not store them. Legacy rows keep them for
+ * the server (chat-thread-read.ts); every path that returns a thread to the
+ * client removes them.
  */
 export const THREAD_AGENT_ID_LIST_FIELDS = [
   "personaDocumentIds",

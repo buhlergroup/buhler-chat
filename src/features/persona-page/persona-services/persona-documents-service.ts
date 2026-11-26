@@ -30,7 +30,10 @@ import {
   maxPersonaDocuments,
 } from "./persona-document-graph-check";
 import { findPersonaForCurrentUser } from "./persona-lookup";
-import { FindChatThreadForCurrentUser } from "@/features/chat-page/chat-services/chat-thread-service";
+import {
+  legacyThreadAgentIdLists,
+  readChatThreadRow,
+} from "@/features/chat-page/chat-services/chat-thread-read";
 
 const positiveInt = (value: string | undefined, fallback: number) => {
   const n = Number(value);
@@ -203,9 +206,10 @@ export async function DocumentDetails(
  * stores only the agent id (personaId), not the agent's file ids: this action
  * reads the thread from the caller's own partition, loads the agent with the
  * open rule (findPersonaForCurrentUser) and returns the details of the files
- * the caller may use (DocumentDetails). The answer holds no Search file row
- * ids, which are editor-only fields of the agent, and only the NUMBER of the
- * files the caller cannot use.
+ * the caller may use (DocumentDetails). A legacy thread (no personaId) uses
+ * the file ids stored on its row (legacyThreadAgentIdLists). The answer holds
+ * no Search file row ids, which are editor-only fields of the agent, and only
+ * the NUMBER of the files the caller cannot use.
  */
 export async function AgentDocumentDetailsForThread(
   chatThreadId: string
@@ -222,14 +226,18 @@ export async function AgentDocumentDetailsForThread(
   if (typeof chatThreadId !== "string" || chatThreadId.length === 0) {
     return none;
   }
-  const thread = await FindChatThreadForCurrentUser(chatThreadId);
+  const thread = await readChatThreadRow(chatThreadId);
   if (thread.status !== "OK") return thread;
-  const personaId = thread.response.personaId;
-  if (!personaId) return none;
-
-  const persona = await findPersonaForCurrentUser(personaId);
-  if (persona.status !== "OK") return none;
-  const ids = [...new Set(persona.response.personaDocumentIds ?? [])];
+  const legacy = legacyThreadAgentIdLists(thread.response);
+  let documentIds: string[];
+  if (legacy) {
+    documentIds = legacy.personaDocumentIds;
+  } else {
+    const persona = await findPersonaForCurrentUser(thread.response.personaId!);
+    if (persona.status !== "OK") return none;
+    documentIds = persona.response.personaDocumentIds ?? [];
+  }
+  const ids = [...new Set(documentIds)];
   if (ids.length === 0) return none;
 
   const details = await DocumentDetails(ids.map((id) => ({ id })));

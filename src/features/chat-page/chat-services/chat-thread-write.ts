@@ -13,26 +13,28 @@ import "server-only";
 import { ServerActionResponse } from "@/features/common/server-action-response";
 import { HistoryContainer } from "@/features/common/services/cosmos";
 import { ChatThreadModel, withoutAgentIdLists } from "./models";
+import { ChatThreadRow, rowForSave } from "./chat-thread-read";
 
 /**
  * Upserts a thread that server code built or loaded from the user's own
- * partition, and stamps lastMessageAt. The row is written without the agent
- * id lists that older rows carry (THREAD_AGENT_ID_LIST_FIELDS), so the
- * returned thread does not have them either.
+ * partition, and stamps lastMessageAt. A thread with an agent id is written
+ * without stored copies of the agent's id lists; a legacy thread keeps them
+ * (rowForSave, chat-thread-read.ts). The returned thread never has them: it
+ * goes to the client (THREAD_AGENT_ID_LIST_FIELDS).
  */
 export const saveChatThread = async (
-  chatThread: ChatThreadModel
+  chatThread: ChatThreadRow
 ): Promise<ServerActionResponse<ChatThreadModel>> => {
   try {
     chatThread.lastMessageAt = new Date();
-    const { resource } = await HistoryContainer().items.upsert<ChatThreadModel>(
-      withoutAgentIdLists(chatThread)
+    const { resource } = await HistoryContainer().items.upsert<ChatThreadRow>(
+      rowForSave(chatThread)
     );
 
     if (resource) {
       return {
         status: "OK",
-        response: resource,
+        response: withoutAgentIdLists(resource),
       };
     }
 
@@ -55,10 +57,10 @@ export const saveChatThread = async (
  * attachedFiles, userId, ...) change only through server code or through the
  * dedicated actions that check them.
  */
-export const applyUserThreadChanges = (
-  stored: ChatThreadModel,
+export const applyUserThreadChanges = <T extends ChatThreadModel>(
+  stored: T,
   incoming: Partial<ChatThreadModel>
-): ChatThreadModel => ({
+): T => ({
   ...stored,
   ...(typeof incoming.name === "string" ? { name: incoming.name } : {}),
   ...(typeof incoming.bookmarked === "boolean"

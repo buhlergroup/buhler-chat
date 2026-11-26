@@ -878,6 +878,54 @@ describe("chat-page.unit.thread-service.034 — older rows with agent id lists n
     expectNoAgentIdLists(historyContainer.items.upsert.mock.calls[0][0]);
   });
 
+  // A legacy row: started from an agent before threads stored the agent id.
+  // Its stored lists are its only source of the agent's documents, so the
+  // server keeps them; the client still never gets them.
+  const legacyRowWithoutAgentId = () => {
+    const row = legacyRow();
+    delete row.personaId;
+    return row;
+  };
+
+  it("a legacy row without agent id: the client gets no lists, a save keeps them", async () => {
+    historyItems = [legacyRowWithoutAgentId()];
+
+    const found = await FindChatThreadForCurrentUser("t1");
+    expect(found.status).toBe("OK");
+    if (found.status === "OK") expectNoAgentIdLists(found.response);
+
+    const updated = await UpdateChatThreadSelectedModel("t1", DEFAULT_MODEL);
+    expect(updated.status).toBe("OK");
+    if (updated.status === "OK") expectNoAgentIdLists(updated.response);
+    const written = historyContainer.items.upsert.mock.calls[0][0];
+    expect(written.personaDocumentIds).toEqual(["doc-1", "doc-2"]);
+    expect(written.subAgentIds).toEqual(["sub-1"]);
+  });
+
+  it("a legacy row without agent id: a rename keeps the stored lists, client lists are ignored", async () => {
+    historyItems = [legacyRowWithoutAgentId()];
+    const result = await UpsertChatThread({
+      ...makeThread({ name: "Renamed" }),
+      personaDocumentIds: ["foreign-doc"],
+      subAgentIds: ["foreign-agent"],
+    });
+    expect(result.status).toBe("OK");
+    if (result.status === "OK") expectNoAgentIdLists(result.response);
+    const written = historyContainer.items.upsert.mock.calls[0][0];
+    expect(written.name).toBe("Renamed");
+    expect(written.personaDocumentIds).toEqual(["doc-1", "doc-2"]);
+    expect(written.subAgentIds).toEqual(["sub-1"]);
+  });
+
+  it("AddAttachedFile of a known file returns the thread without lists", async () => {
+    historyItems = [
+      { ...legacyRowWithoutAgentId(), attachedFiles: [{ id: "f1", name: "a", type: "search-indexed" }] },
+    ];
+    const result = await AddAttachedFile("t1", { id: "f1", name: "a", type: "search-indexed" });
+    expect(result.status).toBe("OK");
+    if (result.status === "OK") expectNoAgentIdLists(result.response);
+  });
+
   it("a soft delete writes the row without them", async () => {
     historyItems = [legacyRow()];
     // No messages and no documents: the only write is the thread row.

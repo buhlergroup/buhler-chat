@@ -25,8 +25,13 @@ vi.mock("@/features/auth-page/helpers", () => ({
 const mockEnsureThread = vi.fn();
 const mockUpdateThreadUsage = vi.fn(async () => ({ status: "OK" }));
 vi.mock("../../chat-thread-service", () => ({
-  EnsureChatThreadOperation: (...a: unknown[]) => mockEnsureThread(...a),
   UpdateChatThreadUsage: (...a: unknown[]) => mockUpdateThreadUsage(...a),
+}));
+// The stored row (legacy lists included) is read through chat-thread-read;
+// legacyThreadAgentIdLists stays the real function.
+vi.mock("../../chat-thread-read", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../../chat-thread-read")>()),
+  ensureChatThreadRow: (...a: unknown[]) => mockEnsureThread(...a),
 }));
 
 // ── Agent access (persona-access.ts) ─────────────────────────────────────────
@@ -352,7 +357,7 @@ describe("loadThreadContext — thread started from an agent", () => {
     expect(ctx.subAgentIds).toEqual([]);
   });
 
-  it("a thread whose agent is gone, or without an agent, ignores the lists of an older row", async () => {
+  it("a thread whose agent is gone ignores the lists stored on its row", async () => {
     const thread = {
       ...makeThread(),
       personaId: "agent-deleted",
@@ -368,6 +373,29 @@ describe("loadThreadContext — thread started from an agent", () => {
     expect(ctx.personaDocumentIds).toEqual([]);
     expect(ctx.subAgentIds).toBeUndefined();
     expect(ctx.documentHintText).toBeUndefined();
+  });
+
+  it("a legacy thread (no agent id) keeps using the lists stored on its row", async () => {
+    // Started from an agent before threads stored the agent id: the row's
+    // lists are the only source of the agent's documents and sub-agents.
+    const row = {
+      ...makeThread(),
+      personaDocumentIds: ["legacy-doc-1", "legacy-doc-2"],
+      subAgentIds: ["legacy-sub"],
+    } as ChatThreadModel;
+    mockEnsureThread.mockResolvedValue({ status: "OK", response: row });
+    mockFindHistory.mockResolvedValue({ status: "OK", response: [] });
+    mockResolveThreadAgent.mockClear();
+
+    const ctx = await loadThreadContext(makeUserPrompt());
+
+    expect(mockResolveThreadAgent).toHaveBeenCalledWith(undefined);
+    expect(ctx.personaDocumentIds).toEqual(["legacy-doc-1", "legacy-doc-2"]);
+    expect(ctx.subAgentIds).toEqual(["legacy-sub"]);
+    expect(ctx.documentHintText).toContain("persona-linked document(s)");
+    // The thread the route holds carries no lists.
+    expect(ctx.thread).not.toHaveProperty("personaDocumentIds");
+    expect(ctx.thread).not.toHaveProperty("subAgentIds");
   });
 });
 

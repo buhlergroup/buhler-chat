@@ -204,9 +204,10 @@ export type ThreadAgent =
  * When allowed, `persona` is the agent's current row (server only): the chat
  * route takes the agent's Search file ids and sub-agent ids from it, because
  * the thread stores no copy of them. One lookup serves both the access check
- * and the lists. A thread without an agent, or whose agent was deleted,
- * continues with `persona` undefined: it keeps its instructions snapshot, and
- * has no agent files and no configured sub-agents.
+ * and the lists. A thread whose agent was deleted continues with `persona`
+ * undefined: it keeps its instructions snapshot, and has no agent files and
+ * no configured sub-agents. A legacy thread without an agent id continues
+ * too; the chat turn uses the lists stored on its row (chat-thread-read.ts).
  */
 export const resolveThreadAgent = async (
   personaId: string | undefined
