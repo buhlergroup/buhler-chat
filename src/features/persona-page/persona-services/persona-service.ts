@@ -514,7 +514,11 @@ export const CreatePersonaChat = async (
               contentType,
               bytes: buffer,
             });
-            if (uploadResult.status === "OK" && doc.sha256 !== uploadResult.response.sha256) {
+            if (
+              uploadResult.status === "OK" &&
+              uploadResult.response.sha256 &&
+              doc.sha256 !== uploadResult.response.sha256
+            ) {
               await recordCodeDocumentHash(doc, uploadResult.response.sha256);
             }
             

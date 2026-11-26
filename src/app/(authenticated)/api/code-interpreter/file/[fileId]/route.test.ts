@@ -7,8 +7,10 @@ vi.mock("@/features/chat-page/chat-services/code-interpreter-service", () => ({
 }));
 
 const mockFindFile = vi.fn();
+const mockCountThreads = vi.fn(async () => 1);
 vi.mock("@/features/chat-page/chat-services/code-interpreter-file-access", () => ({
   findCodeInterpreterFileOfCurrentUser: (...a: unknown[]) => mockFindFile(...a),
+  countThreadsWithCodeInterpreterFile: (...a: unknown[]) => mockCountThreads(...(a as [])),
   mayDeleteCodeInterpreterFile: (file: { source?: string }) => file.source === "upload",
 }));
 
@@ -208,6 +210,18 @@ describe("/api/code-interpreter/file/[fileId] route", () => {
     expect(res.status).toBe(200);
     const body = JSON.parse(await res.text());
     expect(body).toEqual({ success: true });
+  });
+
+  // The same upload attached to two threads (content store): the OpenAI
+  // file stays until the last thread lets go of it.
+  it("DELETE keeps a file another thread of the user still lists", async () => {
+    mockCountThreads.mockResolvedValueOnce(2);
+    mockedDelete.mockResolvedValue({ status: "OK", response: {} });
+    const req = makeDeleteRequest("file123");
+    const res = await DELETE(req, { params: Promise.resolve({ fileId: "file123" }) });
+    expect(res.status).toBe(200);
+    expect(JSON.parse(await res.text())).toEqual({ success: true });
+    expect(mockedDelete).not.toHaveBeenCalled();
   });
 
   // api.unit.ci-file.008 — DELETE 401 when no session

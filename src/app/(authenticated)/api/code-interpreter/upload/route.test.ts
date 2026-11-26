@@ -1,7 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 
 vi.mock("@/features/chat-page/chat-services/code-interpreter-service", () => ({
-  UploadFileForCodeInterpreter: vi.fn(),
+  UploadFileForCodeInterpreterOnce: vi.fn(),
   DeleteFileFromCodeInterpreter: vi.fn(async () => ({ status: "OK", response: true })),
 }));
 
@@ -17,6 +17,7 @@ vi.mock("@/features/chat-page/chat-services/code-interpreter-file-access", () =>
 
 vi.mock("@/features/auth-page/helpers", () => ({
   getCurrentUser: vi.fn(),
+  userHashedId: vi.fn(async () => "user-hash"),
 }));
 
 vi.mock("@/features/common/services/logger", () => ({
@@ -27,12 +28,12 @@ vi.mock("@/features/common/services/logger", () => ({
 
 import {
   DeleteFileFromCodeInterpreter,
-  UploadFileForCodeInterpreter,
+  UploadFileForCodeInterpreterOnce,
 } from "@/features/chat-page/chat-services/code-interpreter-service";
 import { getCurrentUser } from "@/features/auth-page/helpers";
 import { POST } from "./route";
 
-const mockedUpload = UploadFileForCodeInterpreter as ReturnType<typeof vi.fn>;
+const mockedUpload = UploadFileForCodeInterpreterOnce as ReturnType<typeof vi.fn>;
 const mockedGetCurrentUser = getCurrentUser as ReturnType<typeof vi.fn>;
 
 const defaultUser = {
@@ -78,11 +79,20 @@ describe("/api/code-interpreter/upload route", () => {
     const csv = () => new File(["a,b;1,2"], "data.csv", { type: "text/csv" });
 
     it("records the uploaded file on the given thread", async () => {
-      mockedUpload.mockResolvedValue({ status: "OK", response: { id: "file_abc", name: "data.csv" } });
+      mockedUpload.mockResolvedValue({ status: "OK", response: { id: "file_abc", name: "data.csv", sha256: "h".repeat(64), uploaded: true } });
       const res = await POST(buildRequest(csv()));
       expect(res.status).toBe(200);
       expect(mockFindThread).toHaveBeenCalledWith("thread-1");
-      expect(mockRecordUpload).toHaveBeenCalledWith("thread-1", { id: "file_abc", name: "data.csv" });
+      expect(mockRecordUpload).toHaveBeenCalledWith("thread-1", {
+        id: "file_abc",
+        name: "data.csv",
+        sha256: "h".repeat(64),
+      });
+      // Scope of the content store: the caller's hashed id, bytes from the form.
+      const [scope, sent] = mockedUpload.mock.calls[0];
+      expect(scope).toBe("user-hash");
+      expect(sent.name).toBe("data.csv");
+      expect(Buffer.isBuffer(sent.bytes)).toBe(true);
     });
 
     it("refuses an upload without a thread", async () => {
@@ -100,11 +110,22 @@ describe("/api/code-interpreter/upload route", () => {
     });
 
     it("removes the uploaded file when it cannot be recorded", async () => {
-      mockedUpload.mockResolvedValue({ status: "OK", response: { id: "file_abc", name: "data.csv" } });
+      mockedUpload.mockResolvedValue({ status: "OK", response: { id: "file_abc", name: "data.csv", sha256: "h".repeat(64), uploaded: true } });
       mockRecordUpload.mockResolvedValue(false);
       const res = await POST(buildRequest(csv()));
       expect(res.status).toBe(500);
       expect(DeleteFileFromCodeInterpreter).toHaveBeenCalledWith("file_abc");
+    });
+
+    it("keeps a reused file (other threads may use it) when it cannot be recorded", async () => {
+      mockedUpload.mockResolvedValue({
+        status: "OK",
+        response: { id: "file_abc", name: "data.csv", sha256: "h".repeat(64), uploaded: false },
+      });
+      mockRecordUpload.mockResolvedValue(false);
+      const res = await POST(buildRequest(csv()));
+      expect(res.status).toBe(500);
+      expect(DeleteFileFromCodeInterpreter).not.toHaveBeenCalled();
     });
   });
 
@@ -142,7 +163,7 @@ describe("/api/code-interpreter/upload route", () => {
   it("happy path returns 200 with {id, name}", async () => {
     mockedUpload.mockResolvedValue({
       status: "OK",
-      response: { id: "file_abc", name: "data.csv" },
+      response: { id: "file_abc", name: "data.csv", sha256: "h".repeat(64), uploaded: true },
     });
     const file = new File(["col1,col2\n1,2"], "data.csv", { type: "text/csv" });
     const req = buildRequest(file);
@@ -153,7 +174,7 @@ describe("/api/code-interpreter/upload route", () => {
   });
 
   // api.unit.ci-upload.005
-  it("returns 500 on UploadFileForCodeInterpreter ERROR", async () => {
+  it("returns 500 on UploadFileForCodeInterpreterOnce ERROR", async () => {
     mockedUpload.mockResolvedValue({
       status: "ERROR",
       errors: [{ message: "upload failed" }],

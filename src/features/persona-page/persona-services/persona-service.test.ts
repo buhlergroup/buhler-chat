@@ -61,6 +61,7 @@ vi.mock("@/features/persona-page/persona-services/persona-document-access", () =
 }));
 vi.mock("@/features/persona-page/persona-services/persona-ci-documents-store", () => ({
   CODE_FILE_NOT_VISIBLE: "CODE_FILE_NOT_VISIBLE",
+  recordCodeDocumentHash: vi.fn(async () => undefined),
   downloadCodeInterpreterFile: vi.fn(async () => ({
     status: "OK",
     response: { buffer: Buffer.from("data"), name: "file.csv", contentType: "text/csv" },
@@ -72,6 +73,10 @@ vi.mock("@/features/chat-page/chat-services/code-interpreter-service", () => ({
   UploadFileForCodeInterpreter: vi.fn(async () => ({
     status: "OK",
     response: { id: "openai-file-1", name: "file.csv" },
+  })),
+  UploadFileForCodeInterpreterOnce: vi.fn(async () => ({
+    status: "OK",
+    response: { id: "openai-file-1", name: "file.csv", sha256: "a".repeat(64), uploaded: true },
   })),
 }));
 
@@ -119,7 +124,7 @@ import { addSearchDocument } from "./persona-documents-store";
 import { personaCodeDocumentsByIds as PersonaCIDocumentsByIds } from "./persona-document-access";
 import { downloadCodeInterpreterFile } from "./persona-ci-documents-store";
 
-import { UploadFileForCodeInterpreter } from "@/features/chat-page/chat-services/code-interpreter-service";
+import { UploadFileForCodeInterpreterOnce } from "@/features/chat-page/chat-services/code-interpreter-service";
 import { createChatThreadWithServerFiles } from "@/features/chat-page/chat-services/code-interpreter-file-access";
 import { AccessGroupById, UserAccessGroups } from "./access-group-service";
 import { agentFilesNeedCodeInterpreter } from "./agent-files/agent-file-requirements";
@@ -170,7 +175,7 @@ beforeEach(() => {
     status: "OK",
     response: { buffer: Buffer.from("data"), name: "file.csv", contentType: "text/csv" },
   });
-  vi.mocked(UploadFileForCodeInterpreter).mockResolvedValue({
+  vi.mocked(UploadFileForCodeInterpreterOnce).mockResolvedValue({
     status: "OK",
     response: { id: "openai-file-1", name: "file.csv" },
   });
@@ -876,7 +881,7 @@ describe("persona-service.ts", () => {
         response: { buffer: Buffer.from("data"), name: "upload-fails.csv", contentType: "text/csv" },
       })
       .mockRejectedValueOnce(new Error("boom"));
-    vi.mocked(UploadFileForCodeInterpreter)
+    vi.mocked(UploadFileForCodeInterpreterOnce)
       .mockResolvedValueOnce({ status: "OK", response: { id: "openai-file-1", name: "ok.csv" } })
       .mockResolvedValueOnce({ status: "ERROR", errors: [{ message: "upload failed" }] });
 
