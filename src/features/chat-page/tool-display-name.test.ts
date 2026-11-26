@@ -39,6 +39,10 @@ describe("chat-page.unit.tool-display-name — stripExtensionKeyPrefix", () => {
     );
   });
 
+  it("keeps app tool names that have the key shape (generate_image)", () => {
+    expect(stripExtensionKeyPrefix("generate_image")).toBe("generate_image");
+  });
+
   it("is idempotent on an already-stripped name", () => {
     expect(stripExtensionKeyPrefix("aisearch")).toBe("aisearch");
   });

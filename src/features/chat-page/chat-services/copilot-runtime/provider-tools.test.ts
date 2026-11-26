@@ -11,6 +11,7 @@ import {
   type ProviderClients,
   type ProviderToolToggles,
 } from "./provider-tools";
+import { stripExtensionKeyPrefix } from "../../tool-display-name";
 
 const PNG_BASE64 = Buffer.from("\x89PNG fake image bytes").toString("base64");
 const ALL: ProviderToolToggles = { imageGeneration: true, webSearch: true, codeInterpreter: true };
@@ -84,6 +85,12 @@ describe("providerTools", () => {
       "web_search",
       "run_code",
     ]);
+  });
+});
+
+describe("provider tool names in the chat UI", () => {
+  it("are shown as they are (not read as an extension key)", () => {
+    for (const name of Object.keys(setup(ALL).tools)) expect(stripExtensionKeyPrefix(name)).toBe(name);
   });
 });
 

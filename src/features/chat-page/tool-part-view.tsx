@@ -329,6 +329,8 @@ export function renderToolOutput(output: unknown, toolName?: string): ReactNode 
  * "Sub-agent <name>".
  */
 export function toolPartLabel(toolName: string, input: unknown): string | undefined {
+  // The Copilot path image tool reads as on the AI SDK path (image_generation).
+  if (toolName === "generate_image") return "Image generation";
   if (toolName !== "sub_agent") return undefined;
   const agent = (input as { agent?: unknown } | null | undefined)?.agent;
   return typeof agent === "string" && agent.length > 0 ? `Sub-agent ${agent}` : "Sub-agent";
