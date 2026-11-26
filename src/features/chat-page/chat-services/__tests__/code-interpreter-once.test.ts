@@ -64,3 +64,74 @@ describe("chat-page.unit.ci-upload-once — buffer limit", () => {
     expect(blobs().stats.writes).toBe(1);
   });
 });
+
+describe("chat-page.unit.ci-upload-once — content store failure falls back", () => {
+  const small = { name: "s.csv", contentType: "text/csv", bytes: Buffer.from("a,b\n") };
+
+  async function withStore(patch: Record<string, unknown>) {
+    const { contentStore } = await import("@/features/common/services/content-store");
+    const store = contentStore() as unknown as Record<string, unknown>;
+    const originals: Record<string, unknown> = {};
+    for (const k of Object.keys(patch)) originals[k] = store[k];
+    Object.assign(store, patch);
+    return () => Object.assign(store, originals);
+  }
+
+  it("put throws: the bytes are uploaded directly and OK is returned without sha256", async () => {
+    const restore = await withStore({ put: async () => { throw new Error("store down"); } });
+    try {
+      const res = await UploadFileForCodeInterpreterOnce(owner, small);
+      expect(res.status).toBe("OK");
+      expect(res.status === "OK" && res.response).toMatchObject({ name: "s.csv", uploaded: true });
+      expect(res.status === "OK" && res.response.sha256).toBeUndefined();
+      expect(filesCreate).toHaveBeenCalledTimes(1);
+    } finally {
+      restore();
+    }
+  });
+
+  it("putBlob throws: the Blob is uploaded directly (not buffered)", async () => {
+    const restore = await withStore({ putBlob: async () => { throw new Error("store down"); } });
+    try {
+      const res = await UploadFileForCodeInterpreterOnce(owner, {
+        name: "b.csv",
+        contentType: "text/csv",
+        blob: new Blob(["a,b\n"]),
+      });
+      expect(res.status).toBe("OK");
+      expect(res.status === "OK" && res.response.sha256).toBeUndefined();
+      expect(filesCreate).toHaveBeenCalledTimes(1);
+    } finally {
+      restore();
+    }
+  });
+
+  it("openAiFile throws: same fallback", async () => {
+    const restore = await withStore({ openAiFile: async () => { throw new Error("blob metadata"); } });
+    try {
+      const res = await UploadFileForCodeInterpreterOnce(owner, small);
+      expect(res.status).toBe("OK");
+      expect(res.status === "OK" && res.response).toMatchObject({ uploaded: true });
+      expect(filesCreate).toHaveBeenCalledTimes(1);
+    } finally {
+      restore();
+    }
+  });
+
+  it("the direct upload throws too: ERROR", async () => {
+    const restore = await withStore({ put: async () => { throw new Error("store down"); } });
+    filesCreate.mockRejectedValueOnce(new Error("openai down"));
+    try {
+      const res = await UploadFileForCodeInterpreterOnce(owner, small);
+      expect(res.status).toBe("ERROR");
+    } finally {
+      restore();
+    }
+  });
+
+  it("normal path: the store is used and sha256 is returned", async () => {
+    const res = await UploadFileForCodeInterpreterOnce(owner, small);
+    expect(res.status === "OK" && res.response.sha256).toMatch(/^[0-9a-f]{64}$/);
+    expect(blobs().stats.writes).toBe(1);
+  });
+});
