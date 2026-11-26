@@ -227,7 +227,7 @@ function makeTurns(count: number, tokensPerTurn: number) {
 // ---------------------------------------------------------------------------
 
 describe("loadThreadContext — fresh thread (no history)", () => {
-  it("creates thread via EnsureChatThreadOperation and returns history containing the new user turn", async () => {
+  it("reads the thread row (ensureChatThreadRow) and returns history containing the new user turn", async () => {
     const thread = makeThread();
     mockEnsureThread.mockResolvedValue({ status: "OK", response: thread });
     mockFindHistory.mockResolvedValue({ status: "OK", response: [] });
