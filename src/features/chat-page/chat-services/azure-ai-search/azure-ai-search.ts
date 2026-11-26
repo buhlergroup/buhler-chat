@@ -14,7 +14,7 @@ import { OpenAIEmbeddingInstance } from "@/features/common/services/openai";
 import { uniqueId } from "@/features/common/util";
 import { AzureKeyCredential, SearchClient, SearchIndex } from "@azure/search-documents";
 import { logDebug, logError } from "@/features/common/services/logger";
-import { odataEq } from "@/features/common/odata-filter";
+import { odataEq, odataSearchIn } from "@/features/common/odata-filter";
 
 export interface AzureSearchDocumentIndex {
   id: string;
@@ -302,15 +302,23 @@ export const ExtensionSimilaritySearch = async (props: {
   }
 };
 
+/**
+ * Indexes text chunks. `user` of each chunk is the current user, or
+ * `ownerUserId` when given: the chunks of an agent's Search file carry the
+ * agent owner's id, like the file's row (DeleteSearchDocumentByPersonaDocumentId
+ * finds them by it).
+ */
 export const IndexDocuments = async (
   docs: string[],
   fileName?: string,
   chatThreadId?: string,
-  personaDocumentId?: string
+  personaDocumentId?: string,
+  ownerUserId?: string
 ): Promise<Array<ServerActionResponse<boolean>>> => {
   const response: ServerActionResponse<boolean>[] = [];
 
   try {
+    const user = ownerUserId ?? (await userHashedId());
     logDebug("IndexDocuments starting", {
       docCount: docs.length,
       fileName,
@@ -324,7 +332,7 @@ export const IndexDocuments = async (
       const docToAdd: AzureSearchDocumentIndex = {
         id: uniqueId(),
         chatThreadId: chatThreadId || null,
-        user: await userHashedId(),
+        user,
         pageContent: doc,
         metadata: fileName || null,
         embedding: [],
@@ -462,50 +470,58 @@ export const DeleteDocumentsOfChatThread = async (
   }
 };
 
+// Largest page of one search request (Azure AI Search allows up to 1000),
+// and the most rounds of one delete (100 000 chunks).
+const DELETE_PAGE_SIZE = 1000;
+const MAX_DELETE_ROUNDS = 100;
+
+/**
+ * Deletes every index chunk of a persona document whose `user` is
+ * `ownerUserId` (default: the current user). Round by round: read one page
+ * of chunk ids, delete them, and read the next page with the ids deleted so
+ * far excluded. That needs no sort order (the key field need not be
+ * sortable) and no `skip` over a result that changes, and a chunk the index
+ * still shows for a moment after its delete is not read twice. No chunk left
+ * is OK: nothing was to delete.
+ */
 export const DeleteSearchDocumentByPersonaDocumentId = async (
-  personaDocumentId: string
+  personaDocumentId: string,
+  ownerUserId?: string
 ): Promise<ServerActionResponse<boolean>> => {
   try {
-    // Find the document using personaDocumentId
-    const documentResponse = await SimpleSearch(
-      undefined,
-      `${odataEq("personaDocumentId", personaDocumentId)} and ${odataEq("user", await userHashedId())}`
-    );
+    const base = `${odataEq("personaDocumentId", personaDocumentId)} and ${odataEq(
+      "user",
+      ownerUserId ?? (await userHashedId())
+    )}`;
+    const instance = AzureAISearchInstance<AzureSearchDocumentIndex>();
+    const deleted = new Set<string>();
+    const failed: { message: string }[] = [];
 
-    if (
-      documentResponse.status === "OK" &&
-      documentResponse.response.length > 0
-    ) {
-      const documents = documentResponse.response.map((r) => r.document);
-      const instance = AzureAISearchInstance();
-
-      const deletedResponse = await instance.deleteDocuments(documents);
-
-      if (deletedResponse.results.every((r) => r.succeeded)) {
-        return {
-          status: "OK",
-          response: true,
-        };
-      } else {
-        return {
-          status: "ERROR",
-          errors: deletedResponse.results
-            .filter((r) => !r.succeeded)
-            .map((r) => ({
-              message: r.errorMessage || "Unknown error",
-            })),
-        };
+    for (let round = 0; round < MAX_DELETE_ROUNDS; round++) {
+      const exclude = odataSearchIn("id", [...deleted]);
+      const page = await instance.search(undefined, {
+        filter: exclude ? `${base} and not ${exclude}` : base,
+        top: DELETE_PAGE_SIZE,
+        select: ["id"],
+      });
+      const ids: string[] = [];
+      for await (const result of page.results) {
+        const id = result.document.id;
+        if (!deleted.has(id)) ids.push(id);
       }
-    } else {
-      return {
-        status: "ERROR",
-        errors: [
-          {
-            message: `No document found with personaDocumentId: ${personaDocumentId}`,
-          },
-        ],
-      };
+      if (ids.length === 0) break;
+      for (const id of ids) deleted.add(id);
+
+      const deletedResponse = await instance.deleteDocuments("id", ids);
+      for (const r of deletedResponse.results) {
+        if (!r.succeeded) failed.push({ message: r.errorMessage || "Unknown error" });
+      }
+      if (ids.length < DELETE_PAGE_SIZE) break;
     }
+
+    return failed.length === 0
+      ? { status: "OK", response: true }
+      : { status: "ERROR", errors: failed };
   } catch (e) {
     return {
       status: "ERROR",

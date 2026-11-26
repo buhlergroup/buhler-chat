@@ -192,20 +192,33 @@ export async function loadUsableSkills(personaId: string | undefined): Promise<P
   return (await loadUsableSkillsWithStatus(personaId)).skills;
 }
 
-/** Deletes every skill (rows and blobs) of an agent. Best effort. */
+/**
+ * Deletes every skill (row in its own partition, blob, OpenAI file) of an
+ * agent. Best effort: a skill that fails is logged and the others still go.
+ */
 export async function deleteSkillsForPersona(personaId: string): Promise<void> {
+  let skills: PersonaSkillModel[];
   try {
-    const skills = await querySkillsByPersonaId(personaId);
-    for (const skill of skills) {
-      await HistoryContainer().item(skill.id, skill.userId).delete();
-      await DeleteBlob(skillBlobContainer(), skill.blobName);
-      await deleteSkillOpenAiFile(skill.openAiFileId);
-    }
+    skills = await querySkillsByPersonaId(personaId);
   } catch (error) {
     logError("agent skills: cleanup after agent delete failed", {
       personaId,
       error: error instanceof Error ? error.message : String(error),
     });
+    return;
+  }
+  for (const skill of skills) {
+    try {
+      await HistoryContainer().item(skill.id, skill.userId).delete();
+      await DeleteBlob(skillBlobContainer(), skill.blobName);
+      await deleteSkillOpenAiFile(skill.openAiFileId);
+    } catch (error) {
+      logError("agent skills: cleanup after agent delete failed", {
+        personaId,
+        skillId: skill.id,
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
   }
 }
 

@@ -8,6 +8,8 @@ const USER_HASH = hashEmail(defaultSession!.user.email);
 // ── Cosmos mock (direct module mock, bypasses singleton) ─────────────────────
 let historyItems: any[] = [];
 
+const itemReplace = vi.fn(async (doc: any, _options?: any) => ({ resource: { ...doc } }));
+
 const historyContainer = {
   items: {
     create: vi.fn(async (doc: any) => ({ resource: { ...doc } })),
@@ -17,6 +19,7 @@ const historyContainer = {
     })),
   },
   item: vi.fn((id: string, _pk?: string) => ({
+    replace: itemReplace,
     read: vi.fn(async () => ({ resource: historyItems.find((i: any) => i.id === id) })),
     delete: vi.fn(async () => {
       const idx = historyItems.findIndex((i: any) => i.id === id);
@@ -35,15 +38,29 @@ vi.mock("@/features/common/services/cosmos", () => ({
 vi.mock("@/features/auth-page/auth-api", () => ({ options: {}, authOptions: {} }));
 
 // ── persona-documents-service mock ──────────────────────────────────────────
-vi.mock("@/features/persona-page/persona-services/persona-documents-service", () => ({
-  DeletePersonaDocumentsByPersonaId: vi.fn(async () => ({ status: "OK", response: undefined })),
-  UpdateOrAddPersonaDocuments: vi.fn(async () => ({ status: "OK", response: [] })),
+vi.mock("@/features/persona-page/persona-services/persona-documents-service", () => ({}));
+// The files of a deleted agent (their own tests: agent-delete-files.test.ts).
+vi.mock("@/features/persona-page/persona-services/persona-file-rows", () => ({
+  deleteAgentFileRows: vi.fn(async () => 0),
+}));
+vi.mock("@/features/persona-page/persona-services/skills/persona-skill-store", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("./skills/persona-skill-store")>()),
+  deleteSkillsForPersona: vi.fn(async () => {}),
+}));
+vi.mock("@/features/persona-page/persona-services/sharepoint-files/sharepoint-file-store", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("./sharepoint-files/sharepoint-file-store")>()),
+  deleteFileSourcesForPersona: vi.fn(async () => {}),
+}));
+vi.mock("@/features/persona-page/persona-services/persona-documents-store", () => ({
+  addSearchDocument: vi.fn(async () => ({ status: "OK", response: "doc" })),
 }));
 
-// ── persona-ci-documents-service mock ───────────────────────────────────────
+// ── persona-ci-documents-service / -store mocks ─────────────────────────────
 vi.mock("@/features/persona-page/persona-services/persona-ci-documents-service", () => ({
   PersonaCIDocumentsByIds: vi.fn(async () => ({ status: "OK", response: [] })),
-  DownloadSharePointFile: vi.fn(async () => ({
+}));
+vi.mock("@/features/persona-page/persona-services/persona-ci-documents-store", () => ({
+  downloadCodeInterpreterFile: vi.fn(async () => ({
     status: "OK",
     response: { buffer: Buffer.from("data"), name: "file.csv", contentType: "text/csv" },
   })),
@@ -62,6 +79,11 @@ vi.mock("@/features/chat-page/chat-services/code-interpreter-file-access", () =>
   createChatThreadWithServerFiles: vi.fn(async (payload: any) => ({ ...payload })),
 }));
 
+// ── agent files: does the agent need the code interpreter ────────────────────
+vi.mock("@/features/persona-page/persona-services/agent-files/agent-file-requirements", () => ({
+  agentFilesNeedCodeInterpreter: vi.fn(async () => false),
+}));
+
 // ── access-group-service mock ────────────────────────────────────────────────
 vi.mock("@/features/persona-page/persona-services/access-group-service", () => ({
   AccessGroupById: vi.fn(async () => ({ status: "OK", response: { id: "g1", name: "G", description: "" } })),
@@ -73,6 +95,7 @@ vi.mock("@/features/common/services/logger", () => ({
   logInfo: vi.fn(),
   logError: vi.fn(),
   logDebug: vi.fn(),
+  logWarn: vi.fn(),
 }));
 
 // ── imports after mocks ──────────────────────────────────────────────────────
@@ -86,19 +109,19 @@ import {
   CreatePersonaChat,
 } from "./persona-service";
 
-import {
-  DeletePersonaDocumentsByPersonaId,
-  UpdateOrAddPersonaDocuments,
-} from "./persona-documents-service";
+import { deleteAgentFileRows } from "./persona-file-rows";
+import { deleteSkillsForPersona } from "./skills/persona-skill-store";
+import { deleteFileSourcesForPersona } from "./sharepoint-files/sharepoint-file-store";
+import { etagRetryClock } from "./persona-row";
+import { addSearchDocument } from "./persona-documents-store";
 
-import {
-  PersonaCIDocumentsByIds,
-  DownloadSharePointFile,
-} from "./persona-ci-documents-service";
+import { PersonaCIDocumentsByIds } from "./persona-ci-documents-service";
+import { downloadCodeInterpreterFile } from "./persona-ci-documents-store";
 
 import { UploadFileForCodeInterpreter } from "@/features/chat-page/chat-services/code-interpreter-service";
 import { createChatThreadWithServerFiles } from "@/features/chat-page/chat-services/code-interpreter-file-access";
 import { AccessGroupById, UserAccessGroups } from "./access-group-service";
+import { agentFilesNeedCodeInterpreter } from "./agent-files/agent-file-requirements";
 
 // ── helpers ──────────────────────────────────────────────────────────────────
 const validPersonaInput = () => ({
@@ -137,12 +160,12 @@ beforeEach(() => {
   setSession(defaultSession);
 
   // restore default mock implementations after clearAllMocks
-  vi.mocked(UpdateOrAddPersonaDocuments).mockResolvedValue({ status: "OK", response: [] });
-  vi.mocked(DeletePersonaDocumentsByPersonaId).mockResolvedValue({ status: "OK", response: undefined });
+  vi.mocked(deleteAgentFileRows).mockResolvedValue(0);
+  vi.spyOn(etagRetryClock, "sleep").mockResolvedValue(undefined);
   vi.mocked(AccessGroupById).mockResolvedValue({ status: "OK", response: { id: "g1", name: "G", description: "" } });
   vi.mocked(UserAccessGroups).mockResolvedValue({ status: "OK", response: [] });
   vi.mocked(PersonaCIDocumentsByIds).mockResolvedValue({ status: "OK", response: [] });
-  vi.mocked(DownloadSharePointFile).mockResolvedValue({
+  vi.mocked(downloadCodeInterpreterFile).mockResolvedValue({
     status: "OK",
     response: { buffer: Buffer.from("data"), name: "file.csv", contentType: "text/csv" },
   });
@@ -155,6 +178,8 @@ beforeEach(() => {
   }));
   historyContainer.items.create.mockImplementation(async (doc: any) => ({ resource: { ...doc } }));
   historyContainer.items.upsert.mockImplementation(async (doc: any) => ({ resource: { ...doc } }));
+  itemReplace.mockImplementation(async (doc: any) => ({ resource: { ...doc } }));
+  vi.mocked(agentFilesNeedCodeInterpreter).mockResolvedValue(false);
   historyContainer.items.query.mockImplementation((_q: any) => ({
     fetchAll: async () => ({ resources: historyItems }),
   }));
@@ -166,7 +191,7 @@ describe("persona-service.ts", () => {
   // 001 – CreatePersona lets any user publish; fresh publish starts as community
   it("001 CreatePersona lets any user publish as community", async () => {
     await setSession(defaultSession);
-    const result = await CreatePersona({ ...validPersonaInput(), isPublished: true }, []);
+    const result = await CreatePersona({ ...validPersonaInput(), isPublished: true });
     expect(result.status).toBe("OK");
     if (result.status === "OK") {
       expect(result.response.isPublished).toBe(true);
@@ -182,7 +207,7 @@ describe("persona-service.ts", () => {
   // 002 – CreatePersona without publish stores no trust metadata
   it("002 CreatePersona unpublished has no trustLevel/publishedAt", async () => {
     await setSession(defaultSession);
-    const result = await CreatePersona(validPersonaInput(), []);
+    const result = await CreatePersona(validPersonaInput());
     expect(result.status).toBe("OK");
     if (result.status === "OK") {
       expect(result.response.isPublished).toBe(false);
@@ -195,26 +220,25 @@ describe("persona-service.ts", () => {
   it("003 CreatePersona returns ERROR with Zod messages on invalid input", async () => {
     await setSession(defaultSession);
     const result = await CreatePersona(
-      { name: "", description: "", personaMessage: "", isPublished: false, extensionIds: [] },
-      []
-    );
+      { name: "", description: "", personaMessage: "", isPublished: false, extensionIds: [] });
     expect(result.status).toBe("ERROR");
     if (result.status === "ERROR") {
       expect(result.errors.length).toBeGreaterThan(0);
     }
   });
 
-  // 004 – CreatePersona propagates persona-documents ERROR
-  it("004 CreatePersona propagates persona-documents ERROR", async () => {
-    vi.mocked(UpdateOrAddPersonaDocuments).mockResolvedValueOnce({
-      status: "ERROR",
-      errors: [{ message: "sp fail" }],
-    });
-    const result = await CreatePersona(validPersonaInput(), []);
-    expect(result.status).toBe("ERROR");
-    if (result.status === "ERROR") {
-      expect(result.errors[0].message).toBe("sp fail");
-    }
+  // 004 – CreatePersona starts without files, whatever the client sends
+  it("004 CreatePersona starts with empty file lists", async () => {
+    const result = await CreatePersona({
+      ...validPersonaInput(),
+      personaDocumentIds: ["client-doc"],
+      codeInterpreterDocumentIds: ["client-ci"],
+    } as any);
+    expect(result.status).toBe("OK");
+    const saved = historyContainer.items.create.mock.calls[0][0];
+    expect(saved.personaDocumentIds).toEqual([]);
+    expect(saved.codeInterpreterDocumentIds).toEqual([]);
+    expect(addSearchDocument).not.toHaveBeenCalled();
   });
 
   // 005 – FindPersonaByID returns NOT_FOUND when no rows
@@ -435,12 +459,96 @@ describe("persona-service.ts", () => {
     }
   });
 
-  // 009c – UpsertPersona removes only documents of the stored persona
-  it("009c UpsertPersona computes removals from the stored document ids, not from the input", async () => {
+  // 009c – the form save keeps the stored file lists (decision: only the
+  // file actions change them)
+  it("009c UpsertPersona keeps the stored file ids and ignores the client's", async () => {
     await setSession(defaultSession);
-    const p = seedPersona({ id: "p-docs", personaDocumentIds: ["own-doc"] });
-    await UpsertPersona({ ...p, personaDocumentIds: ["foreign-doc"] }, []);
-    expect(UpdateOrAddPersonaDocuments).toHaveBeenCalledWith([], ["own-doc"]);
+    const p = seedPersona({
+      id: "p-docs",
+      personaDocumentIds: ["own-doc"],
+      codeInterpreterDocumentIds: ["own-ci"],
+    });
+    const result = await UpsertPersona({
+      ...p,
+      personaDocumentIds: [],
+      codeInterpreterDocumentIds: ["foreign-ci"],
+    });
+    expect(result.status).toBe("OK");
+    const saved = itemReplace.mock.calls[0][0];
+    expect(saved.personaDocumentIds).toEqual(["own-doc"]);
+    expect(saved.codeInterpreterDocumentIds).toEqual(["own-ci"]);
+    expect(addSearchDocument).not.toHaveBeenCalled();
+  });
+
+  it("009d UpsertPersona writes with the etag and, on a conflict, re-reads so a file added meanwhile stays", async () => {
+    await setSession(defaultSession);
+    const p = seedPersona({ id: "p-race", personaDocumentIds: ["doc-1"], _etag: "v1" });
+    // A file action adds doc-2 between the read and the write of the save.
+    itemReplace.mockImplementationOnce(async () => {
+      const row = historyItems.find((i: any) => i.id === "p-race");
+      row.personaDocumentIds = ["doc-1", "doc-2"];
+      row._etag = "v2";
+      throw Object.assign(new Error("precondition failed"), { code: 412 });
+    });
+    const result = await UpsertPersona({ ...p, name: "Renamed", personaDocumentIds: ["doc-1"] });
+    expect(result.status).toBe("OK");
+    expect(itemReplace).toHaveBeenCalledTimes(2);
+    expect(itemReplace.mock.calls[0][1]).toEqual({
+      accessCondition: { type: "IfMatch", condition: "v1" },
+    });
+    expect(itemReplace.mock.calls[1][1]).toEqual({
+      accessCondition: { type: "IfMatch", condition: "v2" },
+    });
+    const saved = itemReplace.mock.calls[1][0];
+    expect(saved.name).toBe("Renamed");
+    expect(saved.personaDocumentIds).toEqual(["doc-1", "doc-2"]);
+  });
+
+  it("009d2 UpsertPersona retries up to 10 times with a short random wait (the shared rule)", async () => {
+    await setSession(defaultSession);
+    const p = seedPersona({ id: "p-busy", _etag: "v1" });
+    const conflict = () => Object.assign(new Error("precondition failed"), { code: 412 });
+    for (let i = 0; i < 9; i++) itemReplace.mockRejectedValueOnce(conflict());
+    const result = await UpsertPersona({ ...p, name: "Renamed" });
+    expect(result.status).toBe("OK");
+    expect(itemReplace).toHaveBeenCalledTimes(10);
+    const waits = vi.mocked(etagRetryClock.sleep).mock.calls.map((c) => c[0]);
+    expect(waits).toHaveLength(9);
+    expect(waits.every((ms) => ms >= 20 && ms <= 200)).toBe(true);
+  });
+
+  it("009d3 UpsertPersona gives up after 10 conflicts", async () => {
+    await setSession(defaultSession);
+    const p = seedPersona({ id: "p-busy2", _etag: "v1" });
+    itemReplace.mockRejectedValue(Object.assign(new Error("precondition failed"), { code: 412 }));
+    const result = await UpsertPersona({ ...p, name: "Renamed" });
+    itemReplace.mockReset();
+    itemReplace.mockImplementation(async (doc: any) => ({ resource: { ...doc } }));
+    expect(result.status).toBe("ERROR");
+    expect(result.status === "ERROR" && result.errors[0].message).toMatch(/changed while saving/);
+  });
+
+  it("009e UpsertPersona keeps the code interpreter on while the agent has files that need it", async () => {
+    await setSession(defaultSession);
+    const p = seedPersona({ id: "p-ci", codeInterpreterDocumentIds: ["ci-1"] });
+    vi.mocked(agentFilesNeedCodeInterpreter).mockResolvedValueOnce(true);
+    const result = await UpsertPersona({
+      ...p,
+      defaultTools: { webSearch: true, codeInterpreter: false },
+    });
+    expect(result.status).toBe("OK");
+    expect(itemReplace.mock.calls[0][0].defaultTools).toEqual({
+      webSearch: true,
+      codeInterpreter: true,
+    });
+  });
+
+  it("009f UpsertPersona keeps the client's choice when no file needs the code interpreter", async () => {
+    await setSession(defaultSession);
+    const p = seedPersona({ id: "p-noci" });
+    const result = await UpsertPersona({ ...p, defaultTools: { codeInterpreter: false } });
+    expect(result.status).toBe("OK");
+    expect(itemReplace.mock.calls[0][0].defaultTools).toEqual({ codeInterpreter: false });
   });
 
   // 010 – EnsurePersonaOperation returns OK for admin
@@ -458,8 +566,40 @@ describe("persona-service.ts", () => {
 
     const result = await DeletePersona("p-del");
     expect(result.status).toBe("OK");
-    expect(DeletePersonaDocumentsByPersonaId).toHaveBeenCalledWith("p-del");
+    expect(deleteAgentFileRows).toHaveBeenCalledWith(expect.objectContaining({ id: "p-del" }));
+    expect(deleteSkillsForPersona).toHaveBeenCalledWith("p-del");
+    expect(deleteFileSourcesForPersona).toHaveBeenCalledWith("p-del");
     expect(historyItems.find((i: any) => i.id === "p-del")).toBeUndefined();
+  });
+
+  it("011b an admin deletes another user's agent: the cleanup gets that agent with all its file ids", async () => {
+    await setSession(adminSession);
+    seedPersona({
+      id: "p-del-u",
+      userId: "user-u",
+      personaDocumentIds: ["doc-u"],
+      codeInterpreterDocumentIds: ["ci-u"],
+    });
+    const result = await DeletePersona("p-del-u");
+    expect(result.status).toBe("OK");
+    expect(deleteAgentFileRows).toHaveBeenCalledWith(
+      expect.objectContaining({
+        id: "p-del-u",
+        userId: "user-u",
+        personaDocumentIds: ["doc-u"],
+        codeInterpreterDocumentIds: ["ci-u"],
+      }),
+    );
+    expect(historyItems.find((i: any) => i.id === "p-del-u")).toBeUndefined();
+  });
+
+  it("011c a file cleanup that fails does not stop the agent delete", async () => {
+    await setSession(defaultSession);
+    seedPersona({ id: "p-del-f", personaDocumentIds: ["doc-1"] });
+    vi.mocked(deleteAgentFileRows).mockResolvedValueOnce(1);
+    const result = await DeletePersona("p-del-f");
+    expect(result.status).toBe("OK");
+    expect(historyItems.find((i: any) => i.id === "p-del-f")).toBeUndefined();
   });
 
   // 012 – UpsertPersona lets the owner publish/unpublish
@@ -467,7 +607,7 @@ describe("persona-service.ts", () => {
     await setSession(defaultSession);
     const p = seedPersona({ id: "p-upsert", isPublished: false });
 
-    const result = await UpsertPersona({ ...p, isPublished: true }, []);
+    const result = await UpsertPersona({ ...p, isPublished: true });
     expect(result.status).toBe("OK");
     if (result.status === "OK") {
       expect(result.response.isPublished).toBe(true);
@@ -485,7 +625,7 @@ describe("persona-service.ts", () => {
       publishedAt: new Date("2026-01-01"),
     });
 
-    const result = await UpsertPersona({ ...p, isPublished: false }, []);
+    const result = await UpsertPersona({ ...p, isPublished: false });
     expect(result.status).toBe("OK");
     if (result.status === "OK") {
       expect(result.response.isPublished).toBe(false);
@@ -500,7 +640,7 @@ describe("persona-service.ts", () => {
     // Legacy: published via the old admin-only gate, before trustLevel existed.
     const p = seedPersona({ id: "p-legacy", isPublished: true });
 
-    const result = await UpsertPersona({ ...p, isPublished: true }, []);
+    const result = await UpsertPersona({ ...p, isPublished: true });
     expect(result.status).toBe("OK");
     if (result.status === "OK") {
       expect(result.response.trustLevel).toBe("verified");
@@ -515,7 +655,7 @@ describe("persona-service.ts", () => {
       trustLevel: "verified",
     });
 
-    const result = await UpsertPersona({ ...p, name: "Renamed" }, []);
+    const result = await UpsertPersona({ ...p, name: "Renamed" });
     expect(result.status).toBe("OK");
     if (result.status === "OK") {
       expect(result.response.trustLevel).toBe("verified");
@@ -527,7 +667,7 @@ describe("persona-service.ts", () => {
     const created = new Date("2025-03-03T12:00:00Z");
     const p = seedPersona({ id: "p-times", createdAt: created.toISOString() });
 
-    const result = await UpsertPersona({ ...p, createdAt: created }, []);
+    const result = await UpsertPersona({ ...p, createdAt: created });
     expect(result.status).toBe("OK");
     if (result.status === "OK") {
       expect(result.response.createdAt).toEqual(created);
@@ -630,12 +770,10 @@ describe("persona-service.ts", () => {
     );
 
     const result = await UpsertPersona(
-      { ...p, extensionIds: ["e-foreign-old", "e-foreign-new", "e-own", "e-published"] },
-      []
-    );
+      { ...p, extensionIds: ["e-foreign-old", "e-foreign-new", "e-own", "e-published"] });
 
     expect(result.status).toBe("OK");
-    const saved = historyContainer.items.upsert.mock.calls[0][0];
+    const saved = itemReplace.mock.calls[0][0];
     expect(saved.extensionIds).toEqual(["e-foreign-old", "e-own", "e-published"]);
   });
 
@@ -648,9 +786,7 @@ describe("persona-service.ts", () => {
     );
 
     const result = await CreatePersona(
-      { ...validPersonaInput(), extensionIds: ["e-foreign", "e-own"] },
-      []
-    );
+      { ...validPersonaInput(), extensionIds: ["e-foreign", "e-own"] });
 
     expect(result.status).toBe("OK");
     const saved = historyContainer.items.create.mock.calls[0][0];
@@ -683,7 +819,7 @@ describe("persona-service.ts", () => {
       ],
     });
 
-    vi.mocked(DownloadSharePointFile)
+    vi.mocked(downloadCodeInterpreterFile)
       .mockResolvedValueOnce({ status: "ERROR", errors: [{ message: "download failed" }] })
       .mockResolvedValueOnce({
         status: "OK",
@@ -702,6 +838,108 @@ describe("persona-service.ts", () => {
     expect(callArg.attachedFiles![0].id).toBe("openai-file-1");
   });
 
+  // 015b – CreatePersonaChat names the files it could not load (no ids, no URLs)
+  it("015b CreatePersonaChat stores the names of CI docs that could not be loaded on the thread", async () => {
+    seedPersona({ id: "p-chat-ci-names", codeInterpreterDocumentIds: ["d1", "d2", "d3", "d4"] });
+    const ciDoc = (id: string, fileName: string) => ({
+      id,
+      fileName,
+      userId: USER_HASH,
+      source: "SHAREPOINT" as const,
+      type: "PERSONA_CI_DOCUMENT" as const,
+      externalFile: { documentId: `sp-${id}`, parentReference: { driveId: "drive-1" } },
+    });
+    vi.mocked(PersonaCIDocumentsByIds).mockResolvedValueOnce({
+      status: "OK",
+      response: [
+        ciDoc("d1", "no-access.xlsx"),
+        ciDoc("d2", "ok.csv"),
+        ciDoc("d3", "upload-fails.csv"),
+        ciDoc("d4", "throws.csv"),
+      ],
+    });
+    vi.mocked(downloadCodeInterpreterFile)
+      .mockResolvedValueOnce({ status: "ERROR", errors: [{ message: "Graph returned 403." }] })
+      .mockResolvedValueOnce({
+        status: "OK",
+        response: { buffer: Buffer.from("data"), name: "ok.csv", contentType: "text/csv" },
+      })
+      .mockResolvedValueOnce({
+        status: "OK",
+        response: { buffer: Buffer.from("data"), name: "upload-fails.csv", contentType: "text/csv" },
+      })
+      .mockRejectedValueOnce(new Error("boom"));
+    vi.mocked(UploadFileForCodeInterpreter)
+      .mockResolvedValueOnce({ status: "OK", response: { id: "openai-file-1", name: "ok.csv" } })
+      .mockResolvedValueOnce({ status: "ERROR", errors: [{ message: "upload failed" }] });
+
+    const result = await CreatePersonaChat("p-chat-ci-names");
+    expect(result.status).toBe("OK");
+
+    const callArg = vi.mocked(createChatThreadWithServerFiles).mock.calls[0][0] as any;
+    expect(callArg.attachedFiles).toHaveLength(1);
+    expect(callArg.unavailableAgentFiles).toEqual([
+      "no-access.xlsx",
+      "upload-fails.csv",
+      "throws.csv",
+    ]);
+    expect(JSON.stringify(callArg.unavailableAgentFiles)).not.toMatch(/sp-d|drive-1|d1|http/);
+  });
+
+  it("015c CreatePersonaChat sets no note when every CI doc loads", async () => {
+    seedPersona({ id: "p-chat-ci-all", codeInterpreterDocumentIds: ["d1"] });
+    vi.mocked(PersonaCIDocumentsByIds).mockResolvedValueOnce({
+      status: "OK",
+      response: [
+        {
+          id: "d1",
+          fileName: "ok.csv",
+          userId: USER_HASH,
+          source: "SHAREPOINT",
+          type: "PERSONA_CI_DOCUMENT",
+          externalFile: { documentId: "sp-ok", parentReference: { driveId: "drive-1" } },
+        },
+      ],
+    });
+
+    await CreatePersonaChat("p-chat-ci-all");
+    const callArg = vi.mocked(createChatThreadWithServerFiles).mock.calls[0][0] as any;
+    expect(callArg.unavailableAgentFiles).toBeUndefined();
+    expect(callArg.notFoundAgentFileCount).toBeUndefined();
+  });
+
+  it("015d CreatePersonaChat counts listed CI ids whose row it cannot get (no ids stored)", async () => {
+    seedPersona({ id: "p-chat-ci-gone", codeInterpreterDocumentIds: ["d1", "gone-1", "gone-2", "gone-1"] });
+    vi.mocked(PersonaCIDocumentsByIds).mockResolvedValueOnce({
+      status: "OK",
+      response: [
+        {
+          id: "d1",
+          fileName: "ok.csv",
+          userId: USER_HASH,
+          source: "SHAREPOINT",
+          type: "PERSONA_CI_DOCUMENT",
+          externalFile: { documentId: "sp-ok", parentReference: { driveId: "drive-1" } },
+        },
+      ],
+    });
+
+    await CreatePersonaChat("p-chat-ci-gone");
+    const callArg = vi.mocked(createChatThreadWithServerFiles).mock.calls[0][0] as any;
+    expect(callArg.notFoundAgentFileCount).toBe(2);
+    expect(callArg.unavailableAgentFiles).toBeUndefined();
+    expect(JSON.stringify(callArg)).not.toMatch(/gone-/);
+  });
+
+  it("015e CreatePersonaChat counts every CI id as not found when the lookup fails", async () => {
+    seedPersona({ id: "p-chat-ci-err", codeInterpreterDocumentIds: ["d1", "d2"] });
+    vi.mocked(PersonaCIDocumentsByIds).mockResolvedValueOnce({ status: "ERROR", errors: [{ message: "x" }] });
+
+    await CreatePersonaChat("p-chat-ci-err");
+    const callArg = vi.mocked(createChatThreadWithServerFiles).mock.calls[0][0] as any;
+    expect(callArg.notFoundAgentFileCount).toBe(2);
+  });
+
   // 016 – DeletePersona UNAUTHORIZED when not owner
   it("016 DeletePersona UNAUTHORIZED when not owner/non-admin", async () => {
     await setSession(defaultSession);
@@ -717,9 +955,9 @@ describe("persona-service.ts", () => {
   it("017 UpsertPersona ERROR when Cosmos throws", async () => {
     await setSession(defaultSession);
     const p = seedPersona({ id: "p-upsert-err" });
-    historyContainer.items.upsert.mockRejectedValueOnce(new Error("cosmos boom"));
+    itemReplace.mockRejectedValueOnce(new Error("cosmos boom"));
 
-    const result = await UpsertPersona(p, []);
+    const result = await UpsertPersona(p);
     expect(result.status).toBe("ERROR");
   });
 
@@ -728,7 +966,7 @@ describe("persona-service.ts", () => {
     await setSession(defaultSession);
     const p = seedPersona({ id: "p-upsert-val" });
 
-    const result = await UpsertPersona({ ...p, name: "", description: "" }, []);
+    const result = await UpsertPersona({ ...p, name: "", description: "" });
     expect(result.status).toBe("ERROR");
     if (result.status === "ERROR") {
       expect(result.errors.length).toBeGreaterThan(0);

@@ -50,8 +50,9 @@ vi.mock("../persona-skill-store", () => ({
 }));
 
 // ── Fake Graph ──────────────────────────────────────────────────────────────
-let graph: { status?: number; cTag: string; name: string; content: Buffer };
+let graph: { status?: number; cTag: string; name: string; content: Buffer; networkError?: boolean };
 const fetchMock = vi.fn(async (input: string, _init?: RequestInit): Promise<Response> => {
+  if (graph.networkError) throw new TypeError("fetch failed");
   if (graph.status) return new Response("{}", { status: graph.status });
   if (String(input).includes("/content")) {
     return new Response(new Uint8Array(graph.content), { status: 200 });
@@ -72,9 +73,8 @@ vi.stubGlobal("fetch", fetchMock);
 
 import {
   CheckPersonaSkillNow,
-  FindPersonaSkills,
-  LinkPersonaSkillFromSharePoint,
 } from "../persona-skill-service";
+import { linkSharePointSkill } from "../link-sharepoint-skill";
 import { clearDriveItemChecks } from "@/features/common/services/sharepoint/drive-item-check-cache";
 
 const goodZip = () =>
@@ -84,7 +84,7 @@ const goodZip = () =>
   ]);
 
 const link = (over: { driveId?: string; itemId?: string } = {}) =>
-  LinkPersonaSkillFromSharePoint({
+  linkSharePointSkill({
     personaId: "p1",
     driveId: over.driveId ?? "b!drive_ABC-1",
     itemId: over.itemId ?? "01ITEMXYZ",
@@ -126,7 +126,7 @@ beforeEach(() => {
   graph = { cTag: "c1", name: "demo-skill.zip", content: goodZip() };
 });
 
-describe("LinkPersonaSkillFromSharePoint", () => {
+describe("linkSharePointSkill", () => {
   it("stores a linked skill: blob copy, row with source and version, data from Graph", async () => {
     const res = await link();
     expect(res.status).toBe("OK");
@@ -248,72 +248,16 @@ describe("CheckPersonaSkillNow", () => {
     existing = [{ ...linkedRow(), source: undefined }];
     expect((await CheckPersonaSkillNow("p1", "s1")).status).toBe("ERROR");
   });
-});
 
-describe("FindPersonaSkills — linked skills and SharePoint access of the viewer", () => {
-  const uploaded = () => ({ ...linkedRow(), id: "s2", name: "other-skill", source: undefined });
-
-  it("a viewer without access to the file sees the name and a note only", async () => {
-    access = { canUse: true, canEdit: false };
-    existing = [linkedRow(), uploaded()];
-    graph.status = 403;
-    const res = await FindPersonaSkills("p1");
-    expect(res.status).toBe("OK");
-    if (res.status !== "OK") return;
-    const [linked, other] = res.response.skills;
-    expect(linked).toEqual({
-      id: "s1",
-      name: "demo-skill",
-      description: "",
-      zipFileName: "",
-      zipBytes: 0,
-      fileCount: 0,
-      updatedAt: "",
-      noAccess: true,
-    });
-    expect(JSON.stringify(linked)).not.toMatch(/Builds demo|sharepoint\.com|demo-skill\.zip/);
-    // Uploaded skills are not affected.
-    expect(other).toMatchObject({ name: "other-skill", description: "Builds demo things." });
-    expect(fetchMock.mock.calls[0][1]).toMatchObject({
-      headers: { Authorization: "Bearer user-token" },
-    });
-  });
-
-  it("a viewer with access sees the full entry", async () => {
-    access = { canUse: true, canEdit: false };
+  it.each([
+    ["500", { status: 500 }],
+    ["503", { status: 503 }],
+    ["a network error", { networkError: true }],
+  ])("shows the owner an error when SharePoint gives no answer (%s)", async (_label, over) => {
     existing = [linkedRow()];
-    const res = await FindPersonaSkills("p1");
-    expect(res.status === "OK" && res.response.skills[0]).toMatchObject({
-      name: "demo-skill",
-      description: "Builds demo things.",
-      source: { kind: "sharepoint", fileName: "demo-skill.zip" },
-    });
-    expect(res.status === "OK" && res.response.skills[0].noAccess).toBeUndefined();
-  });
-
-  it("a timeout or 5xx does not hide the entry (chats use the stored copy then too)", async () => {
-    access = { canUse: true, canEdit: false };
-    existing = [linkedRow()];
-    graph.status = 503;
-    const res = await FindPersonaSkills("p1");
-    expect(res.status === "OK" && res.response.skills[0].description).toBe("Builds demo things.");
-  });
-
-  it("owners and admins see the full entry without a Graph call", async () => {
-    access = { canUse: true, canEdit: true };
-    existing = [linkedRow()];
-    graph.status = 403;
-    const res = await FindPersonaSkills("p1");
-    expect(res.status === "OK" && res.response.skills[0].description).toBe("Builds demo things.");
-    expect(fetchMock).not.toHaveBeenCalled();
-  });
-
-  it("a second list load within 60 s makes no Graph call", async () => {
-    access = { canUse: true, canEdit: false };
-    existing = [linkedRow()];
-    graph.status = 403;
-    await FindPersonaSkills("p1");
-    await FindPersonaSkills("p1");
-    expect(fetchMock).toHaveBeenCalledTimes(1);
+    Object.assign(graph, over);
+    const res = await CheckPersonaSkillNow("p1", "s1");
+    expect(res.status).toBe("ERROR");
+    expect(res.status === "ERROR" && res.errors[0].message).toMatch(/SharePoint did not answer/);
   });
 });

@@ -40,9 +40,24 @@ vi.mock("../persona-skill-store", () => ({
   skillBlobName: (p: string, s: string) => `agent-skills/${p}/${s}-1.zip`,
 }));
 
+// The persona row: the real etag-checked helpers run against this row.
+let personaRow: Record<string, any> | undefined;
+const updatePersonaRow = vi.fn(async (_id: string, mutate: (p: any) => any) => {
+  if (!personaRow) return undefined;
+  const next = mutate({ ...personaRow });
+  if (next) personaRow = next;
+  return personaRow;
+});
+vi.mock("../../persona-row", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../../persona-row")>();
+  return {
+    withCodeInterpreterOn: actual.withCodeInterpreterOn,
+    updatePersonaRow: (id: string, mutate: (p: any) => any) => updatePersonaRow(id, mutate),
+  };
+});
+
 import {
   DeletePersonaSkill,
-  FindPersonaSkills,
   UploadPersonaSkill,
 } from "../persona-skill-service";
 
@@ -63,6 +78,7 @@ const form = (zip: Buffer, extra: Record<string, string> = {}) => {
 };
 
 beforeEach(() => {
+  personaRow = { id: "p1", userId: "owner-hash", defaultTools: { webSearch: true } };
   access = { canUse: true, canEdit: true };
   existing = [];
   upsert.mockClear();
@@ -126,7 +142,48 @@ describe("UploadPersonaSkill — server-side owner/admin check", () => {
   });
 });
 
-describe("DeletePersonaSkill / FindPersonaSkills", () => {
+describe("UploadPersonaSkill switches the code interpreter on", () => {
+  it("sets defaultTools.codeInterpreter on the persona row, before the skill is stored", async () => {
+    const order: string[] = [];
+    updatePersonaRow.mockImplementationOnce(async (_id, mutate) => {
+      order.push("persona");
+      personaRow = mutate({ ...personaRow }) ?? personaRow;
+      return personaRow;
+    });
+    UploadBlob.mockImplementationOnce(async () => {
+      order.push("blob");
+      return { status: "OK", response: "url" };
+    });
+    const res = await UploadPersonaSkill(form(goodZip()));
+    expect(res.status).toBe("OK");
+    expect(updatePersonaRow).toHaveBeenCalledWith("p1", expect.any(Function));
+    expect(personaRow!.defaultTools).toEqual({ webSearch: true, codeInterpreter: true });
+    expect(order).toEqual(["persona", "blob"]);
+  });
+
+  it("leaves a persona row alone when the code interpreter is on already", async () => {
+    personaRow = { id: "p1", userId: "owner-hash", defaultTools: { codeInterpreter: true } };
+    const before = personaRow;
+    expect((await UploadPersonaSkill(form(goodZip()))).status).toBe("OK");
+    expect(personaRow).toBe(before);
+  });
+
+  it("stores nothing when the persona row cannot be written", async () => {
+    updatePersonaRow.mockRejectedValueOnce(new Error("The agent changed while saving. Try again."));
+    const res = await UploadPersonaSkill(form(goodZip()));
+    expect(res.status).toBe("ERROR");
+    expect(UploadBlob).not.toHaveBeenCalled();
+    expect(upsert).not.toHaveBeenCalled();
+  });
+
+  it("does not touch the persona row for a user who may not edit", async () => {
+    access = { canUse: true, canEdit: false };
+    await UploadPersonaSkill(form(goodZip()));
+    expect(updatePersonaRow).not.toHaveBeenCalled();
+  });
+});
+
+describe("DeletePersonaSkill", () => {
   it("refuses delete for a non-owner", async () => {
     access = { canUse: true, canEdit: false };
     existing = [{ id: "s1", name: "demo-skill", blobName: "b", userId: "owner-hash" }];
@@ -140,10 +197,5 @@ describe("DeletePersonaSkill / FindPersonaSkills", () => {
     expect(itemDelete).toHaveBeenCalled();
     expect(DeleteBlob).toHaveBeenCalledWith("agent-skills", "b");
     expect(deleteSkillOpenAiFile).toHaveBeenCalledWith("file-1");
-  });
-
-  it("lists skills only for users who can open the agent", async () => {
-    access = { canUse: false, canEdit: false };
-    expect((await FindPersonaSkills("p1")).status).toBe("UNAUTHORIZED");
   });
 });

@@ -1,15 +1,10 @@
 import { proxy, useSnapshot } from "valtio";
 import { RevalidateCache } from "../common/navigation-helpers";
-import {
-  DocumentMetadata,
-  PERSONA_ATTRIBUTE,
-  PersonaModel,
-} from "./persona-services/models";
+import { PERSONA_ATTRIBUTE, PersonaModel } from "./persona-services/models";
 import {
   CreatePersona,
   UpsertPersona,
 } from "./persona-services/persona-service";
-import { UpdateOrAddPersonaCIDocuments } from "./persona-services/persona-ci-documents-service";
 
 class PersonaState {
   private defaultModel: PersonaModel = {
@@ -89,35 +84,30 @@ export const usePersonaState = () => {
   return useSnapshot(personaStore, { sync: true });
 };
 
+/**
+ * Saves the agent form. Files are not part of the form: the Files section
+ * saves them immediately (agent-file-service). After the FIRST save of a new
+ * agent the editor stays open on the saved agent, so files can be added
+ * right away; a save of an existing agent closes the editor.
+ */
 export const AddOrUpdatePersona = async (previous: any, formData: FormData) => {
-  const sharePointFiles = HandleSharePointFiles(formData);
-  const ciSharePointFiles = HandleCISharePointFiles(formData);
   const persona = FormDataToPersonaModel(formData);
 
   if (personaStore.persona.extensionIds) {
     persona.extensionIds = personaStore.persona.extensionIds.map((e) => e);
   }
 
-  // Handle Code Interpreter documents
-  const currentCIDocuments = persona.codeInterpreterDocumentIds || [];
-  const ciDocsResponse = await UpdateOrAddPersonaCIDocuments(
-    ciSharePointFiles,
-    currentCIDocuments
-  );
-
-  if (ciDocsResponse.status === "OK") {
-    persona.codeInterpreterDocumentIds = ciDocsResponse.response;
-  } else {
-    return ciDocsResponse;
-  }
-
-  const response =
-    persona.id && persona.id !== ""
-      ? await UpsertPersona(persona, sharePointFiles)
-      : await CreatePersona(persona, sharePointFiles);
+  const isNew = !persona.id;
+  const response = isNew
+    ? await CreatePersona(persona)
+    : await UpsertPersona(persona);
 
   if (response.status === "OK") {
-    personaStore.updateOpened(false);
+    if (isNew) {
+      personaStore.updatePersona(response.response);
+    } else {
+      personaStore.updateOpened(false);
+    }
     RevalidateCache({
       page: "persona",
     });
@@ -129,39 +119,7 @@ export const AddOrUpdatePersona = async (previous: any, formData: FormData) => {
   return response;
 };
 
-const HandleSharePointFiles = (formData: FormData): DocumentMetadata[] => {
-  const filesObjStrings = formData.getAll(
-    "selectedSharePointDocumentIds"
-  ) as string[];
-
-  if (!filesObjStrings || filesObjStrings[0].length === 0) return [];
-
-  const fileObj = JSON.parse(filesObjStrings[0]) as DocumentMetadata[];
-  return Array.isArray(fileObj) ? fileObj : [];
-};
-
-const HandleCISharePointFiles = (formData: FormData): DocumentMetadata[] => {
-  const filesObjStrings = formData.getAll(
-    "selectedCIDocumentIds"
-  ) as string[];
-
-  if (!filesObjStrings || filesObjStrings.length === 0 || filesObjStrings[0].length === 0) return [];
-
-  const fileObj = JSON.parse(filesObjStrings[0]) as DocumentMetadata[];
-  return Array.isArray(fileObj) ? fileObj : [];
-};
-
 const FormDataToPersonaModel = (formData: FormData): PersonaModel => {
-  const ids = formData.getAll("personaDocumentIds") as string[];
-  const fileObj = JSON.parse(ids[0]) as string[];
-  const personaDocumentIds =  Array.isArray(fileObj) ? fileObj : [];
-
-  const ciIds = formData.getAll("ciDocumentIds") as string[];
-  const ciFileObj = ciIds.length > 0 && ciIds[0].length > 0 
-    ? JSON.parse(ciIds[0]) as string[] 
-    : [];
-  const codeInterpreterDocumentIds = Array.isArray(ciFileObj) ? ciFileObj : [];
-
   const selectedModelRaw = formData.get("selectedModel") as string | null;
   const selectedModel = selectedModelRaw || undefined;
   
@@ -190,8 +148,6 @@ const FormDataToPersonaModel = (formData: FormData): PersonaModel => {
       id: formData.get("accessGroupId") as string,
       source: "SHAREPOINT",
     },
-    personaDocumentIds: personaDocumentIds,
-    codeInterpreterDocumentIds: codeInterpreterDocumentIds,
     selectedModel: selectedModel,
     subAgentIds: subAgentIds,
     defaultTools: defaultTools,

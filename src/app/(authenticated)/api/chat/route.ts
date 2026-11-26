@@ -70,6 +70,7 @@ import {
   buildSkillCatalogPrompt,
   resolveSkillCodeInterpreterFiles,
 } from "@/features/persona-page/persona-services/skills/skill-models";
+import { buildUnavailableAgentFilesPrompt } from "@/features/chat-page/chat-services/chat-api/unavailable-agent-files";
 import { loadUsableFileSources } from "@/features/persona-page/persona-services/sharepoint-files/sharepoint-file-store";
 import { type UserPrompt } from "@/features/chat-page/chat-services/models";
 
@@ -347,7 +348,11 @@ export async function POST(req: Request) {
       staticSystemPrompt: CHAT_DEFAULT_SYSTEM_PROMPT,
       personaMessage:
         (ctx.thread.personaMessage ?? "") +
-        buildSkillCatalogPrompt(agentSkills, unavailableSkills),
+        buildSkillCatalogPrompt(agentSkills, unavailableSkills) +
+        buildUnavailableAgentFilesPrompt(
+          ctx.thread.unavailableAgentFiles,
+          ctx.thread.notFoundAgentFileCount,
+        ),
       documentHint: ctx.documentHint,
       trailingStaticBlock:
         // Generative UI: GPT-5.5 reliably declines a UI *tool* under tool_choice

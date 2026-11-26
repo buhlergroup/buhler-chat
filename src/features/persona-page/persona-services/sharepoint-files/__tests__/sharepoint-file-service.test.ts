@@ -31,11 +31,8 @@ vi.mock("../sharepoint-file-store", () => ({
   queryFileSourcesByPersonaId: vi.fn(async () => existing),
 }));
 
-import {
-  AddPersonaFileSource,
-  DeletePersonaFileSource,
-  FindPersonaFileSources,
-} from "../sharepoint-file-service";
+import { DeletePersonaFileSource } from "../sharepoint-file-service";
+import { addPersonaFileSource as AddPersonaFileSource } from "../add-file-source";
 
 const DRIVE = "b!driveA_123";
 let graph: FakeGraph;
@@ -67,7 +64,7 @@ beforeEach(() => {
   delete process.env.SHAREPOINT_FILES_MAX_SOURCES;
 });
 
-describe("AddPersonaFileSource", () => {
+describe("addPersonaFileSource", () => {
   it("stores a folder with name, link and kind from Graph", async () => {
     const res = await AddPersonaFileSource({ personaId: "p1", driveId: DRIVE, itemId: "FOLDER1" });
     expect(res.status).toBe("OK");
@@ -133,24 +130,7 @@ describe("AddPersonaFileSource", () => {
   });
 });
 
-describe("FindPersonaFileSources / DeletePersonaFileSource", () => {
-  it("lists the sources for the owner", async () => {
-    existing = [row()];
-    const res = await FindPersonaFileSources("p1");
-    expect(res.status === "OK" && res.response).toMatchObject({
-      canEdit: true,
-      maxSources: 10,
-      sources: [{ id: "src1", name: "Images", kind: "folder" }],
-    });
-  });
-
-  it("shows nothing to a user who may not edit the agent", async () => {
-    access = { canUse: true, canEdit: false };
-    existing = [row()];
-    const res = await FindPersonaFileSources("p1");
-    expect(res.status === "OK" && res.response).toMatchObject({ canEdit: false, sources: [] });
-  });
-
+describe("DeletePersonaFileSource", () => {
   it("deletes for the owner only", async () => {
     existing = [row()];
     access = { canUse: true, canEdit: false };
