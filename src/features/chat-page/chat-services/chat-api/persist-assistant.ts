@@ -46,6 +46,7 @@ import type { ChatMessageModel } from "../models";
 import { uniqueId } from "@/features/common/util";
 import { chatMessagesFromUIMessages } from "./message-adapter";
 import { computeTokenCostUsd } from "./usage-data";
+import type { CompactionDoneData } from "./compaction-part";
 import { rewriteSandboxUrls } from "./rewrite-sandbox-urls";
 import {
   ingestContainerFileSourcesToChatStore,
@@ -181,6 +182,12 @@ export interface UsagePayload {
    * nothing is then persisted and readers fall back to `lastInputTokens`.
    */
   lastPromptTokens?: number;
+  /**
+   * Cost of the turn when the caller priced it itself (the Copilot path: its
+   * sub-agents can run on other models, so the turn is priced per model).
+   * Absent: computed from the tokens with `modelConfig.pricing`.
+   */
+  costUsd?: number;
 }
 
 export interface PersistPayload {
@@ -358,13 +365,16 @@ export async function persistThread({
   const cachedTokens = usage.cachedTokens ?? 0;
   const cacheWriteTokens = usage.cacheWriteTokens ?? 0;
 
-  const costUsd = computeTokenCostUsd({
-    inputTokens,
-    outputTokens,
-    cachedTokens,
-    cacheWriteTokens,
-    pricing: modelConfig.pricing,
-  });
+  const costUsd =
+    typeof usage.costUsd === "number" && Number.isFinite(usage.costUsd)
+      ? usage.costUsd
+      : computeTokenCostUsd({
+          inputTokens,
+          outputTokens,
+          cachedTokens,
+          cacheWriteTokens,
+          pricing: modelConfig.pricing,
+        });
 
   logInfo("Persisting assistant turn usage", {
     threadId,
@@ -657,6 +667,14 @@ export interface PersistAssistantFromFinishParams<TOOLS extends ToolSet> {
   streamError?: { message: string; name?: string };
   /** Agent (persona) the thread was started from — attributes per-agent stats. */
   personaId?: string;
+  /** Turn cost priced by the caller (see UsagePayload.costUsd). */
+  costUsd?: number;
+  /**
+   * A context compaction that ran in this turn (Copilot path: the runtime
+   * compacts on its own). Stored on the assistant row, so the notice comes
+   * back after a reload.
+   */
+  compaction?: CompactionDoneData;
 }
 
 /**
@@ -674,6 +692,8 @@ export async function persistAssistantFromFinishEvent<TOOLS extends ToolSet>({
   streamError,
   reasoningDurationMs,
   personaId,
+  costUsd,
+  compaction,
 }: PersistAssistantFromFinishParams<TOOLS>): Promise<void> {
   // Detect an empty finish — Azure content-filter trips, aborted streams
   // before any output, or a model error that resolves without text/tools.
@@ -773,6 +793,9 @@ export async function persistAssistantFromFinishEvent<TOOLS extends ToolSet>({
     messageId ?? assistantMessageIdGenerator(),
     reasoningDurationMs,
   );
+  if (compaction) {
+    assistant.metadata = { ...((assistant.metadata as Record<string, unknown> | undefined) ?? {}), compaction };
+  }
 
   // Ingest every container_file_citation source the model referenced into
   // the chat file store (the same Azure-blob-backed surface images use).
@@ -850,6 +873,7 @@ export async function persistAssistantFromFinishEvent<TOOLS extends ToolSet>({
       cachedTokens,
       cacheWriteTokens,
       ...(typeof lastPromptTokens === "number" ? { lastPromptTokens } : {}),
+      ...(typeof costUsd === "number" ? { costUsd } : {}),
     },
     personaId,
     turnShape: deriveTurnShape(event.steps),

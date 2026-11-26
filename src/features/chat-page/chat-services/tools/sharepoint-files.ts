@@ -63,10 +63,13 @@ export function findSharePointFilesTool(session: SharePointFileSession) {
 export function fetchSharePointFileTool(
   session: SharePointFileSession,
   limits: { maxFetchesPerRequest: number; maxFileBytes: number; imageMaxPx: number },
+  target: "code-interpreter" | "workspace" = "code-interpreter",
 ) {
   return tool({
     description:
-      "Download ONE file from the SharePoint folders linked to this agent into the code interpreter (/mnt/data). Returns the file's exact path in the code interpreter (it can differ from /mnt/data/<name>): use that path in code. " +
+      (target === "workspace"
+        ? "Download ONE file from the SharePoint folders linked to this agent into the chat's file workspace (/workspace/sharepoint/). Returns its path; read it with view or rg (extract_text for a PDF or Office file). "
+        : "Download ONE file from the SharePoint folders linked to this agent into the code interpreter (/mnt/data). Returns the file's exact path in the code interpreter (it can differ from /mnt/data/<name>): use that path in code. ") +
       "Use the exact file name from your instructions, a skill or an index, or the id from find_sharepoint_files. " +
       `Fetch only the files the task really needs: at most ${limits.maxFetchesPerRequest} per message. ` +
       `Images come as SharePoint's preview image: a JPEG that fits ${limits.imageMaxPx}x${limits.imageMaxPx} px, also for very large originals (TIFF, HEIC and PSD too; the name ends in .jpg). ` +

@@ -112,6 +112,20 @@ describe("common.unit.content-store.markdown", () => {
     expect(extract).toHaveBeenCalledTimes(1);
   });
 
+  it("caches a page range apart from the whole document", async () => {
+    const { store, blobs } = setup();
+    const { sha256 } = await store.put(userA, bytes("pdf"));
+    const whole = vi.fn(async () => "all pages");
+    const range = vi.fn(async () => "pages 1-2");
+    expect(await store.markdown(userA, sha256, whole)).toEqual({ markdown: "all pages", cached: false });
+    expect(await store.markdown(userA, sha256, range, { pages: "1-2" })).toEqual({ markdown: "pages 1-2", cached: false });
+    expect(await store.markdown(userA, sha256, range, { pages: "1-2" })).toEqual({ markdown: "pages 1-2", cached: true });
+    expect(range).toHaveBeenCalledTimes(1);
+    expect(whole).toHaveBeenCalledTimes(1);
+    expect(blobs.keys()).toContain(contentBlobPath(userA, sha256, ".p1-2.md"));
+    await expect(store.markdown(userA, sha256, range, { pages: "../x" })).rejects.toThrow();
+  });
+
   it("another user extracts again (no reuse across scopes)", async () => {
     const { store } = setup();
     const a = await store.put(userA, bytes("pdf"));
@@ -210,6 +224,7 @@ describe("common.unit.content-store.cleanup", () => {
     const kept = await store.put(userA, bytes("referenced"));
     const old = await store.put(userA, bytes("orphan"));
     await store.markdown(userA, old.sha256, async () => "orphan text");
+    await store.markdown(userA, old.sha256, async () => "page 1", { pages: "1" });
     advance(8 * DAY);
     const fresh = await store.put(userA, bytes("fresh orphan"));
 

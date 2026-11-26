@@ -44,6 +44,20 @@ vi.mock("@/features/chat-page/chat-services/chat-api/chat-api-text", () => ({
   ChatApiTitleAndIntent: vi.fn(async () => ({ title: "Generated Title", intent: "general" })),
 }));
 
+const removeWorkspaceFiles = vi.fn(async (_user: string, _thread: string, _scope: string, _options?: unknown) => undefined);
+const releaseReset = vi.fn(async () => undefined);
+const lockReset = vi.fn(
+  async (_user: string, _thread: string): Promise<{ ok: true; release: () => Promise<void> } | { ok: false; message: string }> => ({
+    ok: true,
+    release: releaseReset,
+  }),
+);
+vi.mock("./copilot-runtime/workspace-files", () => ({
+  removeThreadWorkspaceFilesQuietly: (user: string, thread: string, scope: string, options?: unknown) =>
+    removeWorkspaceFiles(user, thread, scope, options),
+  lockThreadForReset: (user: string, thread: string) => lockReset(user, thread),
+}));
+
 // ---- import after mocks ----
 import {
   FindAllChatThreadForCurrentUser,
@@ -591,6 +605,65 @@ describe("chat-page.unit.thread-service.023 — SoftDeleteChatContentsForCurrent
     expect(upsertedIds).toContain("m2");
     expect(upsertedIds).toContain("m3");
     expect(upsertedIds).toContain("m4");
+  });
+});
+
+describe("chat-page.unit.thread-service.023b — SoftDeleteChatContentsForCurrentUser removes the Copilot session state", () => {
+  const run = async (options?: { untilMessageIndex: number }) => {
+    const msgs = [makeMessage({ id: "m0" }), makeMessage({ id: "m1" }), makeMessage({ id: "m2" })];
+    historyContainer.item.mockImplementation((_id: string) => ({
+      read: vi.fn(async () => ({ resource: makeThread() })),
+    }));
+    let callCount = 0;
+    historyContainer.items.query.mockImplementation((_q: any, _opts?: any) => ({
+      fetchAll: async () => ({ resources: ++callCount === 1 ? msgs : [] }),
+    }));
+    await SoftDeleteChatContentsForCurrentUser("t1", options);
+    return removeWorkspaceFiles.mock.calls.map((c) => c[2]);
+  };
+
+  it("a full reset (temporary chat, Reset chat) clears the whole workspace", async () => {
+    expect(await run()).toEqual(["all"]);
+  });
+
+  it("a rewind clears the uploads and the session state, not the other files", async () => {
+    expect(await run({ untilMessageIndex: 0 })).toEqual(["uploads", "session"]);
+  });
+});
+
+describe("chat-page.unit.thread-service.023c — SoftDeleteChatContentsForCurrentUser holds the thread lock (Copilot path)", () => {
+  const setupThread = () => {
+    const msgs = [makeMessage({ id: "m0" }), makeMessage({ id: "m1" })];
+    historyContainer.item.mockImplementation((_id: string) => ({
+      read: vi.fn(async () => ({ resource: makeThread() })),
+    }));
+    let callCount = 0;
+    historyContainer.items.query.mockImplementation((_q: any, _opts?: any) => ({
+      fetchAll: async () => ({ resources: ++callCount === 1 ? msgs : [] }),
+    }));
+  };
+
+  it("refuses a reset while a reply still runs, before anything is deleted", async () => {
+    setupThread();
+    lockReset.mockResolvedValueOnce({ ok: false, message: "A reply is still running in this chat. Stop it, then try again." });
+    const result = await SoftDeleteChatContentsForCurrentUser("t1");
+    expect(result.status).toBe("ERROR");
+    expect((result as any).errors[0].message).toBe("A reply is still running in this chat. Stop it, then try again.");
+    expect(historyContainer.items.upsert).not.toHaveBeenCalled();
+    expect(removeWorkspaceFiles).not.toHaveBeenCalled();
+  });
+
+  it("deletes under the lock and releases it after the session state is gone", async () => {
+    setupThread();
+    const result = await SoftDeleteChatContentsForCurrentUser("t1", { untilMessageIndex: 0 });
+    expect(result.status).toBe("OK");
+    expect(lockReset).toHaveBeenCalledWith(hashedEmail, "t1");
+    expect(removeWorkspaceFiles.mock.calls.map((c) => [c[2], c[3]])).toEqual([
+      ["uploads", { locked: true }],
+      ["session", { locked: true }],
+    ]);
+    expect(releaseReset).toHaveBeenCalledTimes(1);
+    expect(releaseReset.mock.invocationCallOrder[0]).toBeGreaterThan(removeWorkspaceFiles.mock.invocationCallOrder[1]);
   });
 });
 

@@ -66,8 +66,22 @@ const SHA256_HEX = /^[0-9a-f]{64}$/;
 export const isSha256Hex = (value: unknown): value is string =>
   typeof value === "string" && SHA256_HEX.test(value);
 
-/** Suffixes of the blobs the content store keeps next to the content. */
-export type ContentBlobSuffix = "" | ".md";
+/**
+ * Suffixes of the blobs the content store keeps next to the content: the
+ * Markdown of the whole document (".md") or of a page range (".p1-20.md",
+ * ".p1,3,5-7.md").
+ */
+export type ContentBlobSuffix = "" | ".md" | `.p${string}.md`;
+
+const PAGE_RANGE_SUFFIX = /^\.p[0-9]+(-[0-9]+)?(,[0-9]+(-[0-9]+)?)*\.md$/;
+const MAX_PAGE_SUFFIX_LENGTH = 120;
+
+const isContentBlobSuffix = (suffix: unknown): suffix is ContentBlobSuffix =>
+  suffix === "" ||
+  suffix === ".md" ||
+  (typeof suffix === "string" &&
+    suffix.length <= MAX_PAGE_SUFFIX_LENGTH &&
+    PAGE_RANGE_SUFFIX.test(suffix));
 
 export const CONTENT_BLOB_PREFIX = "content";
 
@@ -88,7 +102,7 @@ export const contentBlobPath = (
   if (!isSha256Hex(sha256)) {
     throw new Error("Invalid hash for content blob path");
   }
-  if (suffix !== "" && suffix !== ".md") {
+  if (!isContentBlobSuffix(suffix)) {
     throw new Error("Invalid suffix for content blob path");
   }
   const prefix = `${CONTENT_BLOB_PREFIX}/${scope}/sha256/`;
@@ -106,8 +120,9 @@ export const contentBlobPath = (
 export const parseContentBlobPath = (
   path: string
 ): { scope: string; sha256: string; suffix: ContentBlobSuffix } | undefined => {
-  const match = /^content\/([^/]+)\/sha256\/([0-9a-f]{64})(\.md)?$/.exec(path);
+  const match = /^content\/([^/]+)\/sha256\/([0-9a-f]{64})(\.md|\.p[0-9,-]+\.md)?$/.exec(path);
   if (!match || !isValidId(match[1])) return undefined;
+  if (!isContentBlobSuffix(match[3] ?? "")) return undefined;
   return { scope: match[1], sha256: match[2], suffix: (match[3] ?? "") as ContentBlobSuffix };
 };
 

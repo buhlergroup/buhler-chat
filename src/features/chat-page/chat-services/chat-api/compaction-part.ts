@@ -301,8 +301,12 @@ export function formatTokenCount(tokens: number): string {
   return Math.round(tokens).toLocaleString("en-US");
 }
 
-/** "12 older turns" / "1 older turn". */
+/**
+ * "12 older turns" / "1 older turn". Zero: the agent runtime (Copilot path)
+ * summarised the earlier conversation without a turn count.
+ */
 function turnLabel(count: number): string {
+  if (count <= 0) return "the earlier conversation";
   return `${count} older ${count === 1 ? "turn" : "turns"}`;
 }
 

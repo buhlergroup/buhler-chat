@@ -48,6 +48,8 @@ export type ToolHeaderProps = {
   type: ToolUIPart['type'];
   state: ToolUIPart['state'];
   className?: string;
+  /** Shown instead of the name derived from `type` (e.g. "Sub-agent Research"). */
+  label?: string;
 };
 
 const getStatusBadge = (status: ToolUIPart['state']) => {
@@ -83,6 +85,7 @@ export const ToolHeader = ({
   className,
   type,
   state,
+  label,
   ...props
 }: ToolHeaderProps) => (
   <CollapsibleTrigger
@@ -95,9 +98,9 @@ export const ToolHeader = ({
     <div className="flex items-center gap-2">
       <WrenchIcon className="size-4 text-muted-foreground" />
       {isRunningState(state) ? (
-        <Shimmer className="font-medium text-sm">{formatToolName(type)}</Shimmer>
+        <Shimmer className="font-medium text-sm">{label ?? formatToolName(type)}</Shimmer>
       ) : (
-        <span className="font-medium text-sm">{formatToolName(type)}</span>
+        <span className="font-medium text-sm">{label ?? formatToolName(type)}</span>
       )}
       {getStatusBadge(state)}
     </div>

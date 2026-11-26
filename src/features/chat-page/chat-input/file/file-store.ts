@@ -12,6 +12,7 @@ import {
   imageInputNotSupportedMessage,
   modelAcceptsImages,
 } from "../../chat-services/models";
+import { UploadFileToAgentWorkspace } from "../../chat-services/copilot-runtime/workspace-upload-actions";
 import {
   getCodeInterpreterFileLimit,
   isCodeInterpreterSupportedFile,
@@ -87,12 +88,32 @@ class FileStore {
           isCodeInterpreterSupported &&
           !isInputImage);
 
+      // An image for a model without vision is refused before it is stored.
+      if (isInputImage && !modelAcceptsImages(z?.selectedModel)) {
+        showError(imageInputNotSupportedMessage(z?.selectedModel));
+        this.loading = "idle";
+        return;
+      }
+
+      // Copilot path: the file goes to the chat's file workspace
+      // (/workspace/uploads/). The server answers handled:false for users on
+      // the AI SDK path, and the flow below runs unchanged.
+      this.uploadButtonLabel = "Uploading";
+      const workspace = await UploadFileToAgentWorkspace(formData);
+      if (workspace.status !== "OK") {
+        showError(workspace.errors.map((e) => e.message).join(", "));
+        return;
+      }
+      if (workspace.response.handled && !isInputImage) {
+        showSuccess({
+          title: "File upload",
+          description: `${file.name} is ready (${workspace.response.path}).`,
+        });
+        return;
+      }
+      // An image is also attached to the message, as before.
+
       if (isInputImage) {
-        if (!modelAcceptsImages(z?.selectedModel)) {
-          showError(imageInputNotSupportedMessage(z?.selectedModel));
-          this.loading = "idle";
-          return;
-        }
         const reader = new FileReader();
         reader.readAsDataURL(file);
         reader.onload = () => {

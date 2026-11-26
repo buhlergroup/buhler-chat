@@ -329,16 +329,22 @@ export function createContentStore(deps: ContentStoreDeps) {
   /**
    * The extracted Markdown of the content. `extract` runs at most once per
    * scope and hash: its result is stored as `<hash>.md` and read from there
-   * afterwards.
+   * afterwards. With `pages` (a canonical page range such as "1-20") the
+   * Markdown of those pages is cached apart, as `<hash>.p<pages>.md`.
    */
   async function markdown(
     scope: string,
     sha256: string,
-    extract: () => Promise<string>
+    extract: () => Promise<string>,
+    options: { pages?: string } = {}
   ): Promise<{ markdown: string; cached: boolean }> {
     assertScope(scope);
     assertHash(sha256);
-    const key = contentBlobPath(scope, sha256, ".md");
+    const key = contentBlobPath(
+      scope,
+      sha256,
+      options.pages ? `.p${options.pages}.md` : ".md"
+    );
 
     const cachedText = async () => {
       const cached = await blobs.read(key);

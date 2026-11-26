@@ -591,8 +591,9 @@ export class SharePointFileSession {
           prepared.data,
           file.source.userId,
         );
-        logInfo("fetch_sharepoint_file: file in the code interpreter", {
+        logInfo("fetch_sharepoint_file: file stored", {
           threadId: this.deps.threadId,
+          destination: path.startsWith("/workspace/") ? "workspace" : "code-interpreter",
           source,
           originalBytes: file.size,
           bytes: prepared.data.length,

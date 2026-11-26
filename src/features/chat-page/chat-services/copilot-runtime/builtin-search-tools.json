@@ -1,0 +1,197 @@
+{
+  "runtimeVersion": "1.0.116",
+  "sdkVersion": "2.0.3",
+  "capturedFrom": "session.rpc.tools.getCurrentMetadata(), mode empty",
+  "toolsByModelFamily": {
+    "gpt": [
+      "rg",
+      "glob"
+    ],
+    "claude": [
+      "grep",
+      "glob"
+    ]
+  },
+  "tools": {
+    "rg": {
+      "name": "rg",
+      "description": "Search file contents quickly and precisely with ripgrep.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "pattern": {
+            "type": "string",
+            "description": "Regex to search for in file contents."
+          },
+          "paths": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              }
+            ],
+            "description": "One directory or an array of directories; defaults to cwd. Omit for the default—never pass null/undefined or join paths into one string."
+          },
+          "output_mode": {
+            "type": "string",
+            "enum": [
+              "content",
+              "files_with_matches",
+              "count"
+            ],
+            "description": "Output: matching lines (content, with context/line-number options), matching file paths (files_with_matches, default), or per-file counts (count)."
+          },
+          "glob": {
+            "type": "string",
+            "description": "File glob filter, e.g. \"*.js\" or \"*.{ts,tsx}\"."
+          },
+          "type": {
+            "type": "string",
+            "description": "File type filter, e.g. js, py, rust, go, or java; tsx/jsx normalize to ts/js."
+          },
+          "-i": {
+            "type": "boolean",
+            "description": "Case-insensitive search."
+          },
+          "-A": {
+            "type": "number",
+            "description": "Context lines after matches; requires content mode."
+          },
+          "-B": {
+            "type": "number",
+            "description": "Context lines before matches; requires content mode."
+          },
+          "-C": {
+            "type": "number",
+            "description": "Context lines around matches; requires content mode."
+          },
+          "-n": {
+            "type": "boolean",
+            "description": "\"-n\": true adds line numbers; requires content mode."
+          },
+          "head_limit": {
+            "type": "number",
+            "description": "Return first N results."
+          },
+          "multiline": {
+            "type": "boolean",
+            "description": "Allow cross-line patterns; default false."
+          }
+        },
+        "required": [
+          "pattern"
+        ]
+      }
+    },
+    "grep": {
+      "name": "grep",
+      "description": "Search file contents quickly and precisely with ripgrep.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "pattern": {
+            "type": "string",
+            "description": "Regex to search for in file contents."
+          },
+          "paths": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              }
+            ],
+            "description": "One directory or an array of directories; defaults to cwd. Omit for the default—never pass null/undefined or join paths into one string."
+          },
+          "output_mode": {
+            "type": "string",
+            "enum": [
+              "content",
+              "files_with_matches",
+              "count"
+            ],
+            "description": "Output: matching lines (content, with context/line-number options), matching file paths (files_with_matches, default), or per-file counts (count)."
+          },
+          "glob": {
+            "type": "string",
+            "description": "File glob filter, e.g. \"*.js\" or \"*.{ts,tsx}\"."
+          },
+          "type": {
+            "type": "string",
+            "description": "File type filter, e.g. js, py, rust, go, or java; tsx/jsx normalize to ts/js."
+          },
+          "-i": {
+            "type": "boolean",
+            "description": "Case-insensitive search."
+          },
+          "-A": {
+            "type": "number",
+            "description": "Context lines after matches; requires content mode."
+          },
+          "-B": {
+            "type": "number",
+            "description": "Context lines before matches; requires content mode."
+          },
+          "-C": {
+            "type": "number",
+            "description": "Context lines around matches; requires content mode."
+          },
+          "-n": {
+            "type": "boolean",
+            "description": "\"-n\": true adds line numbers; requires content mode."
+          },
+          "head_limit": {
+            "type": "number",
+            "description": "Return first N results."
+          },
+          "multiline": {
+            "type": "boolean",
+            "description": "Allow cross-line patterns; default false."
+          }
+        },
+        "required": [
+          "pattern"
+        ]
+      }
+    },
+    "glob": {
+      "name": "glob",
+      "description": "Find files quickly by glob pattern.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "pattern": {
+            "type": "string",
+            "description": "Glob to match, e.g. \"**/*.js\", \"src/**/*.ts\", or \"*.{ts,tsx}\"."
+          },
+          "paths": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              }
+            ],
+            "description": "One directory or an array of directories; defaults to cwd. Omit for the default—never pass null/undefined or join paths into one string."
+          }
+        },
+        "required": [
+          "pattern"
+        ]
+      }
+    }
+  }
+}

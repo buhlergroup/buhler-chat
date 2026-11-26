@@ -42,7 +42,7 @@ export async function buildToolset(
     (ctx.threadDocumentIds?.length ?? 0) > 0 ||
     (ctx.personaDocumentIds?.length ?? 0) > 0;
 
-  if (hasDocuments) {
+  if (hasDocuments || ctx.searchDocumentsAlways) {
     entries.push(["search_documents", searchDocumentsTool(ctx)]);
   }
 
@@ -63,19 +63,27 @@ export async function buildToolset(
   // SharePoint files for the model — only when the agent links SharePoint
   // folders/files AND the code interpreter runs in this turn (the files go
   // into its container). One session per request: listing + fetch counter.
+  // On the Copilot path (uploadToWorkspace) the files go to the chat's file
+  // workspace instead, so the code interpreter is not needed there.
   const sharePoint = ctx.sharePointFiles;
-  if (ctx.codeInterpreterAvailable && sharePoint && sharePoint.sources.length > 0) {
+  const toWorkspace = sharePoint?.uploadToWorkspace;
+  if ((ctx.codeInterpreterAvailable || toWorkspace) && sharePoint && sharePoint.sources.length > 0) {
     const limits = readSharePointFileLimits();
     const session = new SharePointFileSession({
       sources: sharePoint.sources,
       accessToken: sharePoint.accessToken,
       limits,
-      getContainerId: sharePoint.getContainerId,
-      uploadToContainer: putFileIntoCodeInterpreterContainer,
+      getContainerId: toWorkspace ? () => "workspace" : sharePoint.getContainerId,
+      uploadToContainer: toWorkspace
+        ? (_containerId, fileName, data) => toWorkspace(fileName, data)
+        : putFileIntoCodeInterpreterContainer,
       threadId: ctx.threadId,
     });
     entries.push(["find_sharepoint_files", findSharePointFilesTool(session)]);
-    entries.push(["fetch_sharepoint_file", fetchSharePointFileTool(session, limits)]);
+    entries.push([
+      "fetch_sharepoint_file",
+      fetchSharePointFileTool(session, limits, toWorkspace ? "workspace" : "code-interpreter"),
+    ]);
   }
 
   // Sub-agent tools are always available (subject to the recursion
@@ -103,7 +111,7 @@ export async function buildToolset(
     // Remote MCP server: its tools come from the server, not from functions.
     if (extension.kind === "mcp") {
       if (!mcp) continue;
-      for (const [key, t] of await mcpExtensionTools(extension, mcp, undefined, personaId)) {
+      for (const [key, t] of await mcpExtensionTools(extension, mcp, undefined, personaId, ctx.mcpOutputLimit)) {
         if (usedExtensionKeys.has(key)) {
           logWarn("buildToolset: duplicate extension tool key, keeping first registration", {
             key,

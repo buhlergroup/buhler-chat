@@ -19,6 +19,24 @@
  */
 const EXTENSION_KEY_PREFIX_RE = /^[A-Za-z0-9]{8}_/;
 
+/**
+ * App tool names that have the key shape all the same and are shown as they
+ * are. `generate_image` (the Copilot path image tool) would read "image" and
+ * lose its image rendering in tool-part-view.
+ */
+export const APP_TOOL_NAMES_WITH_KEY_SHAPE: ReadonlySet<string> = new Set(["generate_image"]);
+
+/** Header labels of app tools whose name reads badly in the chat UI. */
+const APP_TOOL_LABELS: Readonly<Record<string, string>> = {
+  extract_text: "Extract text",
+};
+
+/** The label of an app tool for the chat UI, or undefined to show its name. */
+export function appToolLabel(name: string): string | undefined {
+  return Object.prototype.hasOwnProperty.call(APP_TOOL_LABELS, name) ? APP_TOOL_LABELS[name] : undefined;
+}
+
 export function stripExtensionKeyPrefix(name: string): string {
+  if (APP_TOOL_NAMES_WITH_KEY_SHAPE.has(name)) return name;
   return name.replace(EXTENSION_KEY_PREFIX_RE, "");
 }
