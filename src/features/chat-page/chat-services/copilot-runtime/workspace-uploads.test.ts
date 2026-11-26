@@ -131,6 +131,25 @@ describe("removeThreadWorkspaceFiles", () => {
     expect(await t2.fs.readFile("/workspace/b.txt")).toBe("b");
   });
 
+  it("deleting messages removes only the session state, so the model cannot see deleted turns", async () => {
+    const { workspace, store } = setup();
+    const t1 = workspace(USER_A, "t1");
+    await storeUpload(t1, "a.pdf", Buffer.from("x"));
+    await t1.fs.writeFile("/workspace/notes.txt", "keep");
+    await t1.fs.writeFile("/session-state/events.jsonl", "{}");
+    await t1.fs.writeFile("/session-state/workspace.yaml", "id: t1");
+    const t2 = workspace(USER_A, "t2");
+    await t2.fs.writeFile("/session-state/events.jsonl", "{}");
+
+    const removed = await removeThreadWorkspaceFiles(USER_A, "t1", "session", store);
+    expect(removed).toBe(4); // 2 pointers + 2 data blobs
+    expect(await t1.fs.exists("/session-state/events.jsonl")).toBe(false);
+    expect(await t1.fs.exists("/session-state/workspace.yaml")).toBe(false);
+    expect(await t1.fs.exists(`${UPLOADS_DIR}/a.pdf`)).toBe(true);
+    expect(await t1.fs.readFile("/workspace/notes.txt")).toBe("keep");
+    expect(await t2.fs.exists("/session-state/events.jsonl")).toBe(true);
+  });
+
   it("rejects a crafted thread id", async () => {
     const { store } = setup();
     await expect(removeThreadWorkspaceFiles(USER_A, "../x", "all", store)).rejects.toThrow();

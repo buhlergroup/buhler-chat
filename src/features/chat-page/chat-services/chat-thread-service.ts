@@ -206,8 +206,16 @@ export const SoftDeleteChatContentsForCurrentUser = async (
         await HistoryContainer().items.upsert(itemToUpdate);
       });
 
-      // The chat's workspace uploads go with its documents (Copilot path).
-      await removeAgentWorkspaceFiles(chatThreadID, "uploads");
+      // Copilot path: the uploads go with the documents, the session state
+      // with the messages, or the model would still answer from deleted
+      // turns. A full reset (temporary chat, "Reset chat") clears the whole
+      // workspace; a rewind keeps the files the remaining turns refer to.
+      if (startIdx === 0) {
+        await removeAgentWorkspaceFiles(chatThreadID, "all");
+      } else {
+        await removeAgentWorkspaceFiles(chatThreadID, "uploads");
+        await removeAgentWorkspaceFiles(chatThreadID, "session");
+      }
 
       // Drop the history-compaction row with the messages it describes. It
       // holds both a summary of trimmed turns and the watermark marking where
@@ -232,7 +240,7 @@ export const SoftDeleteChatContentsForCurrentUser = async (
  */
 const removeAgentWorkspaceFiles = async (
   chatThreadId: string,
-  scope: "uploads" | "all",
+  scope: "uploads" | "session" | "all",
 ): Promise<void> => {
   const { removeThreadWorkspaceFilesQuietly } = await import(
     "./copilot-runtime/workspace-files"

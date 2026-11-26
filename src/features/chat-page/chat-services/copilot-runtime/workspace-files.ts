@@ -7,7 +7,7 @@ import { logInfo, logWarn } from "@/features/common/services/logger";
 import { CHAT_DOCUMENT_ATTRIBUTE, type ChatDocumentModel } from "../models";
 import { BlobSessionFs, type BlobStore } from "./blob-session-fs";
 import { getAgentWorkspaceStore, getExistingAgentWorkspaceStore } from "./azure-blob-store";
-import { buildNamespace } from "./session-path";
+import { buildNamespace, SESSION_STATE_ROOT } from "./session-path";
 import { extractMarkdown, indexDocument } from "./document-pipeline";
 import type { IndexDocumentDeps } from "./index-document";
 import { storeUpload, UPLOADS_DIR, uploadsNote, type StoredUpload } from "./workspace-uploads";
@@ -48,17 +48,20 @@ export async function workspaceUploadsNote(fs: BlobSessionFs): Promise<string | 
   return uploadsNote(await fs.listEntries(UPLOADS_DIR));
 }
 
+export type WorkspaceScope = "uploads" | "session" | "all";
+
 /**
  * Removes a thread's workspace files: "uploads" when the chat documents are
- * deleted, "all" (workspace files, tool results and session state) when the
- * thread is. Hard delete, like the AI Search chunks of deleted chat
+ * deleted, "session" (the runtime's session state) when messages are, "all"
+ * (workspace files, tool results and session state) when the thread is deleted
+ * or fully reset. Hard delete, like the AI Search chunks of deleted chat
  * documents. Never creates the container; does nothing in deployments
  * without the Copilot path.
  */
 export async function removeThreadWorkspaceFiles(
   userKey: string,
   threadId: string,
-  scope: "uploads" | "all",
+  scope: WorkspaceScope,
   store?: BlobStore,
 ): Promise<number> {
   if (!store && !copilotRuntimeConfigured()) return 0;
@@ -69,7 +72,8 @@ export async function removeThreadWorkspaceFiles(
   if (scope === "all") {
     names = await s.listNames(`${ns}/`);
   } else {
-    const pointers = await s.listDetailed(`${ns}/f${UPLOADS_DIR}/`);
+    const dir = scope === "uploads" ? UPLOADS_DIR : SESSION_STATE_ROOT;
+    const pointers = await s.listDetailed(`${ns}/f${dir}/`);
     names = pointers.flatMap((p) => {
       const target = p.metadata?.target;
       return typeof target === "string" && target.startsWith(`${ns}/d/`) ? [p.name, target] : [p.name];
@@ -81,13 +85,21 @@ export async function removeThreadWorkspaceFiles(
   return names.length;
 }
 
-/** Same as removeThreadWorkspaceFiles, logging instead of failing the caller. */
+/**
+ * Same as removeThreadWorkspaceFiles, logging instead of failing the caller.
+ * When the session state goes, this process's live session of the thread goes
+ * first, so it cannot write the state back or answer from deleted turns.
+ */
 export async function removeThreadWorkspaceFilesQuietly(
   userKey: string,
   threadId: string,
-  scope: "uploads" | "all",
+  scope: WorkspaceScope,
 ): Promise<void> {
   try {
+    if (scope !== "uploads" && copilotRuntimeConfigured()) {
+      const { discardLiveSession } = await import("./copilot-session");
+      await discardLiveSession(threadId);
+    }
     const removed = await removeThreadWorkspaceFiles(userKey, threadId, scope);
     if (removed > 0) logInfo("copilot-runtime: removed workspace files", { threadId, scope, blobs: removed });
   } catch (err) {

@@ -154,6 +154,25 @@ export async function shutdownCopilotRuntime(): Promise<void> {
   if (client) await (await client).stop().catch(() => undefined);
 }
 
+/** The runtime's event journal; a thread has session state while it exists. */
+const EVENTS_JOURNAL = `${SESSION_STATE_ROOT}/events.jsonl`;
+
+/** Removes the session state (a disconnect may have written some back). */
+export async function clearSessionState(fs: Pick<BlobSessionFs, "readdir" | "rm">): Promise<void> {
+  for (const name of await fs.readdir(SESSION_STATE_ROOT).catch(() => [] as string[])) {
+    await fs.rm(`${SESSION_STATE_ROOT}/${name}`, true, true).catch(() => undefined);
+  }
+}
+
+/** Drops this process's live session of a thread, before its state is removed. */
+export async function discardLiveSession(threadId: string): Promise<void> {
+  const id = `thread-${threadId}`;
+  const live = state.sessions.get(id);
+  if (!live) return;
+  state.sessions.delete(id);
+  await live.session.disconnect().catch(() => undefined);
+}
+
 /** Drops live sessions so the next turn resumes from Blob (restart simulation). */
 export async function forgetLiveSessions(): Promise<void> {
   for (const [id, live] of state.sessions) {
@@ -326,7 +345,13 @@ async function openSession(input: CopilotTurnInput): Promise<{ live: LiveSession
   const existing = state.sessions.get(sessionId);
   if (existing) {
     if (existing.namespace !== namespace) throw new Error("Session namespace mismatch");
-    return { live: existing, mode: "live", seeded: 0 };
+    if (await existing.fs.exists(EVENTS_JOURNAL)) return { live: existing, mode: "live", seeded: 0 };
+    // The chat was reset (possibly on another instance): its session state is
+    // gone, so this live session would still answer from the deleted turns.
+    state.sessions.delete(sessionId);
+    await existing.session.disconnect().catch(() => undefined);
+    await clearSessionState(existing.fs);
+    logInfo("copilot-runtime: dropped a live session whose state was removed", { threadId: input.threadId });
   }
 
   const client = await getCopilotClient();
@@ -378,7 +403,7 @@ async function openSession(input: CopilotTurnInput): Promise<{ live: LiveSession
 
   // The session state lives in Blob under the thread's namespace. If it is
   // there, the session survives a server restart by resuming from it.
-  const hasState = await fs.exists(`${SESSION_STATE_ROOT}/events.jsonl`);
+  const hasState = await fs.exists(EVENTS_JOURNAL);
   let session: CopilotSession;
   let mode: CopilotTurnResult["sessionMode"];
   let seeded = 0;

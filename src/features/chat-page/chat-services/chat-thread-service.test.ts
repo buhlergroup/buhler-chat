@@ -44,6 +44,12 @@ vi.mock("@/features/chat-page/chat-services/chat-api/chat-api-text", () => ({
   ChatApiTitleAndIntent: vi.fn(async () => ({ title: "Generated Title", intent: "general" })),
 }));
 
+const removeWorkspaceFiles = vi.fn(async (_user: string, _thread: string, _scope: string) => undefined);
+vi.mock("./copilot-runtime/workspace-files", () => ({
+  removeThreadWorkspaceFilesQuietly: (user: string, thread: string, scope: string) =>
+    removeWorkspaceFiles(user, thread, scope),
+}));
+
 // ---- import after mocks ----
 import {
   FindAllChatThreadForCurrentUser,
@@ -591,6 +597,29 @@ describe("chat-page.unit.thread-service.023 — SoftDeleteChatContentsForCurrent
     expect(upsertedIds).toContain("m2");
     expect(upsertedIds).toContain("m3");
     expect(upsertedIds).toContain("m4");
+  });
+});
+
+describe("chat-page.unit.thread-service.023b — SoftDeleteChatContentsForCurrentUser removes the Copilot session state", () => {
+  const run = async (options?: { untilMessageIndex: number }) => {
+    const msgs = [makeMessage({ id: "m0" }), makeMessage({ id: "m1" }), makeMessage({ id: "m2" })];
+    historyContainer.item.mockImplementation((_id: string) => ({
+      read: vi.fn(async () => ({ resource: makeThread() })),
+    }));
+    let callCount = 0;
+    historyContainer.items.query.mockImplementation((_q: any, _opts?: any) => ({
+      fetchAll: async () => ({ resources: ++callCount === 1 ? msgs : [] }),
+    }));
+    await SoftDeleteChatContentsForCurrentUser("t1", options);
+    return removeWorkspaceFiles.mock.calls.map((c) => c[2]);
+  };
+
+  it("a full reset (temporary chat, Reset chat) clears the whole workspace", async () => {
+    expect(await run()).toEqual(["all"]);
+  });
+
+  it("a rewind clears the uploads and the session state, not the other files", async () => {
+    expect(await run({ untilMessageIndex: 0 })).toEqual(["uploads", "session"]);
   });
 });
 
