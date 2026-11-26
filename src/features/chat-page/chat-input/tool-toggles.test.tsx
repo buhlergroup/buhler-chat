@@ -125,4 +125,13 @@ describe("chat-page.unit.components.004 — ToolToggles", () => {
     await userEvent.click(screen.getAllByRole("button")[3]);
     expect(mockToggleCodeInterpreter).toHaveBeenCalledWith(false);
   });
+
+  it("each toggle has an accessible name and reports its state", () => {
+    setStore({ codeInterpreterEnabled: true });
+    render(<ToolToggles />);
+    expect(screen.getByRole("button", { name: "Web search" })).toHaveAttribute("aria-pressed", "false");
+    expect(screen.getByRole("button", { name: "Image generation" })).toHaveAttribute("aria-pressed", "false");
+    expect(screen.getByRole("button", { name: "Company content" })).toHaveAttribute("aria-pressed", "false");
+    expect(screen.getByRole("button", { name: "Code interpreter" })).toHaveAttribute("aria-pressed", "true");
+  });
 });

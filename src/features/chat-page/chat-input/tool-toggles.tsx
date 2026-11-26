@@ -30,6 +30,8 @@ export const ToolToggles = () => {
           <TooltipTrigger asChild>
             <Button
               type="button"
+              aria-label="Web search"
+              aria-pressed={webSearchEnabled}
               variant={webSearchEnabled ? "default" : "ghost"}
               size={webSearchEnabled ? "sm" : "icon"}
               className={cn("h-8", webSearchEnabled ? "bg-primary text-primary-foreground gap-1 px-2" : "w-8")}
@@ -60,6 +62,8 @@ export const ToolToggles = () => {
           <TooltipTrigger asChild>
             <Button
               type="button"
+              aria-label="Image generation"
+              aria-pressed={imageGenerationEnabled}
               variant={imageGenerationEnabled ? "default" : "ghost"}
               size={imageGenerationEnabled ? "sm" : "icon"}
               className={cn("h-8", imageGenerationEnabled ? "bg-primary text-primary-foreground gap-1 px-2" : "w-8")}
@@ -90,6 +94,8 @@ export const ToolToggles = () => {
           <TooltipTrigger asChild>
             <Button
               type="button"
+              aria-label="Company content"
+              aria-pressed={companyContentEnabled}
               variant={companyContentEnabled ? "default" : "ghost"}
               size={companyContentEnabled ? "sm" : "icon"}
               className={cn("h-8", companyContentEnabled ? "bg-primary text-primary-foreground gap-1 px-2" : "w-8")}
@@ -120,6 +126,8 @@ export const ToolToggles = () => {
           <TooltipTrigger asChild>
             <Button
               type="button"
+              aria-label="Code interpreter"
+              aria-pressed={codeInterpreterEnabled}
               variant={codeInterpreterEnabled ? "default" : "ghost"}
               size={codeInterpreterEnabled ? "sm" : "icon"}
               className={cn("h-8", codeInterpreterEnabled ? "bg-primary text-primary-foreground gap-1 px-2" : "w-8")}
