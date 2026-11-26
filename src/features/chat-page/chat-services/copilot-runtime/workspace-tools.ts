@@ -20,10 +20,22 @@
  * cache of immutable data blobs, misses downloaded 16 at a time, large and
  * binary files skipped, early stop at head_limit.
  *
- * Regex: patterns run as JavaScript regular expressions (u flag when valid),
- * not Rust regex. A leading inline flag group such as (?i) is translated;
- * other Rust-only syntax fails with an error that says so.
+ * Regex engine: RE2 (the `re2` package), not the JavaScript engine. The
+ * pattern comes from the model, and a backtracking engine runs a pattern like
+ * `(a+)+$` for hours on a short line while it blocks the Node event loop
+ * (every request of the process and the thread-lease timers). RE2 runs in
+ * linear time in the input. Its syntax is close to ripgrep's default (Rust)
+ * engine, also linear-time:
+ *   - no look-around ((?=, (?!, (?<=, (?<!) and no backreferences (\1, \k<n>):
+ *     an error that says so;
+ *   - inline flags (?i) (?s) (?m) (?U) work anywhere, also as (?i:...);
+ *     (?x) does not;
+ *   - repetition counts up to 1000, patterns up to MAX_PATTERN_CHARS.
+ * Also bounded: glob size (GLOB_LIMITS) and the wall time of one search
+ * (SEARCH_TIME_BUDGET_MS, results so far plus a note), and the search yields
+ * to the event loop between file batches.
  */
+import RE2 from "re2";
 import type { Tool as CopilotTool, ToolResultObject } from "@microsoft/copilot-sdk";
 import builtin from "./builtin-search-tools.json";
 import { normalizeSessionPath, WORKSPACE_ROOT } from "./session-path";
@@ -51,10 +63,66 @@ const DOWNLOAD_PARALLELISM = 16;
 const MAX_GLOB_RESULTS = 1000;
 const MAX_OUTPUT_LINES = 2000;
 
+/** Longest regex pattern a search accepts (model input). */
+export const MAX_PATTERN_CHARS = 1000;
+/** Size limits of a glob (model input): length, `{...}` groups, nesting, alternatives, `[...]` classes. */
+export const GLOB_LIMITS = {
+  maxChars: 1000,
+  maxBraceGroups: 16,
+  maxBraceDepth: 3,
+  maxAlternatives: 64,
+  maxClasses: 16,
+} as const;
+/** Wall-time budget of one search call; after it the results so far are returned with a note. */
+export const SEARCH_TIME_BUDGET_MS = 20_000;
+
 // ── glob matching ──────────────────────────────────────────────────────────
 
-/** Converts a glob (`**`, `*`, `?`, `{a,b}`, `[abc]`) to an anchored RegExp. */
+/** A glob over the limits in GLOB_LIMITS, or one the engine cannot compile. */
+export class GlobPatternError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "GlobPatternError";
+  }
+}
+
+function checkGlobLimits(glob: string): void {
+  if (glob.length > GLOB_LIMITS.maxChars) {
+    throw new GlobPatternError(`glob is longer than ${GLOB_LIMITS.maxChars} characters`);
+  }
+  let groups = 0;
+  let depth = 0;
+  let alternatives = 0;
+  let classes = 0;
+  for (let i = 0; i < glob.length; i++) {
+    const c = glob[i];
+    if (c === "{") {
+      groups++;
+      depth++;
+      if (depth > GLOB_LIMITS.maxBraceDepth) {
+        throw new GlobPatternError(`glob nests {...} deeper than ${GLOB_LIMITS.maxBraceDepth} levels`);
+      }
+    } else if (c === "}" && depth > 0) depth--;
+    else if (c === "," && depth > 0) alternatives++;
+    else if (c === "[") classes++;
+  }
+  if (groups > GLOB_LIMITS.maxBraceGroups) {
+    throw new GlobPatternError(`glob has more than ${GLOB_LIMITS.maxBraceGroups} {...} groups`);
+  }
+  if (alternatives > GLOB_LIMITS.maxAlternatives) {
+    throw new GlobPatternError(`glob has more than ${GLOB_LIMITS.maxAlternatives} {a,b} alternatives`);
+  }
+  if (classes > GLOB_LIMITS.maxClasses) {
+    throw new GlobPatternError(`glob has more than ${GLOB_LIMITS.maxClasses} [...] classes`);
+  }
+}
+
+/**
+ * Converts a glob (`**`, `*`, `?`, `{a,b}`, `[abc]`, `[!abc]`) to an anchored
+ * RE2 regex. Throws GlobPatternError over GLOB_LIMITS or when it does not compile.
+ */
 export function globToRegExp(glob: string): RegExp {
+  checkGlobLimits(glob);
   let re = "";
   let inBraces = 0;
   for (let i = 0; i < glob.length; i++) {
@@ -80,12 +148,17 @@ export function globToRegExp(glob: string): RegExp {
     else if (c === "[") {
       const end = glob.indexOf("]", i + 1);
       if (end > i) {
-        re += `[${glob.slice(i + 1, end).replace(/\\/g, "\\\\")}]`;
+        const body = glob.slice(i + 1, end).replace(/\\/g, "\\\\").replace(/\[/g, "\\[");
+        re += `[${body.startsWith("!") ? `^${body.slice(1)}` : body}]`;
         i = end;
       } else re += "\\[";
-    } else re += c.replace(/[.+^$()|\\]/g, "\\$&");
+    } else re += c.replace(/[.+^$()|\\{}]/g, "\\$&");
   }
-  return new RegExp(`^${re}$`);
+  try {
+    return new RE2(`^${re}$`, "u");
+  } catch (err) {
+    throw new GlobPatternError(`invalid glob: ${(err as Error).message}`);
+  }
 }
 
 /** Matcher with ripgrep semantics: a pattern without "/" matches the file name at any depth. */
@@ -152,32 +225,49 @@ function typeMatcher(type: string | undefined): ((rel: string) => boolean) | und
 // ── regex ──────────────────────────────────────────────────────────────────
 
 const REGEX_NOTE =
-  "Note: patterns run as JavaScript regular expressions, not Rust regex. " +
-  "Not supported: inline flags after the start (only a leading (?i), (?s), (?m)), \\A, \\z, possessive quantifiers, (?x).";
+  "Note: patterns run on the RE2 engine (linear time, close to ripgrep's default engine). " +
+  `Not supported: look-around, backreferences, (?x), repetition counts over 1000, patterns over ${MAX_PATTERN_CHARS} characters.`;
 
-/** Builds the search RegExp, or an error text for the model. */
+const regexError = (detail: string) => ({ error: `Error: rg: regex parse error: ${detail}\n${REGEX_NOTE}` });
+
+/** True when the pattern has a backreference (\1-\9 or \k<name>) outside an escape. */
+function hasBackreference(pattern: string): boolean {
+  for (let i = 0; i < pattern.length - 1; i++) {
+    if (pattern[i] !== "\\") continue;
+    const next = pattern[i + 1];
+    if ((next >= "1" && next <= "9") || next === "k") return true;
+    i++; // skip the escaped character
+  }
+  return false;
+}
+
+/**
+ * Builds the search regex (RE2, global), or an error text for the model.
+ * The result has the RegExp interface (exec / test / lastIndex).
+ */
 export function buildSearchRegex(
   pattern: string,
   opts: { ignoreCase?: boolean; multiline?: boolean },
 ): RegExp | { error: string } {
+  if (pattern.length > MAX_PATTERN_CHARS) {
+    return regexError(`the pattern is longer than ${MAX_PATTERN_CHARS} characters.`);
+  }
   let source = pattern;
   let flags = "g";
   const lead = /^\(\?([imsx]+)\)/.exec(source);
   if (lead) {
-    if (lead[1].includes("x")) return { error: `Error: rg: regex parse error: verbose mode (?x) is not supported.\n${REGEX_NOTE}` };
+    if (lead[1].includes("x")) return regexError("verbose mode (?x) is not supported.");
     source = source.slice(lead[0].length);
     for (const f of lead[1]) if (!flags.includes(f)) flags += f;
   }
   if (opts.ignoreCase && !flags.includes("i")) flags += "i";
   if (opts.multiline && !flags.includes("m")) flags += "m";
+  // The re2 package would read \1 as the octal escape \x01: refuse instead.
+  if (hasBackreference(source)) return regexError("backreferences are not supported.");
   try {
-    return new RegExp(source, `${flags}u`);
-  } catch {
-    try {
-      return new RegExp(source, flags);
-    } catch (err) {
-      return { error: `Error: rg: regex parse error: ${(err as Error).message}\n${REGEX_NOTE}` };
-    }
+    return new RE2(source, `${flags}u`);
+  } catch (err) {
+    return regexError((err as Error).message);
   }
 }
 
@@ -235,13 +325,23 @@ async function listRoots(
 
 const isBinary = (data: Buffer) => data.subarray(0, 8192).includes(0);
 
-/** Reads files in order, PARALLELISM at a time; `visit` returns false to stop early. */
+const yieldToEventLoop = () => new Promise<void>((resolve) => setImmediate(resolve));
+
+/**
+ * Reads files in order, PARALLELISM at a time; `visit` returns false to stop
+ * early. Yields to the event loop between batches (cached reads resolve as
+ * microtasks only) and stops at `deadline` (epoch ms). Returns false when the
+ * deadline stopped it.
+ */
 async function readInOrder<T extends { entry: WorkspaceEntry }>(
   fs: WorkspaceFiles,
   items: T[],
   visit: (item: T, text: string) => boolean,
-): Promise<void> {
+  deadline: number,
+): Promise<boolean> {
   for (let i = 0; i < items.length; i += DOWNLOAD_PARALLELISM) {
+    await yieldToEventLoop();
+    if (Date.now() >= deadline) return false;
     const batch = items.slice(i, i + DOWNLOAD_PARALLELISM);
     const contents = await Promise.all(
       batch.map(async (item) => {
@@ -254,10 +354,15 @@ async function readInOrder<T extends { entry: WorkspaceEntry }>(
     for (let j = 0; j < batch.length; j++) {
       const text = contents[j];
       if (text === undefined) continue;
-      if (!visit(batch[j], text)) return;
+      if (!visit(batch[j], text)) return true;
+      if (Date.now() >= deadline) return false;
     }
   }
+  return true;
 }
+
+const timeBudgetNote = (ms: number) =>
+  `[The search stopped after ${Math.round(ms / 1000)} s; the results above are incomplete. Narrow paths or glob.]`;
 
 // ── rg / grep ──────────────────────────────────────────────────────────────
 
@@ -276,11 +381,20 @@ export interface RgArgs {
   multiline?: boolean;
 }
 
-/** Line numbers (0-based) that a match touches, per file. */
-function matchingLines(text: string, lines: string[], re: RegExp, multiline: boolean, maxCount: number): number[] {
+/**
+ * Line numbers (0-based) that a match touches, per file. `re` is the global
+ * regex (multiline mode), `single` the same pattern without "g" (per line).
+ */
+function matchingLines(
+  text: string,
+  lines: string[],
+  re: RegExp,
+  single: RegExp,
+  multiline: boolean,
+  maxCount: number,
+): number[] {
   const hits: number[] = [];
   if (!multiline) {
-    const single = new RegExp(re.source, re.flags.replace("g", ""));
     for (let i = 0; i < lines.length && hits.length < maxCount; i++) if (single.test(lines[i])) hits.push(i);
     return hits;
   }
@@ -310,14 +424,24 @@ function matchingLines(text: string, lines: string[], re: RegExp, multiline: boo
   return hits.sort((a, b) => a - b);
 }
 
-export async function runRipgrep(fs: WorkspaceFiles, args: RgArgs): Promise<ToolResultObject> {
+export async function runRipgrep(
+  fs: WorkspaceFiles,
+  args: RgArgs,
+  options: { timeBudgetMs?: number } = {},
+): Promise<ToolResultObject> {
   if (!args.pattern) return failure("Error: pattern is required");
   const mode = args.output_mode ?? "files_with_matches";
   const re = buildSearchRegex(args.pattern, { ignoreCase: args["-i"], multiline: args.multiline });
   if ("error" in re) return failure(re.error);
   const type = typeMatcher(args.type);
   if (type === "unknown") return failure(`Error: rg: unrecognized file type: ${args.type}`);
-  const globMatch = args.glob ? globMatcher(args.glob) : undefined;
+  const single = new RE2(re, re.flags.replace("g", ""));
+  let globMatch: ((rel: string) => boolean) | undefined;
+  try {
+    globMatch = args.glob ? globMatcher(args.glob) : undefined;
+  } catch (err) {
+    return failure(`Error: rg: ${(err as Error).message}`);
+  }
   const limit = typeof args.head_limit === "number" && args.head_limit > 0 ? Math.floor(args.head_limit) : undefined;
 
   let roots: SearchRoot[];
@@ -340,12 +464,13 @@ export async function runRipgrep(fs: WorkspaceFiles, args: RgArgs): Promise<Tool
   let filesListed = 0;
   let firstGroup = true;
 
-  await readInOrder(fs, files, ({ root, entry }, text) => {
+  const started = Date.now();
+  const complete = await readInOrder(fs, files, ({ root, entry }, text) => {
     const name = show(root, entry);
     const lines = text.split(/\r?\n/);
     if (lines.length > 0 && lines[lines.length - 1] === "" && text.endsWith("\n")) lines.pop();
     // head_limit in content mode caps matches per file (as ripgrep -m does in the built-in).
-    const hits = matchingLines(text, lines, re, args.multiline === true, mode === "content" && limit ? limit : Infinity);
+    const hits = matchingLines(text, lines, re, single, args.multiline === true, mode === "content" && limit ? limit : Infinity);
     if (hits.length === 0) return true;
     if (mode === "files_with_matches") {
       out.push(name);
@@ -369,10 +494,11 @@ export async function runRipgrep(fs: WorkspaceFiles, args: RgArgs): Promise<Tool
       prev = l;
     }
     return out.length < MAX_OUTPUT_LINES;
-  });
+  }, started + (options.timeBudgetMs ?? SEARCH_TIME_BUDGET_MS));
 
-  if (out.length === 0) return ok("No matches found.");
-  return ok(out.slice(0, MAX_OUTPUT_LINES).join("\n"));
+  const note = complete ? "" : `\n${timeBudgetNote(Date.now() - started)}`;
+  if (out.length === 0) return ok(`No matches found.${note}`);
+  return ok(`${out.slice(0, MAX_OUTPUT_LINES).join("\n")}${note}`);
 }
 
 export async function runGlob(fs: WorkspaceFiles, args: { pattern?: string; paths?: unknown }): Promise<ToolResultObject> {
@@ -383,7 +509,12 @@ export async function runGlob(fs: WorkspaceFiles, args: { pattern?: string; path
   } catch (err) {
     return failure(`Error: ${(err as Error).message}`);
   }
-  const match = globMatcher(args.pattern);
+  let match: (rel: string) => boolean;
+  try {
+    match = globMatcher(args.pattern);
+  } catch (err) {
+    return failure(`Error: glob: ${(err as Error).message}`);
+  }
   const found = (await listRoots(fs, roots, literalGlobPrefix(args.pattern)))
     .filter(({ root, entry }) => match(root.file ? entry.path.split("/").pop()! : relTo(root.dir, entry.path)))
     // Newest first, like the built-in.
