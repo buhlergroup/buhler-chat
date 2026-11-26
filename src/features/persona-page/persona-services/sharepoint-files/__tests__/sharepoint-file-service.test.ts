@@ -32,6 +32,7 @@ vi.mock("../sharepoint-file-store", () => ({
 }));
 
 import { DeletePersonaFileSource } from "../sharepoint-file-service";
+import { queryFileSourcesByPersonaId } from "../sharepoint-file-store";
 import { addPersonaFileSource as AddPersonaFileSource } from "../add-file-source";
 
 const DRIVE = "b!driveA_123";
@@ -140,5 +141,62 @@ describe("DeletePersonaFileSource", () => {
     expect((await DeletePersonaFileSource("p1", "src1")).status).toBe("OK");
     expect(item).toHaveBeenCalledWith("src1", "owner-hash");
     expect(remove).toHaveBeenCalledOnce();
+  });
+});
+
+describe("source limit with adds of several requests at the same time", () => {
+  it("never keeps more than the limit when two adds run at the same time", async () => {
+    process.env.SHAREPOINT_FILES_MAX_SOURCES = "2";
+    let rows: Array<Record<string, unknown>> = [row({ id: "a", itemId: "A1" })];
+    // Both requests count before either inserts (the barrier): both see room.
+    let release!: () => void;
+    const barrier = new Promise<void>((resolve) => (release = resolve));
+    let counts = 0;
+    vi.mocked(queryFileSourcesByPersonaId).mockImplementation(async () => {
+      counts++;
+      if (counts === 2) release();
+      if (counts <= 2) await barrier;
+      return [...rows] as never;
+    });
+    upsert.mockImplementation(async (doc: any) => {
+      rows.push(doc);
+      return { resource: doc };
+    });
+    item.mockImplementation((...a: unknown[]) => ({
+      delete: async () => {
+        rows = rows.filter((r) => r.id !== a[0]);
+        return {};
+      },
+    }));
+
+    const results = await Promise.all([
+      AddPersonaFileSource({ personaId: "p1", driveId: DRIVE, itemId: "FOLDER1" }),
+      AddPersonaFileSource({ personaId: "p1", driveId: DRIVE, itemId: "FILE1" }),
+    ]);
+
+    expect(rows.length).toBeLessThanOrEqual(2);
+    const ok = results.filter((r) => r.status === "OK");
+    expect(ok.length).toBe(rows.length - 1);
+    for (const r of results.filter((r) => r.status !== "OK")) {
+      expect(r.status === "ERROR" && r.errors[0].message).toMatch(/up to 2/);
+    }
+
+    vi.mocked(queryFileSourcesByPersonaId).mockImplementation(async () => existing as never);
+    upsert.mockImplementation(async (doc: unknown) => ({ resource: doc }));
+    item.mockImplementation((..._a: unknown[]) => ({ delete: remove }));
+  });
+});
+
+describe("source actions: NOT_FOUND for a user who cannot open the agent", () => {
+  it("DeletePersonaFileSource and addPersonaFileSource answer like an unknown agent", async () => {
+    existing = [row()];
+    access = { canUse: false, canEdit: false };
+    remove.mockClear();
+    expect((await DeletePersonaFileSource("p1", "src1")).status).toBe("NOT_FOUND");
+    expect((await AddPersonaFileSource({ personaId: "p1", driveId: DRIVE, itemId: "FOLDER1" })).status).toBe(
+      "NOT_FOUND",
+    );
+    expect(remove).not.toHaveBeenCalled();
+    expect(fetch).not.toHaveBeenCalled();
   });
 });

@@ -33,6 +33,7 @@ import {
   skillBlobContainer,
   skillBlobName,
 } from "./persona-skill-store";
+import { withinSkillLimit } from "./skill-limit";
 import { syncLinkedSkill } from "./linked-skill-sync";
 import { updatePersonaRow, withCodeInterpreterOn } from "../persona-row";
 
@@ -74,9 +75,10 @@ export async function UploadPersonaSkill(
   }
 
   try {
-    // Owner check on the SERVER, before any work on the upload.
+    // Owner check on the SERVER, before any work on the upload. A user who
+    // cannot open the agent gets the answer of an unknown agent.
     const access = await resolveSkillAccess(personaId);
-    if (!access) return notFound();
+    if (!access || !access.canUse) return notFound();
     if (!access.canEdit) return notAllowed();
 
     const existing = await querySkillsByPersonaId(personaId);
@@ -151,6 +153,14 @@ export async function UploadPersonaSkill(
     }
 
     await HistoryContainer().items.upsert<PersonaSkillModel>(model);
+    // A new skill: counted again after the insert, so uploads of several
+    // requests at the same time never exceed the limit together.
+    if (!replaced && !(await withinSkillLimit(personaId, model))) {
+      return {
+        status: "ERROR",
+        errors: [{ message: `An agent can have up to ${SKILL_LIMITS.maxSkillsPerAgent} skills.` }],
+      };
+    }
     if (replaced && replaced.blobName !== blobName) {
       await DeleteBlob(skillBlobContainer(), replaced.blobName);
     }
@@ -190,7 +200,7 @@ export async function CheckPersonaSkillNow(
 > {
   try {
     const access = await resolveSkillAccess(personaId);
-    if (!access) return notFound();
+    if (!access || !access.canUse) return notFound();
     if (!access.canEdit) return notAllowed();
 
     const skills = await querySkillsByPersonaId(personaId);
@@ -238,7 +248,7 @@ export async function DeletePersonaSkill(
 ): Promise<ServerActionResponse<boolean>> {
   try {
     const access = await resolveSkillAccess(personaId);
-    if (!access) return notFound();
+    if (!access || !access.canUse) return notFound();
     if (!access.canEdit) return notAllowed();
 
     const skill = (await querySkillsByPersonaId(personaId)).find((s) => s.id === skillId);

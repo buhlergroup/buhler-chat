@@ -35,6 +35,7 @@ import {
   skillBlobContainer,
   skillBlobName,
 } from "./persona-skill-store";
+import { withinSkillLimit } from "./skill-limit";
 import {
   buildSharePointSource,
   fetchLinkedSkillZip,
@@ -57,7 +58,9 @@ export async function linkSharePointSkill(
 
   try {
     const access = await resolveSkillAccess(personaId);
-    if (!access) return { status: "NOT_FOUND", errors: [{ message: "Agent not found." }] };
+    if (!access || !access.canUse) {
+      return { status: "NOT_FOUND", errors: [{ message: "Agent not found." }] };
+    }
     if (!access.canEdit) {
       return {
         status: "UNAUTHORIZED",
@@ -121,6 +124,16 @@ export async function linkSharePointSkill(
       return { status: "ERROR", errors: [{ message: "The skill could not be saved." }] };
     }
     await HistoryContainer().items.upsert<PersonaSkillModel>(model);
+
+    // Adds of several requests at the same time each saw fewer skills than
+    // the limit: counted again after the insert. Over the limit, this add is
+    // undone (row and blob), so the agent never keeps more than the limit.
+    if (!(await withinSkillLimit(personaId, model))) {
+      return {
+        status: "ERROR",
+        errors: [{ message: `An agent can have up to ${SKILL_LIMITS.maxSkillsPerAgent} skills.` }],
+      };
+    }
     rememberDriveItemVersion(driveId, itemId, meta, access.currentUserId);
 
     logInfo("agent skills: SharePoint skill linked", {
