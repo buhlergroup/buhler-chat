@@ -29,11 +29,6 @@ describe("journal access: read yes, write no", () => {
     ).toEqual({ kind: "reject" });
   });
 
-  it("permission gate: a read of a denied path is rejected", async () => {
-    const gate = permissionGate({ appToolNames: apps, readDenied: (p) => p === "/session-state/secret.json" });
-    expect(await gate({ kind: "read", path: "/session-state/secret.json" } as never, {} as never)).toEqual({ kind: "reject" });
-  });
-
   it("pre-tool hook: create / edit / apply_patch outside /workspace are denied", async () => {
     const gate = preToolGate({ appToolNames: apps });
     const decision = async (name: string, args: unknown) => (await gate(hook(name, args), inv))?.permissionDecision;
@@ -65,6 +60,25 @@ describe("journal access: read yes, write no", () => {
     expect((await gate(hook("task", { agent_type: "general" }), inv))?.permissionDecision).toBe("allow");
     expect((await gate(hook("get_current_time", {}, { agentId: "a1" }), inv))?.permissionDecision).toBe("deny");
     expect((await gate(hook("get_current_time", {}), inv))?.permissionDecision).toBe("allow");
+  });
+
+  it("pre-tool hook: indented, tab, CRLF and loosely spaced patch headers are read too", async () => {
+    const gate = preToolGate({ appToolNames: apps });
+    const decision = async (patch: string) => (await gate(hook("apply_patch", patch), inv))?.permissionDecision;
+    const variants = [
+      "*** Begin Patch\n  *** Update File: /session-state/events.jsonl\n@@\n-a\n+b\n*** End Patch\n",
+      "*** Begin Patch\n\t*** Add File: /session-state/x.txt\n+a\n*** End Patch\n",
+      "*** Begin Patch\r\n*** Add File: /session-state/x.txt\r\n+a\r\n*** End Patch\r\n",
+      "*** Begin Patch\r\n \t*** Delete File: /session-state/workspace.yaml\r\n*** End Patch\r\n",
+      "*** Begin Patch\n*** Update File: /workspace/a.txt\n    *** Move to: /session-state/a.txt\n*** End Patch\n",
+      "*** Begin Patch\n***Add File:/session-state/x.txt\n+a\n*** End Patch\n",
+      "*** Begin Patch\n*** add file: /session-state/x.txt\n+a\n*** End Patch\n",
+      "*** Begin Patch\n \v*** Update  File : /session-state/events.jsonl\n@@\n-a\n+b\n*** End Patch\n",
+    ];
+    for (const patch of variants) expect(await decision(patch), JSON.stringify(patch)).toBe("deny");
+    // The same shapes inside /workspace stay allowed.
+    expect(await decision("*** Begin Patch\r\n  *** Add File: /workspace/a.txt\r\n+a\r\n*** End Patch\r\n")).toBe("allow");
+    expect(patchPaths("  *** Add File: a.txt\r\n\t*** Delete File: /workspace/b\r\n")).toEqual(["a.txt", "/workspace/b"]);
   });
 
   it("helpers", () => {

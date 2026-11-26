@@ -717,18 +717,11 @@ compactions in thread F: ${JSON.stringify(session.liveSessionCompactions(threadF
       const { fs, store: jStore } = await files.threadWorkspace(user, threadJ);
       const ns = `${user}/${threadJ}`;
       const pointers = await jStore.listNames(`${ns}/f/session-state/`);
-      const envSecrets = Object.entries(process.env)
-        .filter(([k, v]) => /KEY|SECRET|TOKEN|PASSWORD|CONNECTION/i.test(k) && typeof v === "string" && v.length >= 16)
-        .map(([k, v]) => [k, v as string] as const);
-      const patterns: Array<[string, RegExp]> = [
-        ["bearer token", /Bearer\s+[A-Za-z0-9._~+/=-]{20,}/],
-        ["Authorization header", /"?authorization"?\s*[:=]/i],
-        ["api key field", /"?(?:api[-_]?key|x-api-key|ocp-apim-subscription-key)"?\s*[:=]\s*"?[A-Za-z0-9]{16,}/i],
-        ["SAS signature", /[?&]sig=[A-Za-z0-9%/+=]{20,}/],
-        ["OAuth code / token", /[?&](?:code|access_token|refresh_token)=[A-Za-z0-9._-]{16,}/],
-        ["connection string", /AccountKey=|SharedAccessSignature=|Password=/i],
-        ["JWT", /eyJ[A-Za-z0-9_-]{10,}\.eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}/],
-      ];
+      const { envSecretValues, scanJournalText } = await import(
+        "@/features/chat-page/chat-services/copilot-runtime/journal-secret-scan"
+      );
+      const envSecrets = envSecretValues(process.env);
+      const known = [["extension header secret", headerSecret] as const, ...envSecrets.map(([k, v]) => [`value of ${k}`, v] as const)];
       const hits: string[] = [];
       let bytes = 0;
       for (const pointer of pointers) {
@@ -736,9 +729,7 @@ compactions in thread F: ${JSON.stringify(session.liveSessionCompactions(threadF
         const path = pointer.slice(`${ns}/f`.length);
         const text = Buffer.from(await fs.readFileBytes(path)).toString("utf8");
         bytes += text.length;
-        if (text.includes(headerSecret)) hits.push(`${path}: extension header secret`);
-        for (const [name, re] of patterns) if (re.test(text)) hits.push(`${path}: ${name}`);
-        for (const [k, v] of envSecrets) if (text.includes(v)) hits.push(`${path}: value of ${k}`);
+        for (const label of scanJournalText(text, known)) hits.push(`${path}: ${label}`);
       }
       console.log(
         `\n=== S journal scan: ${pointers.length} files, ${bytes} chars, ${envSecrets.length} env secret values checked; findings: ${hits.length ? JSON.stringify(hits) : "none"}`,

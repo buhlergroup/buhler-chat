@@ -78,7 +78,10 @@ describe("view: output of the built-in", () => {
       "File too large to read at once (86.8 KB). Consider using the grep tool to search within the file, or view with view_range to read specific sections.",
     );
     expect(text(await runView(fs, { path: "/workspace/mid.txt" }, { searchToolName: "rg" }))).toContain("using the rg tool");
-    expect(await v({ path: "/workspace/mid.txt", forceReadLargeFiles: true })).toBe(files["/workspace/mid.txt"]);
+    // Forced: at most VIEW_OUTPUT_BYTES like a range (the built-in returns the whole 86.8 KB).
+    expect(await v({ path: "/workspace/mid.txt", forceReadLargeFiles: true })).toBe(
+      `${rows(709, 20)}\n\n[Output truncated. Use view_range=[710, ...] to continue reading. In your next response, you may batch this with other view calls. File has at least 710 lines.]`,
+    );
     expect(await v({ path: "/workspace/mid.txt", view_range: [1000, 1002] })).toBe(
       "row 1000 yyyyyyyyyyyyyyyyyyyy\nrow 1001 yyyyyyyyyyyyyyyyyyyy\nrow 1002 yyyyyyyyyyyyyyyyyyyy",
     );
@@ -94,7 +97,7 @@ describe("view: output of the built-in", () => {
     expect(await v({ path: "/workspace/longline.txt", view_range: [2, 3] })).toBe("short\n");
   });
 
-  it("directories, missing paths, the jail and denied paths", async () => {
+  it("directories, missing paths and the jail", async () => {
     const { fs, store } = await workspace(files);
     expect(text(await runView(fs, { path: "/workspace/sub" }))).toBe("a.md\ndeeper");
     expect(text(await runView(fs, { path: "/workspace/sub", view_range: [1, 2] }))).toBe("a.md\ndeeper");
@@ -108,9 +111,6 @@ describe("view: output of the built-in", () => {
       expect(text(r), path).toBe(`Path ${path} does not exist. Please provide a valid path.`);
     }
     expect(store.requests).toEqual([]);
-    const denied = await runView(fs, { path: "/workspace/small.txt" }, { readDenied: (p) => p === "/workspace/small.txt" });
-    expect([denied.resultType, text(denied)]).toEqual(["failure", "This path cannot be read."]);
-    expect(store.requests).toEqual([]);
   });
 
   it("an image returns its bytes for the model, like the built-in", async () => {
@@ -121,6 +121,43 @@ describe("view: output of the built-in", () => {
     expect(r.binaryResultsForLlm).toEqual([
       { data: png.toString("base64"), mimeType: "image/png", type: "image", description: "Image file at path /workspace/images/cat.png" },
     ]);
+  });
+});
+
+describe("view: the journal and forced reads stay small", () => {
+  it("a journal grown by appends is measured from its data, not from the first write", async () => {
+    const { fs } = await workspace({ "/session-state/events.jsonl": "{}\n" });
+    const line = `${JSON.stringify({ type: "tool.execution_complete", data: { result: "x".repeat(1000) } })}\n`;
+    for (let i = 0; i < 200; i++) await fs.appendFile("/session-state/events.jsonl", line);
+    const plain = await runView(fs, { path: "/session-state/events.jsonl" });
+    expect(plain.resultType).toBe("failure");
+    expect(text(plain)).toMatch(/^File too large to read at once \(\d+\.\d KB\)/);
+    const forced = await runView(fs, { path: "/session-state/events.jsonl", forceReadLargeFiles: true });
+    expect(forced.resultType).toBe("success");
+    expect(Buffer.byteLength(text(forced))).toBeLessThanOrEqual(VIEW_OUTPUT_BYTES + 512);
+    expect(text(forced)).toContain("view_range=[");
+  });
+
+  it("forceReadLargeFiles returns at most VIEW_OUTPUT_BYTES of a big file and points to view_range", async () => {
+    const { fs } = await workspace({ "/workspace/big.txt": `${rows(40_000, 20)}\n` }); // ~1.2 MB
+    const forced = await runView(fs, { path: "/workspace/big.txt", forceReadLargeFiles: true });
+    expect(forced.resultType).toBe("success");
+    expect(Buffer.byteLength(text(forced))).toBeLessThanOrEqual(VIEW_OUTPUT_BYTES + 512);
+    expect(text(forced)).toMatch(/\[Output truncated\. Use view_range=\[\d+, \.\.\.\] to continue reading\./);
+    // A forced small file is still whole.
+    const small = await workspace({ "/workspace/s.txt": rows(3) });
+    expect(text(await runView(small.fs, { path: "/workspace/s.txt", forceReadLargeFiles: true }))).toBe(rows(3));
+  });
+
+  it("an unexpected storage error reaches the model as a fixed text, without names of the store", async () => {
+    const failing = {
+      viewTarget: async () => {
+        throw new Error("Request to https://acct.blob.core.windows.net/ws/abc123/thread1/d/0000 failed: ENOENT abc123/thread1");
+      },
+    };
+    const res = (await workspaceViewTool(failing, "gpt").handler({ path: "/workspace/a.txt" }, {} as never)) as { textResultForLlm: string };
+    expect(res.textResultForLlm).not.toMatch(/blob\.core|abc123|https?:/);
+    expect(res.textResultForLlm).toMatch(/^Error: /);
   });
 });
 

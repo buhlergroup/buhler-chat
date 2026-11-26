@@ -77,7 +77,7 @@ function setup(toggles: ProviderToolToggles = ALL, overrides: Partial<ProviderCl
   };
   const call = (name: string, args: unknown, id = `call-${name}`) =>
     runAppTool(name, args, { toolCallId: id, signal: undefined as unknown as AbortSignal }, binding);
-  return { fs, tools, records, spills, call, ...fake };
+  return { fs, store, tools, records, spills, call, ...fake };
 }
 
 describe("providerTools", () => {
@@ -248,6 +248,60 @@ describe("run_code", () => {
     const empty = await t.call("run_code", { files: [] }, "c");
     expect(empty.resultType).toBe("failure");
     expect(t.clients.ensureContainer).not.toHaveBeenCalled();
+  });
+});
+
+describe("run_code inputs: sizes are checked before any download", () => {
+  const MB = 1024 * 1024;
+  /** Makes the store report `bytes` for a workspace file (pointer and data blob) without holding them. */
+  async function inflate(t: ReturnType<typeof setup>, path: string, bytes: number) {
+    await t.fs.writeFile(path, "a,b\n1,2\n");
+    const pointer = t.store.blobs.get(`user-1/thread-1/f${path}`)!;
+    pointer.metadata.size = String(bytes);
+    const target = pointer.metadata.target;
+    const real = t.store.getProperties.bind(t.store);
+    const previous = t.store.getProperties.bind(t.store);
+    t.store.getProperties = async (name: string) => {
+      const props = await (name === target ? real : previous)(name);
+      return props && name === target ? { ...props, contentLength: bytes } : props;
+    };
+    return target;
+  }
+  const downloads = (t: ReturnType<typeof setup>, keys: string[]) =>
+    t.store.requests.filter((r) => keys.some((k) => r === `download ${k}`));
+
+  it("refuses a file over 50 MB without downloading it or making a container", async () => {
+    const t = setup();
+    const key = await inflate(t, "/workspace/big.csv", 51 * MB);
+    t.store.requests = [];
+    const res = await t.call("run_code", { code: "1", files: ["/workspace/big.csv"] }, "a");
+    expect(res.resultType).toBe("failure");
+    expect(t.records[0].uiError).toBe("run_code: file too large (over 50 MB): /workspace/big.csv");
+    expect(downloads(t, [key])).toEqual([]);
+    expect(t.clients.ensureContainer).not.toHaveBeenCalled();
+  });
+
+  it("refuses inputs over 100 MB in total before any download", async () => {
+    const t = setup();
+    const keys = [
+      await inflate(t, "/workspace/a.csv", 40 * MB),
+      await inflate(t, "/workspace/b.csv", 40 * MB),
+      await inflate(t, "/workspace/c.csv", 40 * MB),
+    ];
+    t.store.requests = [];
+    const res = await t.call("run_code", { code: "1", files: ["/workspace/a.csv", "/workspace/b.csv", "/workspace/c.csv"] }, "a");
+    expect(res.resultType).toBe("failure");
+    expect(t.records[0].uiError).toBe("run_code: the input files are too large together (over 100 MB).");
+    expect(downloads(t, keys)).toEqual([]);
+    expect(t.clients.ensureContainer).not.toHaveBeenCalled();
+  });
+
+  it("uploads a file named twice only once", async () => {
+    const t = setup();
+    await t.fs.writeFile("/workspace/data.csv", "x,y\n1,2\n");
+    const res = await t.call("run_code", { code: "1", files: ["/workspace/data.csv", "data.csv", "/workspace/./data.csv"] }, "a");
+    expect(res.resultType).toBe("success");
+    expect(t.clients.uploadToContainer).toHaveBeenCalledTimes(1);
   });
 });
 

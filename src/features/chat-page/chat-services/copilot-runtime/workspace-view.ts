@@ -25,14 +25,19 @@
  *   - an image (png, jpeg, gif, webp): "Viewed image file successfully." plus
  *     the image as binaryResultsForLlm;
  *   - a missing path: "Path <path> does not exist. Please provide a valid path."
- * One difference: a truncated range says "File has at least <n> lines" with
+ * Differences: a truncated range says "File has at least <n> lines" with
  * the lines read so far; the built-in reads the whole file and counts all.
+ * And forceReadLargeFiles returns at most 20,480 bytes like a range (then
+ * "[Output truncated. Use view_range=[n, ...] ...]"); the built-in returns up
+ * to 10 MB inline. Every view result is stored in the session journal, so a
+ * big inline result would grow the journal by its size on every call.
  */
 import type { Readable } from "node:stream";
 import type { Tool as CopilotTool, ToolResultObject } from "@microsoft/copilot-sdk";
 import builtinView from "./builtin-view-tool.json";
 import { normalizeSessionPath } from "./session-path";
 import { readAtMost, utf8Boundary } from "./stream-lines";
+import { workspaceToolErrorText } from "./tool-error-text";
 
 /** What the view tool needs from the filesystem (BlobSessionFs implements it). */
 export interface ViewFiles {
@@ -44,9 +49,9 @@ export interface ViewFiles {
   >;
 }
 
-/** Bytes of file content one view returns (whole file without view_range, or a range). */
+/** Bytes of file content one view returns (whole file, forced or not, or a range). */
 export const VIEW_OUTPUT_BYTES = 20 * 1024;
-/** Biggest file view shows at all (also with forceReadLargeFiles). */
+/** Biggest file view opens without view_range (also with forceReadLargeFiles), and biggest image. */
 export const VIEW_MAX_FILE_BYTES = 10 * 1024 * 1024;
 
 const IMAGE_TYPES: Record<string, string> = {
@@ -180,7 +185,7 @@ function parseRange(raw: unknown): { start: number; end: number } | { error: str
 export async function runView(
   fs: ViewFiles,
   args: ViewArgs,
-  options: { searchToolName?: string; readDenied?: (normalizedPath: string) => boolean } = {},
+  options: { searchToolName?: string } = {},
 ): Promise<ToolResultObject> {
   if (typeof args.path !== "string" || args.path.length === 0) return failure("A path parameter is required, and must be a non-empty string.");
   let path: string;
@@ -189,7 +194,6 @@ export async function runView(
   } catch {
     return failure(`Path ${args.path} does not exist. Please provide a valid path.`);
   }
-  if (options.readDenied?.(path)) return failure("This path cannot be read.");
   const range = parseRange(args.view_range);
   if (range && "error" in range) return failure(range.error);
 
@@ -240,7 +244,8 @@ export async function runView(
   const stream = await target.open();
   let read: RangeRead;
   try {
-    read = await readLineRange(stream, range?.start ?? 1, range?.end ?? -1, range ? VIEW_OUTPUT_BYTES : VIEW_MAX_FILE_BYTES);
+    // Also a forced whole-file read: the output goes into the journal.
+    read = await readLineRange(stream, range?.start ?? 1, range?.end ?? -1, VIEW_OUTPUT_BYTES);
   } finally {
     stream.destroy();
   }
@@ -270,7 +275,7 @@ export async function runView(
 export function workspaceViewTool(
   fs: ViewFiles,
   family: "gpt" | "claude",
-  options: { readDenied?: (normalizedPath: string) => boolean } = {},
+  options: { onError?: (err: unknown) => void } = {},
 ): CopilotTool {
   const searchToolName = family === "gpt" ? "rg" : "grep";
   return {
@@ -285,10 +290,11 @@ export function workspaceViewTool(
     // but it would spill a custom tool's result over 16 KB.
     handler: async (args: unknown) => {
       try {
-        const result = await runView(fs, (args ?? {}) as ViewArgs, { searchToolName, readDenied: options.readDenied });
+        const result = await runView(fs, (args ?? {}) as ViewArgs, { searchToolName });
         return { ...result, skipLargeOutputProcessing: true };
       } catch (err) {
-        return { ...failure(`Error: ${err instanceof Error ? err.message : String(err)}`), skipLargeOutputProcessing: true };
+        options.onError?.(err);
+        return { ...failure(workspaceToolErrorText(err)), skipLargeOutputProcessing: true };
       }
     },
   };

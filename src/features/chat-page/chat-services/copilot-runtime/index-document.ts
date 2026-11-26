@@ -12,6 +12,7 @@
  */
 import { tool } from "ai";
 import { z } from "zod";
+import { chunkTextWithOverlap, documentTooLongMessage, maxDocumentChunks } from "../chat-document-chunks";
 import type { WorkspaceEntry } from "./blob-session-fs";
 import { isExtractable, type ExtractTextResult } from "./extract-text";
 import { normalizeSessionPath, WORKSPACE_ROOT } from "./session-path";
@@ -32,7 +33,28 @@ export interface IndexDocumentDeps {
   index(name: string, text: string): Promise<number>;
   /** extract_text for a PDF/Office file whose <file>.md is missing (extract-text.ts). */
   extractText?(path: string): Promise<ExtractTextResult>;
+  /** Biggest file that is read for indexing (maxWorkspaceUploadBytes); none when unset. */
+  maxBytes?: number;
+  /** Bytes one index_document call reads in total; 4 x maxBytes when unset. */
+  maxCallBytes?: number;
 }
+
+/**
+ * What one index_document call may still use: bytes read and chunks indexed.
+ * Chunks: one call indexes at most MAX_DOCUMENT_CHUNKS in total (the limit of
+ * one document), so 20 paths cannot cost 20 times the embedding calls.
+ */
+export interface IndexBudget {
+  bytes: number;
+  chunks: number;
+}
+
+export function newIndexBudget(deps: Pick<IndexDocumentDeps, "maxBytes" | "maxCallBytes">): IndexBudget {
+  const bytes = deps.maxCallBytes ?? (deps.maxBytes !== undefined ? deps.maxBytes * 4 : Infinity);
+  return { bytes, chunks: maxDocumentChunks() };
+}
+
+const AGAIN = "Not indexed: this call reached its limit. Call index_document again with the remaining files.";
 
 export interface IndexResult {
   path: string;
@@ -43,13 +65,20 @@ export interface IndexResult {
 }
 
 const isText = (data: Buffer) => !data.subarray(0, 8192).includes(0);
+const mb = (n: number) => `${(n / (1024 * 1024)).toFixed(1)} MB`;
+const tooLarge = (bytes: number, limit: number) =>
+  `The file is too large to index (${mb(bytes)}, the limit is ${mb(limit)}). Split it into smaller files first.`;
 
 async function findEntry(deps: IndexDocumentDeps, path: string): Promise<WorkspaceEntry | undefined> {
   const slash = path.lastIndexOf("/");
   return (await deps.fs.listEntries(path.slice(0, slash), path.slice(slash + 1))).find((e) => e.path === path);
 }
 
-export async function indexWorkspaceDocument(deps: IndexDocumentDeps, rawPath: string): Promise<IndexResult> {
+export async function indexWorkspaceDocument(
+  deps: IndexDocumentDeps,
+  rawPath: string,
+  budget: IndexBudget = newIndexBudget(deps),
+): Promise<IndexResult> {
   let path: string;
   try {
     path = normalizeSessionPath(rawPath);
@@ -70,7 +99,18 @@ export async function indexWorkspaceDocument(deps: IndexDocumentDeps, rawPath: s
     if (extracted.status === "error") return { path, status: "error", error: extracted.error };
     companion = await findEntry(deps, `${docPath}.md`);
   }
-  const data = await deps.fs.readEntry(companion ?? entry);
+  const source = companion ?? entry;
+  // Sizes come from the listing: a file that is too big is never downloaded.
+  if (deps.maxBytes !== undefined && source.size !== undefined && source.size > deps.maxBytes) {
+    return { path, status: "error", error: tooLarge(source.size, deps.maxBytes) };
+  }
+  if (source.size !== undefined && source.size > budget.bytes) return { path, status: "error", error: AGAIN };
+  const data = await deps.fs.readEntry(source);
+  if (deps.maxBytes !== undefined && data.length > deps.maxBytes) {
+    return { path, status: "error", error: tooLarge(data.length, deps.maxBytes) };
+  }
+  if (data.length > budget.bytes) return { path, status: "error", error: AGAIN };
+  budget.bytes -= data.length;
   if (!isText(data)) {
     return {
       path,
@@ -82,6 +122,15 @@ export async function indexWorkspaceDocument(deps: IndexDocumentDeps, rawPath: s
   const name = docPath.slice(WORKSPACE_ROOT.length + 1);
   const text = data.toString("utf8");
   if (text.trim().length === 0) return { path: docPath, name, status: "error", error: "The file has no text." };
+
+  // Refused before any embedding call, and before the earlier chunks are replaced.
+  const chunkCount = chunkTextWithOverlap(text).filter((c) => c.trim().length > 0).length;
+  const maxChunks = maxDocumentChunks();
+  if (chunkCount > maxChunks) {
+    return { path: docPath, name, status: "error", error: documentTooLongMessage(chunkCount, maxChunks) };
+  }
+  if (chunkCount > budget.chunks) return { path: docPath, name, status: "error", error: AGAIN };
+  budget.chunks -= chunkCount;
 
   const row = await deps.findRow(name);
   const chunks = await deps.index(name, text);
@@ -110,7 +159,8 @@ export function indexDocumentTool(deps: IndexDocumentDeps) {
     }),
     execute: async ({ paths }: { paths: string[] }) => {
       const results: IndexResult[] = [];
-      for (const p of paths) results.push(await indexWorkspaceDocument(deps, p));
+      const budget = newIndexBudget(deps);
+      for (const p of paths) results.push(await indexWorkspaceDocument(deps, p, budget));
       return { results };
     },
   });

@@ -92,6 +92,8 @@ interface RuntimeState {
   /** A sweep is running (disconnects take time; sweeps never overlap). */
   sweeping?: boolean;
   limiter?: TurnLimiter;
+  /** Abort of each running turn, per session id (lockThreadSessions stops it). */
+  turnAborts?: Map<string, AbortController>;
 }
 
 // One client (one runtime child process) per server process. Kept on
@@ -276,26 +278,56 @@ export async function forgetLiveSessions(): Promise<void> {
   for (const [id, live] of state.sessions) await dropSession(id, live);
 }
 
+/** How long a reset waits for the lease after it stopped this process's turn (its abort grace and a margin). */
+const RESET_WAIT_MS = ABORT_GRACE_MS + 5_000;
+
+/** Aborts of the turns running in this process, per session id (a reset stops them). */
+const turnAborts = (state.turnAborts ??= new Map());
+
 /**
- * After a rewind or reset: drops this process's live session of the thread
- * and gives the lease blob a new generation (holder `reset-<uuid>`), so any
- * OTHER instance that still holds a live session drops it on the next turn
- * (thread-lease.ts: previousHolder differs from its own id). Throws
- * ThreadBusyError when a turn holds the lease.
+ * Before a rewind or reset deletes the session state of a thread:
+ *   1. stops this process's running turn of the thread (if any), so it does
+ *      not append to the journal while the state is deleted;
+ *   2. takes the thread lease, so no turn runs on any instance meanwhile
+ *      (it waits for the stopped turn to end);
+ *   3. drops this process's live session of the thread.
+ * The caller deletes, then calls `release()`: it gives the lease blob a new
+ * generation (holder `reset-<uuid>`), so any OTHER instance that still holds a
+ * live session drops it on its next turn (thread-lease.ts: previousHolder
+ * differs from its own id). Throws ThreadBusyError when a turn on another
+ * instance still holds the lease; the caller must not delete then.
  */
-export async function invalidateThreadSessions(
+export async function lockThreadSessions(
   userKey: string,
   threadId: string,
   leases?: LeaseBackend,
-): Promise<void> {
+  leaseOptions?: Partial<Omit<ThreadLeaseOptions, "holder" | "onLost">>,
+): Promise<{ release(): Promise<void> }> {
   const id = `thread-${threadId}`;
-  await dropSession(id, state.sessions.get(id));
+  const running = turnAborts.get(id);
+  if (running) {
+    logInfo("copilot-runtime: stopping the running turn for a reset", { threadId });
+    running.abort();
+  }
   const namespace = buildNamespace(userKey, threadId);
   const backend = leases ?? (await getAgentWorkspaceLeases());
-  const lease = await acquireThreadLease(backend, `${namespace}/lease`, { holder: `reset-${randomUUID()}` });
-  await lease.release();
-  logInfo("copilot-runtime: thread session invalidated", { threadId });
+  const lease = await acquireThreadLease(backend, `${namespace}/lease`, {
+    ...(running ? { waitMs: RESET_WAIT_MS } : {}),
+    ...leaseOptions,
+    holder: `reset-${randomUUID()}`,
+  });
+  await dropSession(id, state.sessions.get(id));
+  logInfo("copilot-runtime: thread locked for a reset", { threadId });
+  return { release: () => lease.release() };
 }
+
+/** Logs a failed workspace tool call (the model gets a fixed text, tool-error-text.ts). */
+const workspaceToolFailed = (threadId: string) => (tool: string, err: unknown) =>
+  logWarn("copilot-runtime: workspace tool failed", {
+    threadId,
+    tool,
+    error: err instanceof Error ? err.message : String(err),
+  });
 
 /** The runtime gives GPT models `rg` and Claude models `grep`; ours follow. */
 function searchFamily(modelId: ChatModel): SearchToolFamily {
@@ -345,8 +377,6 @@ export interface CopilotTurnInput {
   subAgents?: SubAgentPlanInput;
   /** Access re-check of a persona sub-agent; runs in this turn's request context. */
   canUsePersona?: (personaId: string) => Promise<boolean>;
-  /** Normalised paths the model may not read (journal files with secrets). */
-  readDenied?: (normalizedPath: string) => boolean;
   /** Tests / smoke: sees every session event of the turn (incl. sub-agents). */
   onEvent?: (event: { type: string; agentId?: string; data?: unknown }) => void;
   /** Tests / smoke: another store, and a view of every file operation. */
@@ -489,8 +519,8 @@ async function openSession(
     new Set(Object.keys(binding.current?.toolset ?? registered));
   const definitions: CopilotTool[] = [
     ...(await toCopilotTools(registered, () => binding.current)),
-    ...workspaceTools(fs, family, { spill: (p, c) => fs.writeFile(p, c), readDenied: input.readDenied }),
-    workspaceViewTool(fs, family, { readDenied: input.readDenied }),
+    ...workspaceTools(fs, family, { spill: (p, c) => fs.writeFile(p, c), onError: workspaceToolFailed(input.threadId) }),
+    workspaceViewTool(fs, family, { onError: (err) => workspaceToolFailed(input.threadId)("view", err) }),
   ];
   const config = {
     model: selectionId,
@@ -517,10 +547,10 @@ async function openSession(
       ...(plan.parentExcludedTools.length > 0 ? { default: { excludedTools: plan.parentExcludedTools } } : {}),
     },
     systemMessage: buildCopilotSystemMessage(input.systemMessage),
-    permissions: { onRequest: permissionGate({ appToolNames, readDenied: input.readDenied }) },
+    permissions: { onRequest: permissionGate({ appToolNames }) },
     hooks: {
       handlers: {
-        onPreToolUse: preToolGate({ appToolNames, readDenied: input.readDenied, subAgents: () => binding.gate }),
+        onPreToolUse: preToolGate({ appToolNames, subAgents: () => binding.gate }),
         onSubagentStart: async (hook: { agentName: string }) => {
           if (!binding.gate) throw new Error("No turn is running");
           await binding.gate.onStart(hook.agentName);
@@ -612,6 +642,12 @@ export async function runCopilotTurn(input: CopilotTurnInput): Promise<CopilotTu
   // One session per thread across instances: hold the thread's Blob lease
   // for the whole turn (thread-lease.ts).
   let lease: Awaited<ReturnType<typeof acquireThreadLease>> | undefined;
+  // A reset of the thread (lockThreadSessions) stops the turn through this.
+  const resetAbort = new AbortController();
+  const sessionId = `thread-${input.threadId}`;
+  const forgetAbort = () => {
+    if (turnAborts.get(sessionId) === resetAbort) turnAborts.delete(sessionId);
+  };
   try {
     const namespace = buildNamespace(input.userKey, input.threadId);
     const leases = input.leases ?? (await getAgentWorkspaceLeases());
@@ -627,7 +663,7 @@ export async function runCopilotTurn(input: CopilotTurnInput): Promise<CopilotTu
         leaseLost.abort();
       },
     });
-    const sessionId = `thread-${input.threadId}`;
+    turnAborts.set(sessionId, resetAbort);
     const live = state.sessions.get(sessionId);
     if (live && lease.previousHolder !== state.instanceId) {
       // Generation check: this process writes its id on every release, so a
@@ -639,11 +675,12 @@ export async function runCopilotTurn(input: CopilotTurnInput): Promise<CopilotTu
     }
     const handle = await runTurnInSession({
       ...input,
-      abortSignal: AbortSignal.any([input.abortSignal, leaseLost.signal]),
+      abortSignal: AbortSignal.any([input.abortSignal, leaseLost.signal, resetAbort.signal]),
     });
     const held = lease;
     const result = handle.result.finally(async () => {
       releaseSlot();
+      forgetAbort();
       await held.release().catch((err) =>
         logWarn("copilot-runtime: lease release failed", {
           threadId: input.threadId,
@@ -654,9 +691,10 @@ export async function runCopilotTurn(input: CopilotTurnInput): Promise<CopilotTu
     return { stream: handle.stream, result };
   } catch (err) {
     releaseSlot();
+    forgetAbort();
     await lease?.release().catch(() => undefined);
     if (isRuntimeGoneError(err)) await resetCopilotRuntime(err instanceof Error ? err.message : String(err));
-    else if (isSessionGoneError(err)) await dropSession(`thread-${input.threadId}`, state.sessions.get(`thread-${input.threadId}`));
+    else if (isSessionGoneError(err)) await dropSession(sessionId, state.sessions.get(sessionId));
     throw err;
   }
 }
@@ -699,8 +737,8 @@ async function runTurnInSession(input: CopilotTurnInput): Promise<CopilotTurnHan
       // setTools replaces ALL client tools, so the workspace tools go along.
       await live.session.setTools([
         ...(await toCopilotTools(registered, () => live.binding.current)),
-        ...workspaceTools(live.fs, family, { spill: (p, c) => live.fs.writeFile(p, c), readDenied: input.readDenied }),
-        workspaceViewTool(live.fs, family, { readDenied: input.readDenied }),
+        ...workspaceTools(live.fs, family, { spill: (p, c) => live.fs.writeFile(p, c), onError: workspaceToolFailed(input.threadId) }),
+        workspaceViewTool(live.fs, family, { onError: (err) => workspaceToolFailed(input.threadId)("view", err) }),
       ]);
       live.toolSignature = signature;
     }

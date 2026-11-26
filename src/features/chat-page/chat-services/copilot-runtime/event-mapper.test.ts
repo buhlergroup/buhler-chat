@@ -132,6 +132,26 @@ describe("CopilotEventMapper", () => {
     expect(chunks).toContainEqual({ type: "tool-output-available", toolCallId: "v2", output: "alpha", dynamic: true });
   });
 
+  it("cleans the error text of runtime and workspace tools before it is streamed (and stored)", () => {
+    const raw =
+      "Error: Request to https://acct.blob.core.windows.net/ws/0123456789abcdef0123456789abcdef0123456789abcdef/t1/d/0 failed; " +
+      "x-api-key: s3cr3tvalue12345 Bearer abcdefghijklmnopqrstuvwxyz0123456789";
+    const { chunks } = run([
+      { type: "tool.execution_start", data: { toolCallId: "r1", toolName: "rg", arguments: { pattern: "x" } } },
+      { type: "tool.execution_complete", data: { toolCallId: "r1", success: false, error: { message: raw } } },
+      { type: "tool.execution_start", data: { toolCallId: "t1", toolName: "task", arguments: {} } },
+      { type: "tool.execution_complete", data: { toolCallId: "t1", success: false, result: { content: `${raw}\n${"z".repeat(1000)}` } } },
+      { type: "session.idle", data: {} },
+    ]);
+    const errors = chunks.filter((c) => c.type === "tool-output-error") as Array<{ errorText: string }>;
+    expect(errors).toHaveLength(2);
+    for (const e of errors) {
+      expect(e.errorText).not.toMatch(/blob\.core|https?:|0123456789abcdef0123|s3cr3tvalue|abcdefghijklmnop/);
+      expect(e.errorText.length).toBeLessThanOrEqual(300);
+    }
+    expect(errors[0].errorText).toMatch(/^Error: Request to \[url\] failed;/);
+  });
+
   it("shows the UI-safe error text for app tools", () => {
     const { chunks } = run(
       [

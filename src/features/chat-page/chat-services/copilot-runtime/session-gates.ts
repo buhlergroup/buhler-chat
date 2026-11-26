@@ -7,7 +7,7 @@
  * File access:
  *   - read (view, our rg/grep/glob): anywhere in the jail, so `/workspace/**`
  *     and `/session-state/**` (the journal helps to recover details after a
- *     compaction). Paths in `readDenied` are refused.
+ *     compaction; it holds no secrets: journal-secret-scan.test.ts).
  *   - write (create, edit, apply_patch): only `/workspace/**`. The journal
  *     under `/session-state` is the runtime's; a model that could write it
  *     could forge its own history.
@@ -55,7 +55,12 @@ export function insideWorkspace(p: unknown): boolean {
   return n !== undefined && (n === WORKSPACE_ROOT || n.startsWith(`${WORKSPACE_ROOT}/`));
 }
 
-const PATCH_HEADER = /^\*\*\* (?:Add File|Update File|Delete File|Move to):\s*(.+?)\s*$/gm;
+// A file header of an apply_patch input. Lenient on purpose (any leading
+// whitespace on the line, CRLF, no space after "***", any letter case): a
+// header this misses would be a write the gate does not check.
+// `[^\S\r\n]` is whitespace other than a line break.
+const PATCH_HEADER =
+  /^[^\S\r\n]*\*\*\*[^\S\r\n]*(?:Add[^\S\r\n]+File|Update[^\S\r\n]+File|Delete[^\S\r\n]+File|Move[^\S\r\n]+to)[^\S\r\n]*:[^\S\r\n]*(.+?)\s*$/gim;
 
 /** Paths an apply_patch input names (Add / Update / Delete File, Move to). */
 export function patchPaths(patch: string): string[] {
@@ -99,14 +104,7 @@ export function writeRequestPaths(request: Extract<PermissionRequest, { kind: "w
 export interface GateOptions {
   /** Names of the app's custom tools in this turn (incl. sub-agent-only tools). */
   appToolNames: () => ReadonlySet<string>;
-  /** Normalised paths the model may not read (e.g. a journal file with a secret). */
-  readDenied?: (normalizedPath: string) => boolean;
 }
-
-const readAllowed = (path: unknown, readDenied?: (p: string) => boolean): boolean => {
-  const n = normalized(path);
-  return n !== undefined && !(readDenied?.(n) ?? false);
-};
 
 /** Allows our own tools, reads inside the jail, writes inside /workspace; nothing else. */
 export function permissionGate(options: GateOptions): PermissionHandler {
@@ -116,7 +114,7 @@ export function permissionGate(options: GateOptions): PermissionHandler {
         return options.appToolNames().has(request.toolName) ? { kind: "approve-once" } : { kind: "reject" };
       // File tools: their I/O goes to the provider, which jails the path again.
       case "read":
-        return readAllowed(request.path, options.readDenied) ? { kind: "approve-once" } : { kind: "reject" };
+        return insideJail(request.path) ? { kind: "approve-once" } : { kind: "reject" };
       case "write":
         if (writeRequestPaths(request).every(insideWorkspace)) return { kind: "approve-once" };
         logWarn("copilot-runtime: write outside /workspace denied", { kind: request.kind });
@@ -140,7 +138,7 @@ export interface SubAgentHookGate {
 
 /**
  * The pre-tool hook: denies every tool that is not ours or an allowed file
- * tool, writes outside /workspace, reads of denied paths, and sub-agent
+ * tool, writes outside /workspace, reads outside the jail, and sub-agent
  * starts the turn's sub-agent gate refuses.
  */
 export function preToolGate(
@@ -158,7 +156,7 @@ export function preToolGate(
     }
     if (name === "view") {
       const path = (input.toolArgs as { path?: unknown } | undefined)?.path;
-      return readAllowed(path, options.readDenied) ? allow() : deny("This path cannot be read.");
+      return insideJail(path) ? allow() : deny("This path cannot be read.");
     }
     return files.has(name) || options.appToolNames().has(name) ? allow() : deny("Tool not allowed");
   };

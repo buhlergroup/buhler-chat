@@ -10,7 +10,7 @@ import {
 import { analyzeTextWithDocumentIntelligence } from "@/features/common/services/document-extraction";
 import { logWarn } from "@/features/common/services/logger";
 import { IndexDocuments } from "../azure-ai-search/azure-ai-search";
-import { chunkTextWithOverlap } from "../chat-document-chunks";
+import { chunkTextWithOverlap, documentTooLongMessage, maxDocumentChunks } from "../chat-document-chunks";
 import type { ExtractedText } from "./extract-text";
 
 /**
@@ -69,6 +69,10 @@ export async function indexDocument(args: {
   const { threadId, userKey, name, text } = args;
   const chunks = chunkTextWithOverlap(text).filter((c) => c.trim().length > 0);
   if (chunks.length === 0) return 0;
+  // IndexDocuments refuses it too, but only after the earlier chunks of the
+  // document would be gone: refuse first.
+  const maxChunks = maxDocumentChunks();
+  if (chunks.length > maxChunks) throw new Error(documentTooLongMessage(chunks.length, maxChunks));
 
   // `metadata` (the document name) is not filterable in the index: filter by
   // thread and user, pick this document's chunks from the results.

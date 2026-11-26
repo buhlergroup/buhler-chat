@@ -8,6 +8,7 @@ import { CHAT_DOCUMENT_ATTRIBUTE, type ChatDocumentModel } from "../models";
 import { BlobSessionFs, sharedWorkspaceQuota, type BlobStore } from "./blob-session-fs";
 import { getAgentWorkspaceStore, getExistingAgentWorkspaceStore } from "./azure-blob-store";
 import { buildNamespace, SESSION_STATE_ROOT } from "./session-path";
+import { ThreadBusyError } from "./thread-lease";
 import { extractDocumentText, indexDocument } from "./document-pipeline";
 import { extractWorkspaceText, type ExtractTextDeps } from "./extract-text";
 import type { IndexDocumentDeps } from "./index-document";
@@ -113,27 +114,69 @@ export async function removeThreadWorkspaceFiles(
   return names.length;
 }
 
+/** The text for a reset or rewind that waits for a running reply. */
+export const RESET_BUSY_TEXT = "A reply is still running in this chat. Stop it, then try again.";
+
+export type ThreadResetLock = { ok: true; release(): Promise<void> } | { ok: false; message: string };
+
+/**
+ * Locks a thread for a reset / rewind (Copilot path; a no-op lock elsewhere):
+ * stops this process's running turn of the thread, holds the thread lease
+ * while the caller deletes, and drops the live sessions (copilot-session.ts
+ * lockThreadSessions). `ok: false` while a reply runs on another instance:
+ * the caller must not delete anything then. Release it after the deletion.
+ */
+export async function lockThreadForReset(userKey: string, threadId: string): Promise<ThreadResetLock> {
+  if (!copilotRuntimeConfigured()) return { ok: true, release: async () => undefined };
+  const session = await import("./copilot-session");
+  try {
+    const lock = await session.lockThreadSessions(userKey, threadId);
+    return {
+      ok: true,
+      release: () =>
+        lock.release().catch((err) =>
+          logWarn("copilot-runtime: thread lock release failed", {
+            threadId,
+            error: err instanceof Error ? err.message : String(err),
+          }),
+        ),
+    };
+  } catch (err) {
+    if (err instanceof ThreadBusyError || (err as { name?: unknown })?.name === "ThreadBusyError") {
+      return { ok: false, message: RESET_BUSY_TEXT };
+    }
+    // The lease store failed: no turn can start without it either. Delete
+    // without the lock, after this process's live session is gone.
+    logWarn("copilot-runtime: could not lock the thread for a reset", {
+      threadId,
+      error: err instanceof Error ? err.message : String(err),
+    });
+    await session.discardLiveSession(threadId).catch(() => undefined);
+    return { ok: true, release: async () => undefined };
+  }
+}
+
 /**
  * Same as removeThreadWorkspaceFiles, logging instead of failing the caller.
- * When the session state goes, this process's live session of the thread goes
- * first, so it cannot write the state back or answer from deleted turns.
+ * The session state goes only under the thread lock (lockThreadForReset), so
+ * no running turn writes it back and no live session answers from deleted
+ * turns; while a reply runs on another instance it is kept (logged). A caller
+ * that holds the lock already passes `locked`.
  */
 export async function removeThreadWorkspaceFilesQuietly(
   userKey: string,
   threadId: string,
   scope: WorkspaceScope,
+  options: { locked?: boolean } = {},
 ): Promise<void> {
+  let lock: ThreadResetLock | undefined;
   try {
-    if (scope !== "uploads" && copilotRuntimeConfigured()) {
-      // Drops this process's live session and gives the thread's lease a new
-      // generation, so another instance's live session is dropped too.
-      const { invalidateThreadSessions } = await import("./copilot-session");
-      await invalidateThreadSessions(userKey, threadId).catch((err) =>
-        logWarn("copilot-runtime: could not invalidate the live session", {
-          threadId,
-          error: err instanceof Error ? err.message : String(err),
-        }),
-      );
+    if (scope !== "uploads" && !options.locked) {
+      lock = await lockThreadForReset(userKey, threadId);
+      if (!lock.ok) {
+        logWarn("copilot-runtime: session state kept, a reply is still running", { threadId, scope });
+        return;
+      }
     }
     const removed = await removeThreadWorkspaceFiles(userKey, threadId, scope);
     if (removed > 0) logInfo("copilot-runtime: removed workspace files", { threadId, scope, blobs: removed });
@@ -143,6 +186,8 @@ export async function removeThreadWorkspaceFilesQuietly(
       scope,
       error: err instanceof Error ? err.message : String(err),
     });
+  } finally {
+    if (lock?.ok) await lock.release();
   }
 }
 
@@ -167,6 +212,7 @@ export function chatDocumentIndexDeps(args: {
   return {
     fs,
     extractText: (path) => extractWorkspaceText(extractDeps, path),
+    maxBytes: maxWorkspaceUploadBytes(),
     async findRow(name) {
       const query: SqlQuerySpec = {
         query:

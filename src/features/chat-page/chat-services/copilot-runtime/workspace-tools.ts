@@ -54,6 +54,7 @@ import { spillLargeResult } from "./tool-adapter";
 import { normalizeSessionPath, WORKSPACE_ROOT } from "./session-path";
 import type { WorkspaceEntry } from "./blob-session-fs";
 import { BINARY_SNIFF_BYTES, LineSplitter, readAtMost, scanLines } from "./stream-lines";
+import { workspaceToolErrorText } from "./tool-error-text";
 
 /** What the tools need from the filesystem (BlobSessionFs implements it). */
 export interface WorkspaceFiles {
@@ -736,8 +737,8 @@ export interface WorkspaceToolOptions {
    * skipLargeOutputProcessing, so the runtime never spills these itself.
    */
   spill?: (path: string, content: string) => Promise<void>;
-  /** Normalised paths the search may not read (journal files with secrets). */
-  readDenied?: (normalizedPath: string) => boolean;
+  /** Sees an error of a call (for the server log); the model gets workspaceToolErrorText. */
+  onError?: (tool: string, err: unknown) => void;
 }
 
 /** Large outputs become a workspace file + preview; all results skip the runtime's spill. */
@@ -754,30 +755,12 @@ async function finishResult(
   return { ...result, skipLargeOutputProcessing: true };
 }
 
-/** The listing without the files `denied` names (pages may get smaller, never empty ones yielded). */
-async function* withoutDenied(
-  pages: AsyncIterable<WorkspaceEntry[]>,
-  denied: (normalizedPath: string) => boolean,
-): AsyncGenerator<WorkspaceEntry[]> {
-  for await (const page of pages) {
-    const kept = page.filter((e) => !denied(e.path));
-    if (kept.length > 0) yield kept;
-  }
-}
-
 /** The search tools for a model family, with the runtime's names and schemas. */
 export function workspaceTools(
-  fs: WorkspaceFiles,
+  files: WorkspaceFiles,
   family: SearchToolFamily,
   options: WorkspaceToolOptions = {},
 ): CopilotTool[] {
-  const denied = options.readDenied;
-  const files: WorkspaceFiles = denied
-    ? {
-        listEntryPages: (dir, prefix) => withoutDenied(fs.listEntryPages(dir, prefix), denied),
-        openEntry: (entry, signal) => fs.openEntry(entry, signal),
-      }
-    : fs;
   return SEARCH_TOOLS_BY_FAMILY[family].map((name) => {
     const def = builtin.tools[name];
     return {
@@ -795,7 +778,8 @@ export function workspaceTools(
               : await runRipgrep(files, (args ?? {}) as RgArgs);
           return await finishResult(name, result, invocation?.toolCallId ?? `${Date.now()}`, options.spill);
         } catch (err) {
-          return { ...failure(`Error: ${err instanceof Error ? err.message : String(err)}`), skipLargeOutputProcessing: true };
+          options.onError?.(name, err);
+          return { ...failure(workspaceToolErrorText(err)), skipLargeOutputProcessing: true };
         }
       },
     };

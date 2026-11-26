@@ -40,6 +40,8 @@ export const OUTPUTS_DIR = "/workspace/outputs";
 export const RUN_CODE_STDOUT_INLINE_BYTES = 12 * 1024;
 const MAX_INPUT_FILES = 20;
 const MAX_INPUT_FILE_BYTES = 50 * 1024 * 1024;
+/** All input files of one run_code call together. */
+const MAX_INPUT_TOTAL_BYTES = 100 * 1024 * 1024;
 const MAX_OUTPUT_FILES = 20;
 const MAX_OUTPUT_FILE_BYTES = 50 * 1024 * 1024;
 const IMAGE_EXTS: ReadonlySet<string> = new Set(["png", "jpg", "jpeg", "gif", "webp"]);
@@ -102,7 +104,10 @@ export interface ProviderToolDeps {
   /** The thread's workspace (BlobSessionFs). */
   fs: {
     listEntries(dir: string, literalPrefix?: string): Promise<WorkspaceEntry[]>;
-    readFileBytes(path: string): Promise<Uint8Array>;
+    /** Size of a file without reading it (run_code checks its inputs first). */
+    stat(path: string): Promise<{ isFile: boolean; size: number }>;
+    /** At most `length` bytes from `offset` (one ranged read). */
+    readFileRange(path: string, offset: number, length?: number): Promise<{ content: Uint8Array; byteLength: number }>;
     writeFileBytes(path: string, content: Uint8Array): Promise<void>;
   };
   threadId: string;
@@ -306,8 +311,10 @@ function runCodeTool(deps: ProviderToolDeps, clients: () => Promise<ProviderClie
       { abortSignal, toolCallId }: { abortSignal?: AbortSignal; toolCallId?: string },
     ): Promise<RunCodeOutput> => {
       const c = await clients();
-      // Read the inputs first: a wrong path fails before a container is made.
-      const wanted: Array<{ workspacePath: string; data: Buffer }> = [];
+      // Check the inputs first, by their size only (no download): a wrong path
+      // or a file that is too big fails before a container is made.
+      const wanted: string[] = [];
+      let totalBytes = 0;
       for (const raw of args.files ?? []) {
         let p: string;
         try {
@@ -316,24 +323,39 @@ function runCodeTool(deps: ProviderToolDeps, clients: () => Promise<ProviderClie
           throw new ToolUserError(`run_code: ${(err as Error).message}`);
         }
         if (!p.startsWith(`${WORKSPACE_ROOT}/`)) throw new ToolUserError(`run_code: only files in ${WORKSPACE_ROOT} can be used: ${raw}`);
-        let data: Buffer;
+        if (wanted.includes(p)) continue; // named twice: uploaded once
+        let size: number;
         try {
-          data = Buffer.from(await deps.fs.readFileBytes(p));
+          const info = await deps.fs.stat(p);
+          if (!info.isFile) throw new Error("not a file");
+          size = info.size;
         } catch {
           throw new ToolUserError(`run_code: file not found: ${p}`);
         }
-        if (data.length > MAX_INPUT_FILE_BYTES) throw new ToolUserError(`run_code: file too large (over 50 MB): ${p}`);
-        wanted.push({ workspacePath: p, data });
+        if (size > MAX_INPUT_FILE_BYTES) throw new ToolUserError(`run_code: file too large (over 50 MB): ${p}`);
+        totalBytes += size;
+        if (totalBytes > MAX_INPUT_TOTAL_BYTES) throw new ToolUserError("run_code: the input files are too large together (over 100 MB).");
+        wanted.push(p);
       }
 
       const containerId = await c.ensureContainer(abortSignal);
       const uploaded: UploadedInput[] = [];
       const usedNames = new Set<string>();
-      for (const w of wanted) {
-        const name = uniqueUploadName(sanitizeUploadName(w.workspacePath), usedNames, false);
+      // One file in memory at a time: read, upload, let go.
+      for (const workspacePath of wanted) {
+        let data: Buffer;
+        try {
+          // At most one byte over the limit, also when the file grew since the check.
+          const read = await deps.fs.readFileRange(workspacePath, 0, MAX_INPUT_FILE_BYTES + 1);
+          data = Buffer.from(read.content.buffer, read.content.byteOffset, read.content.byteLength);
+        } catch {
+          throw new ToolUserError(`run_code: file not found: ${workspacePath}`);
+        }
+        if (data.length > MAX_INPUT_FILE_BYTES) throw new ToolUserError(`run_code: file too large (over 50 MB): ${workspacePath}`);
+        const name = uniqueUploadName(sanitizeUploadName(workspacePath), usedNames, false);
         usedNames.add(name);
-        const up = await c.uploadToContainer(containerId, name, w.data);
-        uploaded.push({ workspacePath: w.workspacePath, containerPath: `/mnt/data/${name}`, uploadedPath: up.path });
+        const up = await c.uploadToContainer(containerId, name, data);
+        uploaded.push({ workspacePath, containerPath: `/mnt/data/${name}`, uploadedPath: up.path });
       }
       const inputs = uploaded.map(({ workspacePath, containerPath }) => ({ workspacePath, containerPath }));
       const before = new Set((await c.listContainerFiles(containerId)).map((f) => f.id));

@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 
 import { BlobSessionFs } from "./blob-session-fs";
 import { FakeBlobStore } from "./fake-blob-store.test-helper";
@@ -95,5 +95,59 @@ describe("index_document", () => {
       ],
     });
     expect(INDEX_DOCUMENT_DESCRIPTION).toMatch(/when the user asks to index or search a document/);
+  });
+});
+
+describe("index_document limits", () => {
+  let ctx: ReturnType<typeof setup>;
+  beforeEach(() => {
+    ctx = setup();
+  });
+  afterEach(() => {
+    vi.unstubAllEnvs();
+  });
+  const run = (deps: IndexDocumentDeps, paths: string[]) =>
+    (indexDocumentTool(deps).execute as (i: unknown, o: unknown) => Promise<{ results: Array<Record<string, unknown>> }>)(
+      { paths },
+      { toolCallId: "x", messages: [] },
+    );
+
+  it("refuses a file over the upload size limit before it is read", async () => {
+    await ctx.fs.writeFile("/workspace/big.txt", "b".repeat(101));
+    await ctx.fs.writeFileBytes("/workspace/uploads/r.pdf", Buffer.from("%PDF\u0000"));
+    await ctx.fs.writeFile("/workspace/uploads/r.pdf.md", "m".repeat(150));
+    const readEntry = vi.spyOn(ctx.fs, "readEntry");
+    const deps = { ...ctx.deps, maxBytes: 100 };
+    const big = await indexWorkspaceDocument(deps, "/workspace/big.txt");
+    expect(big).toMatchObject({ status: "error" });
+    expect(big.error).toMatch(/too large to index/);
+    expect((await indexWorkspaceDocument(deps, "/workspace/uploads/r.pdf")).error).toMatch(/too large to index/);
+    expect(readEntry).not.toHaveBeenCalled();
+    expect(ctx.deps.indexCalls).toEqual([]);
+  });
+
+  it("refuses a document over MAX_DOCUMENT_CHUNKS before indexing and keeps its earlier index", async () => {
+    vi.stubEnv("MAX_DOCUMENT_CHUNKS", "3");
+    await ctx.fs.writeFile("/workspace/long.txt", "l".repeat(10_000));
+    const res = await indexWorkspaceDocument(ctx.deps, "/workspace/long.txt");
+    expect(res).toMatchObject({ status: "error" });
+    expect(res.error).toMatch(/too long to index: it has \d+ text parts and the limit is 3/);
+    expect(ctx.deps.indexCalls).toEqual([]);
+    expect(ctx.rows.size).toBe(0);
+  });
+
+  it("one call reads at most its byte budget and indexes at most MAX_DOCUMENT_CHUNKS chunks in total", async () => {
+    for (const n of ["a", "b", "c"]) await ctx.fs.writeFile(`/workspace/${n}.txt`, n.repeat(60));
+    const bytes = await run({ ...ctx.deps, maxBytes: 100, maxCallBytes: 150 }, ["/workspace/a.txt", "/workspace/b.txt", "/workspace/c.txt"]);
+    expect(bytes.results.map((r) => r.status)).toEqual(["indexed", "indexed", "error"]);
+    expect(bytes.results[2].error).toMatch(/Call index_document again with the remaining files/);
+
+    vi.stubEnv("MAX_DOCUMENT_CHUNKS", "3");
+    const fresh = setup();
+    for (const n of ["d", "e"]) await fresh.fs.writeFile(`/workspace/${n}.txt`, n.repeat(3000)); // 2 chunks each
+    const chunks = await run(fresh.deps, ["/workspace/d.txt", "/workspace/e.txt"]);
+    expect(chunks.results.map((r) => r.status)).toEqual(["indexed", "error"]);
+    expect(chunks.results[1].error).toMatch(/Call index_document again with the remaining files/);
+    expect(fresh.deps.indexCalls.map(([name]) => name)).toEqual(["d.txt"]);
   });
 });

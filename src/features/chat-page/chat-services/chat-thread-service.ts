@@ -33,6 +33,7 @@ import {
   withNormalizedSelectedModel,
 } from "./models";
 import { mergeClientAttachedFiles } from "./code-interpreter-file-access";
+import type { ThreadResetLock } from "./copilot-runtime/workspace-files";
 
 const VALID_REASONING_EFFORTS: ReadonlyArray<ReasoningEffort> = [
   "minimal",
@@ -162,6 +163,7 @@ export const SoftDeleteChatContentsForCurrentUser = async (
   chatThreadID: string,
   options?: { untilMessageId?: string, untilMessageIndex?: number }
 ): Promise<ServerActionResponse<ChatThreadModel>> => {
+  let lock: ThreadResetLock | undefined;
   try {
     const chatThreadResponse = await FindChatThreadForCurrentUser(chatThreadID);
 
@@ -176,6 +178,15 @@ export const SoftDeleteChatContentsForCurrentUser = async (
       const chats = chatResponse.response;
 
       const startIdx = getValidatedStartIndex(chats, options);
+
+      // Copilot path: no reply may run while the messages and the agent's
+      // session state go (it would write the state back). The lock stops a
+      // reply of this instance; one on another instance refuses the reset.
+      lock = await lockAgentThread(chatThreadID);
+      if (!lock.ok) {
+        return { status: "ERROR", errors: [{ message: lock.message }] };
+      }
+
       await Promise.all(
         chats.slice(startIdx).map(async (chat) => {
           const itemToUpdate = {
@@ -211,10 +222,10 @@ export const SoftDeleteChatContentsForCurrentUser = async (
       // turns. A full reset (temporary chat, "Reset chat") clears the whole
       // workspace; a rewind keeps the files the remaining turns refer to.
       if (startIdx === 0) {
-        await removeAgentWorkspaceFiles(chatThreadID, "all");
+        await removeAgentWorkspaceFiles(chatThreadID, "all", { locked: true });
       } else {
-        await removeAgentWorkspaceFiles(chatThreadID, "uploads");
-        await removeAgentWorkspaceFiles(chatThreadID, "session");
+        await removeAgentWorkspaceFiles(chatThreadID, "uploads", { locked: true });
+        await removeAgentWorkspaceFiles(chatThreadID, "session", { locked: true });
       }
 
       // Drop the history-compaction row with the messages it describes. It
@@ -231,7 +242,20 @@ export const SoftDeleteChatContentsForCurrentUser = async (
       status: "ERROR",
       errors: [{ message: `${error}` }],
     };
+  } finally {
+    if (lock?.ok) await lock.release();
   }
+};
+
+/**
+ * Locks the thread for a reset (Copilot path, see lockThreadForReset); a
+ * no-op lock where the Copilot path is not configured.
+ */
+const lockAgentThread = async (chatThreadId: string): Promise<ThreadResetLock> => {
+  const { lockThreadForReset } = await import(
+    "./copilot-runtime/workspace-files"
+  );
+  return lockThreadForReset(await userHashedId(), chatThreadId);
 };
 
 /**
@@ -241,11 +265,12 @@ export const SoftDeleteChatContentsForCurrentUser = async (
 const removeAgentWorkspaceFiles = async (
   chatThreadId: string,
   scope: "uploads" | "session" | "all",
+  options: { locked?: boolean } = {},
 ): Promise<void> => {
   const { removeThreadWorkspaceFilesQuietly } = await import(
     "./copilot-runtime/workspace-files"
   );
-  await removeThreadWorkspaceFilesQuietly(await userHashedId(), chatThreadId, scope);
+  await removeThreadWorkspaceFilesQuietly(await userHashedId(), chatThreadId, scope, options);
 };
 
 export const SoftDeleteChatThreadForCurrentUser = async (

@@ -4,13 +4,18 @@ vi.mock("@/features/common/services/logger", () => ({ logInfo: vi.fn(), logWarn:
 vi.mock("@/features/common/services/cosmos", () => ({ HistoryContainer: vi.fn() }));
 vi.mock("./document-pipeline", () => ({ extractDocumentText: vi.fn(), indexDocument: vi.fn() }));
 vi.mock("./azure-blob-store", () => ({ getAgentWorkspaceStore: vi.fn(), getExistingAgentWorkspaceStore: vi.fn() }));
-const invalidate = vi.fn(async (_u: string, _t: string) => undefined);
-vi.mock("./copilot-session", () => ({ invalidateThreadSessions: (u: string, t: string) => invalidate(u, t) }));
+// The thread lock of copilot-session (aborts this instance's running turn,
+// takes the thread lease, drops the live session); a fake here.
+const invalidate = vi.fn(async (_u: string, _t: string): Promise<unknown> => ({ release: async () => undefined }));
+vi.mock("./copilot-session", () => ({
+  invalidateThreadSessions: (u: string, t: string) => invalidate(u, t),
+  lockThreadSessions: (u: string, t: string) => invalidate(u, t),
+}));
 
 import { BlobSessionFs, WorkspaceQuota, WorkspaceQuotaError } from "./blob-session-fs";
 import { FakeBlobStore } from "./fake-blob-store.test-helper";
 import { removeThreadWorkspaceFiles, removeThreadWorkspaceFilesQuietly } from "./workspace-files";
-import { acquireThreadLease, type LeaseBackend } from "./thread-lease";
+import { acquireThreadLease, ThreadBusyError, type LeaseBackend } from "./thread-lease";
 
 const USER = "c".repeat(64);
 const ns = (t: string) => `${USER}/${t}`;
@@ -96,7 +101,7 @@ describe("reset / rewind clean-up", () => {
     expect([...store.blobs.keys()].filter((k) => k.startsWith(`${ns("t4")}/`))).toEqual([]);
   });
 
-  it("removing the session state invalidates the live sessions (all instances); removing uploads does not", async () => {
+  it("removing the session state locks the thread (live sessions dropped on all instances); removing uploads does not", async () => {
     const env = { ...process.env };
     process.env.AGENT_RUNTIME = "copilot";
     const store = new FakeBlobStore();
@@ -108,6 +113,32 @@ describe("reset / rewind clean-up", () => {
     expect(invalidate).toHaveBeenCalledWith(USER, "t5");
     await removeThreadWorkspaceFilesQuietly(USER, "t5", "all");
     expect(invalidate).toHaveBeenCalledTimes(2);
+    // A caller that holds the lock already (chat-thread-service) does not lock again.
+    await removeThreadWorkspaceFilesQuietly(USER, "t5", "session", { locked: true });
+    expect(invalidate).toHaveBeenCalledTimes(2);
+    process.env = env;
+  });
+
+  it("while a reply still runs (lease held), the session state is kept, not deleted under the running turn", async () => {
+    const env = { ...process.env };
+    process.env.AGENT_RUNTIME = "copilot";
+    const store = new FakeBlobStore();
+    const { getExistingAgentWorkspaceStore } = await import("./azure-blob-store");
+    vi.mocked(getExistingAgentWorkspaceStore).mockResolvedValue(store as never);
+    const fs = fsFor(store, "t7");
+    await fs.writeFile("/session-state/events.jsonl", "{}" + String.fromCharCode(10));
+    invalidate.mockRejectedValueOnce(new ThreadBusyError());
+    await removeThreadWorkspaceFilesQuietly(USER, "t7", "session");
+    expect(await fs.exists("/session-state/events.jsonl")).toBe(true);
+    // Once the thread is free, the reset deletes while it holds the lock and releases it after.
+    let goneAtRelease: boolean | undefined;
+    invalidate.mockImplementationOnce(async () => ({
+      release: async () => {
+        goneAtRelease = !(await fs.exists("/session-state/events.jsonl"));
+      },
+    }));
+    await removeThreadWorkspaceFilesQuietly(USER, "t7", "session");
+    expect(goneAtRelease).toBe(true);
     process.env = env;
   });
 

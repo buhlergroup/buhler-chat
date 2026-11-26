@@ -1,7 +1,13 @@
 import { describe, it, expect, beforeEach } from "vitest";
 
 import { createSessionFsAdapter } from "@microsoft/copilot-sdk";
-import { BlobSessionFs, FileTooLargeError, readFileLimitBytes } from "./blob-session-fs";
+import {
+  BlobSessionFs,
+  FileTooLargeError,
+  readFileLimitBytes,
+  SessionStateFullError,
+  sessionStateLimitBytes,
+} from "./blob-session-fs";
 import { FakeBlobStore } from "./fake-blob-store.test-helper";
 import { buildNamespace, normalizeSessionPath, SessionPathError } from "./session-path";
 
@@ -205,6 +211,57 @@ describe("BlobSessionFs", () => {
   });
 });
 
+describe("BlobSessionFs: /session-state has a byte limit", () => {
+  const NS = "userA/thread1";
+  const stateLimit = 4096;
+  const fsWith = (store: FakeBlobStore, limit = stateLimit) => new BlobSessionFs(store, NS, undefined, undefined, 1024, limit);
+
+  it("refuses a journal append over the limit with a clear error and appends nothing", async () => {
+    const store = new FakeBlobStore();
+    const fs = fsWith(store);
+    await fs.writeFile("/session-state/events.jsonl", "a".repeat(1000));
+    await fs.appendFile("/session-state/events.jsonl", "b".repeat(2000));
+    await fs.writeFile("/session-state/workspace.yaml", "c".repeat(500));
+    const err = await fs.appendFile("/session-state/events.jsonl", "d".repeat(1000)).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(SessionStateFullError);
+    expect((err as { code?: string }).code).toBe("ENOSPC");
+    expect((err as Error).message).toMatch(/session history of this chat is full/i);
+    expect((await fs.stat("/session-state/events.jsonl")).size).toBe(3000);
+    // Another instance measures the state from Blob and refuses too.
+    await expect(fsWith(store).appendFile("/session-state/events.jsonl", "d".repeat(1000))).rejects.toMatchObject({ code: "ENOSPC" });
+    // A write that replaces a file counts only its new size; a removed file frees its bytes.
+    await fs.writeFile("/session-state/workspace.yaml", "c".repeat(100));
+    await fs.rm("/session-state/workspace.yaml", false, true);
+    await fs.appendFile("/session-state/events.jsonl", "d".repeat(1000));
+    expect((await fs.stat("/session-state/events.jsonl")).size).toBe(4000);
+    // The workspace quota is separate.
+    await fs.writeFile("/workspace/big.txt", "w".repeat(stateLimit * 2));
+  });
+
+  it("a rename into /session-state counts the moved file", async () => {
+    const store = new FakeBlobStore();
+    const fs = fsWith(store);
+    await fs.writeFile("/session-state/events.jsonl", "a".repeat(500));
+    await fs.writeFile("/session-state/events.jsonl.tmp.1", "n".repeat(3500));
+    await fs.rename("/session-state/events.jsonl.tmp.1", "/session-state/events.jsonl");
+    expect(await fs.readFile("/session-state/events.jsonl")).toHaveLength(3500);
+    await fs.appendFile("/session-state/events.jsonl", "x".repeat(500));
+    await expect(fs.appendFile("/session-state/events.jsonl", "x".repeat(200))).rejects.toMatchObject({ code: "ENOSPC" });
+  });
+
+  it("whole reads of a session-state file over the limit fail; the limit comes from COPILOT_SESSION_STATE_MAX_MB", async () => {
+    const store = new FakeBlobStore();
+    await fsWith(store, 1_000_000).writeFile("/session-state/events.jsonl", "e".repeat(stateLimit + 10));
+    const fs = fsWith(store);
+    await expect(fs.readFile("/session-state/events.jsonl")).rejects.toBeInstanceOf(FileTooLargeError);
+    await expect(fs.readFileBytes("/session-state/events.jsonl")).rejects.toBeInstanceOf(FileTooLargeError);
+    await expect(fs.readFileRange("/session-state/events.jsonl", 0)).rejects.toBeInstanceOf(FileTooLargeError);
+    expect((await fs.readFileRange("/session-state/events.jsonl", 0, 10)).content.length).toBe(10);
+    expect(sessionStateLimitBytes({})).toBe(50 * 1024 * 1024);
+    expect(sessionStateLimitBytes({ COPILOT_SESSION_STATE_MAX_MB: "8" })).toBe(8 * 1024 * 1024);
+  });
+});
+
 describe("BlobSessionFs bounded reads for the runtime", () => {
   const NS = "userA/thread1";
   const limit = 1000;
@@ -227,7 +284,7 @@ describe("BlobSessionFs bounded reads for the runtime", () => {
     );
     expect(store.requests.filter((r) => r.startsWith("download"))).toEqual([]);
     expect(await fs.readFile("/workspace/ok.log")).toHaveLength(limit);
-    // The runtime's own session state is never capped (it must resume).
+    // The runtime's own session state has its own, larger limit (it must resume).
     await fs.writeFile("/session-state/events.jsonl", "e".repeat(limit * 3));
     expect(await fs.readFile("/session-state/events.jsonl")).toHaveLength(limit * 3);
     // Binary reads (images for view, run_code inputs) keep the SDK's own limit.

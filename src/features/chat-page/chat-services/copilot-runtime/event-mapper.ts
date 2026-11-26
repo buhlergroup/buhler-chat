@@ -27,6 +27,7 @@
  */
 import type { UIMessageChunk } from "ai";
 import { COMPACTION_DATA_PART_TYPE, COMPACTION_PART_ID, type CompactionDataPart } from "../chat-api/compaction-part";
+import { sanitizeUiErrorText } from "../tools/tool-user-error";
 
 /** The Copilot path image tool (provider-tools.ts). */
 export const GENERATE_IMAGE_TOOL = "generate_image";
@@ -568,9 +569,13 @@ export class CopilotEventMapper {
       if (imageRef) this.emitGeneratedImage(toolCallId, imageRef);
       return;
     }
+    // App tools give their UI-safe text (tool-adapter.ts). For the runtime's
+    // own tools and our workspace tools it is the tool's error message, which
+    // can name a storage URL or carry a token: cleaned, because it is streamed
+    // and stored with the message. The model keeps its own text.
     const errorText =
       this.options.toolErrorText?.(toolCallId) ??
-      String(data.error?.message ?? data.result?.content ?? "Tool execution failed");
+      (sanitizeUiErrorText(String(data.error?.message ?? data.result?.content ?? "")) || "Tool execution failed");
     this.emit({ type: "tool-output-error", toolCallId, errorText, ...dynamic });
   }
 

@@ -26,16 +26,21 @@
  * rewrite of the whole file. Workspace files (/workspace) are never changed
  * in place: every write, including an append, creates a new data blob. So a
  * workspace data blob is immutable and the pointer's `size` metadata is exact.
+ * A /session-state file grows in place: its pointer `size` is the size of the
+ * first write only, so its size always comes from the data blob.
  *
  * Memory: no file content stays in this process after a call. The search
  * tools stream each data blob (openEntry), whole-file reads of the runtime
- * (readFile / readFileBytes) are capped under /workspace (readFileLimitBytes),
- * and readFileRange serves the runtime's bounded reads with one ranged GET.
+ * (readFile / readFileBytes) are capped under /workspace (readFileLimitBytes)
+ * and under /session-state (sessionStateLimitBytes), and readFileRange serves
+ * the runtime's bounded reads with one ranged GET.
  *
  * Quota: writes under /workspace (uploads, tool-result spills, model writes)
  * are checked against a per-thread byte and file-count quota (WorkspaceQuota,
  * COPILOT_WORKSPACE_MAX_BYTES / COPILOT_WORKSPACE_MAX_FILES). The runtime's
- * own /session-state is not counted.
+ * own /session-state has its own byte limit (COPILOT_SESSION_STATE_MAX_MB):
+ * the journal holds every tool result, and the runtime reads it whole on a
+ * resume, so it must not grow without bound (SessionStateFullError).
  */
 import { randomUUID } from "node:crypto";
 import type { Readable } from "node:stream";
@@ -123,10 +128,34 @@ export interface WorkspaceEntry {
  * Biggest file under /workspace the runtime may read whole (readFile /
  * readFileBytes: that RPC carries the full content, it cannot stream).
  * 10 MB unless COPILOT_READFILE_MAX_MB says otherwise. The runtime's own
- * /session-state files are not capped (it must be able to resume).
+ * /session-state files have their own, larger limit (sessionStateLimitBytes).
  */
 export const readFileLimitBytes = (env: Record<string, string | undefined> = process.env): number =>
   (Number(env.COPILOT_READFILE_MAX_MB) > 0 ? Number(env.COPILOT_READFILE_MAX_MB) : 10) * 1024 * 1024;
+
+/**
+ * Most bytes /session-state of one thread may hold (all files together), and
+ * so the biggest session-state file the runtime may read whole. On a resume
+ * the runtime reads its session files whole (readFile; the SDK keeps
+ * whole-file reads unless a runtime uses readFileRange), so this also bounds
+ * the memory of a resume. 50 MB unless
+ * COPILOT_SESSION_STATE_MAX_MB says otherwise.
+ */
+export const sessionStateLimitBytes = (env: Record<string, string | undefined> = process.env): number =>
+  (Number(env.COPILOT_SESSION_STATE_MAX_MB) > 0 ? Number(env.COPILOT_SESSION_STATE_MAX_MB) : 50) * 1024 * 1024;
+
+/** Thrown when a write would take /session-state of the thread over sessionStateLimitBytes. */
+export class SessionStateFullError extends Error {
+  readonly code = "ENOSPC";
+  constructor(bytes: number, limit: number) {
+    const mb = (n: number) => `${(n / (1024 * 1024)).toFixed(1)} MB`;
+    super(
+      `The session history of this chat is full (${mb(bytes)} of ${mb(limit)}). ` +
+        "Start a new chat, or delete earlier messages of this chat to continue.",
+    );
+    this.name = "SessionStateFullError";
+  }
+}
 
 /** Thrown by readFile / readFileBytes for a workspace file over readFileLimitBytes. */
 export class FileTooLargeError extends Error {
@@ -163,6 +192,7 @@ export class WorkspaceQuotaError extends Error {
 
 const isWorkspacePath = (normalized: string) =>
   normalized === WORKSPACE_ROOT || normalized.startsWith(`${WORKSPACE_ROOT}/`);
+const isStatePath = (normalized: string) => normalized.startsWith(`${SESSION_STATE_ROOT}/`);
 
 interface QuotaUsage {
   bytes: number;
@@ -241,12 +271,21 @@ export const sharedWorkspaceQuota = (): WorkspaceQuota =>
   ));
 
 export class BlobSessionFs implements SessionFsProvider {
+  /**
+   * Bytes of each /session-state file, measured from the data blobs on the
+   * first session-state write of this instance, then kept current by its own
+   * writes. One instance writes a thread's state at a time (thread lease), and
+   * a new live session gets a new instance, so this is exact for its writes.
+   */
+  private stateSizes?: Map<string, number>;
+
   constructor(
     private readonly store: BlobStore,
     private readonly namespace: string,
     private readonly onOp?: SessionFsOpListener,
     private readonly quota: WorkspaceQuota | undefined = sharedWorkspaceQuota(),
     private readonly readFileLimit: number = readFileLimitBytes(),
+    private readonly stateLimit: number = sessionStateLimitBytes(),
   ) {
     if (!namespace || namespace.includes("..") || namespace.startsWith("/")) {
       throw new SessionPathError("Invalid namespace");
@@ -305,6 +344,7 @@ export class BlobSessionFs implements SessionFsProvider {
     const deltaBytes = data.length - (previous ? Number(previous.props.metadata?.size) || 0 : 0);
     const deltaFiles = previous ? 0 : 1;
     if (counted) await this.quota!.check(this.store, this.namespace, deltaBytes, deltaFiles);
+    if (isStatePath(normalized)) await this.checkState(normalized, data.length);
     const dataKey = this.newDataKey();
     await this.store.createAppendBlob(dataKey);
     await this.appendChunks(dataKey, data);
@@ -315,26 +355,69 @@ export class BlobSessionFs implements SessionFsProvider {
       size: String(data.length),
     });
     if (counted) this.quota!.commit(this.namespace, deltaBytes, deltaFiles);
+    if (isStatePath(normalized)) this.stateSizes?.set(normalized, data.length);
     if (previous && previous.target !== dataKey) {
       await this.store.delete(previous.target).catch(() => false);
     }
   }
 
-  /** File size from the pointer's metadata, else from the data blob (pointers written before `size` existed). */
-  private async sizeOf(ptr: { props: BlobProps; target: string }): Promise<number | undefined> {
+  /** Sizes of the /session-state files (one listing and one HEAD per file, once per instance). */
+  private async stateUsage(): Promise<Map<string, number>> {
+    if (this.stateSizes) return this.stateSizes;
+    const base = this.dirPrefix(SESSION_STATE_ROOT);
+    const files: Array<[string, string]> = [];
+    for (const blob of await this.store.listDetailed(base)) {
+      const rel = blob.name.slice(base.length);
+      if (!blob.name.startsWith(base) || rel === DIR_MARKER_NAME || rel.endsWith(`/${DIR_MARKER_NAME}`)) continue;
+      const target = blob.metadata?.target;
+      if (typeof target === "string" && target.startsWith(`${this.namespace}/d/`)) files.push([`${SESSION_STATE_ROOT}/${rel}`, target]);
+    }
+    const sizes = new Map<string, number>();
+    for (let i = 0; i < files.length; i += 16) {
+      await Promise.all(
+        files.slice(i, i + 16).map(async ([path, target]) => {
+          const props = await this.store.getProperties(target);
+          if (props) sizes.set(path, props.contentLength);
+        }),
+      );
+    }
+    this.stateSizes ??= sizes;
+    return this.stateSizes;
+  }
+
+  /** Throws SessionStateFullError when /session-state would exceed its limit with `normalized` at `newSize` bytes. */
+  private async checkState(normalized: string, newSize: number): Promise<void> {
+    let total = newSize;
+    for (const [path, size] of await this.stateUsage()) if (path !== normalized) total += size;
+    if (total > this.stateLimit) throw new SessionStateFullError(total, this.stateLimit);
+  }
+
+  /**
+   * File size. A workspace file: from the pointer's metadata (exact, its data
+   * blob is immutable), else from the data blob (pointers written before
+   * `size` existed). A session-state file grows in place: from the data blob.
+   */
+  private async sizeOf(normalized: string, ptr: { props: BlobProps; target: string }): Promise<number | undefined> {
     const recorded = Number(ptr.props.metadata?.size);
-    if (Number.isFinite(recorded) && ptr.props.metadata?.size !== undefined) return recorded;
+    if (!isStatePath(normalized) && Number.isFinite(recorded) && ptr.props.metadata?.size !== undefined) return recorded;
     return (await this.store.getProperties(ptr.target))?.contentLength;
   }
 
-  /** Whole file; with `capped`, a /workspace file over readFileLimit fails before any download. */
+  /** Biggest whole read of a path: readFileLimit under /workspace (when `capped`), stateLimit under /session-state. */
+  private wholeReadLimit(normalized: string, capped: boolean): number | undefined {
+    if (isStatePath(normalized)) return this.stateLimit;
+    return capped && isWorkspacePath(normalized) ? this.readFileLimit : undefined;
+  }
+
+  /** Whole file; a file over its whole-read limit fails before any download. */
   private async readBuffer(normalized: string, capped: boolean): Promise<Buffer> {
     const ptr = await this.pointer(normalized);
     if (!ptr) throw enoent(normalized);
-    if (capped && isWorkspacePath(normalized)) {
-      const size = await this.sizeOf(ptr);
+    const limit = this.wholeReadLimit(normalized, capped);
+    if (limit !== undefined) {
+      const size = await this.sizeOf(normalized, ptr);
       if (size === undefined) throw enoent(normalized);
-      if (size > this.readFileLimit) throw new FileTooLargeError(normalized, size, this.readFileLimit);
+      if (size > limit) throw new FileTooLargeError(normalized, size, limit);
     }
     return this.store.download(ptr.target);
   }
@@ -403,9 +486,10 @@ export class BlobSessionFs implements SessionFsProvider {
   }
 
   /**
-   * For the view tool: a file (size from the pointer, streamed on demand), a
-   * directory (its entry names), or undefined when nothing is there. One
-   * HEAD of the pointer; the content GET only when the caller opens it.
+   * For the view tool: a file (its size, streamed on demand), a directory
+   * (its entry names), or undefined when nothing is there. One HEAD of the
+   * pointer (plus one of the data blob under /session-state, whose files grow
+   * in place); the content GET only when the caller opens it.
    */
   async viewTarget(path: string): Promise<
     | { kind: "file"; size: number; open: (signal?: AbortSignal) => Promise<Readable> }
@@ -415,7 +499,7 @@ export class BlobSessionFs implements SessionFsProvider {
     const n = this.norm("view", path);
     const ptr = await this.pointer(n);
     if (ptr) {
-      const size = await this.sizeOf(ptr);
+      const size = await this.sizeOf(n, ptr);
       if (size === undefined) return undefined;
       return { kind: "file", size, open: async (signal) => (await this.store.openRead(ptr.target, { signal })).stream };
     }
@@ -444,7 +528,7 @@ export class BlobSessionFs implements SessionFsProvider {
   /**
    * Bounded read for the runtime (capabilities.readFileRange): one ranged GET,
    * `byteLength` is the file's total size at that read. Without `length` the
-   * read runs to the end and is capped like readFile under /workspace.
+   * read runs to the end and is capped like readFile.
    */
   async readFileRange(path: string, offset: number, length?: number): Promise<{ content: Uint8Array; byteLength: number }> {
     const n = this.norm("readFileRange", path, { offset, length });
@@ -457,9 +541,10 @@ export class BlobSessionFs implements SessionFsProvider {
     }
     const { stream, size } = await this.store.openRead(ptr.target, { offset, ...(length !== undefined ? { count: length } : {}) });
     const want = Math.max(0, Math.min(length ?? Infinity, size - offset));
-    if (length === undefined && isWorkspacePath(n) && want > this.readFileLimit) {
+    const limit = length === undefined ? this.wholeReadLimit(n, true) : undefined;
+    if (limit !== undefined && want > limit) {
       stream.destroy();
-      throw new FileTooLargeError(n, size, this.readFileLimit);
+      throw new FileTooLargeError(n, size, limit);
     }
     const chunks: Buffer[] = [];
     let got = 0;
@@ -493,14 +578,18 @@ export class BlobSessionFs implements SessionFsProvider {
       await this.writeBuffer(n, data);
       return;
     }
-    if (!n.startsWith(`${SESSION_STATE_ROOT}/`)) {
+    if (!isStatePath(n)) {
       // Workspace files stay immutable per data blob: append = new blob.
       const current = await this.store.download(ptr.target);
       await this.writeBuffer(n, Buffer.concat([current, data]));
       return;
     }
+    const sizes = await this.stateUsage();
+    const before = sizes.get(n) ?? (await this.store.getProperties(ptr.target))?.contentLength ?? 0;
+    await this.checkState(n, before + data.length);
     try {
       await this.appendChunks(ptr.target, data);
+      sizes.set(n, before + data.length);
     } catch (err) {
       // A dangling pointer (data blob gone): start the file again.
       if ((err as { code?: string }).code !== "ENOENT") throw err;
@@ -587,9 +676,12 @@ export class BlobSessionFs implements SessionFsProvider {
     if (ptr) {
       await this.store.delete(this.fileKey(n));
       await this.store.delete(ptr.target).catch(() => false);
+      this.stateSizes?.delete(n);
       return;
     }
     if (!isRootPath(n) && (await this.isDirectory(n))) {
+      // Measured again on the next session-state write.
+      if (isStatePath(n)) this.stateSizes = undefined;
       const names = await this.store.listNames(this.dirPrefix(n));
       const children = names.filter((name) => !name.endsWith(`/${DIR_MARKER_NAME}`));
       if (children.length > 0 && !recursive) {
@@ -622,6 +714,8 @@ export class BlobSessionFs implements SessionFsProvider {
       return;
     }
     if (!isRootPath(s) && (await this.isDirectory(s))) {
+      // Measured again on the next session-state write.
+      if (isStatePath(s) || isStatePath(d) || d === SESSION_STATE_ROOT) this.stateSizes = undefined;
       // Directory rename moves each entry. Each file move is atomic; the
       // directory as a whole is not (the runtime renames files, not trees).
       const srcPrefix = this.dirPrefix(s);
@@ -665,6 +759,15 @@ export class BlobSessionFs implements SessionFsProvider {
     // 3. The data the destination held before is unreferenced now.
     if (replaced && replaced.target !== ptr.target) {
       await this.store.delete(replaced.target).catch(() => false);
+    }
+    // The moved bytes now count under the destination name.
+    if (this.stateSizes) {
+      const moved = this.stateSizes.get(s);
+      this.stateSizes.delete(s);
+      if (isStatePath(d)) {
+        if (moved !== undefined) this.stateSizes.set(d, moved);
+        else this.stateSizes = undefined;
+      }
     }
   }
 }
