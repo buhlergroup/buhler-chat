@@ -85,11 +85,16 @@ export interface SharePointFileSessionDeps {
   limits: SharePointFileLimits;
   /** The container of this turn's code interpreter (read at call time). */
   getContainerId: () => string | undefined;
-  /** Puts a file into the container; returns its path there. */
+  /**
+   * Puts a file into the container; returns its path there. The scope is the
+   * agent owner (the source row's partition): the content store reuses the
+   * OpenAI file of the same bytes in that scope.
+   */
   uploadToContainer: (
     containerId: string,
     fileName: string,
     data: Buffer,
+    scope?: string,
   ) => Promise<{ path: string }>;
   threadId?: string;
 }
@@ -580,7 +585,12 @@ export class SharePointFileSession {
         : prepared.note;
 
       try {
-        const { path } = await this.deps.uploadToContainer(containerId, prepared.name, prepared.data);
+        const { path } = await this.deps.uploadToContainer(
+          containerId,
+          prepared.name,
+          prepared.data,
+          file.source.userId,
+        );
         logInfo("fetch_sharepoint_file: file in the code interpreter", {
           threadId: this.deps.threadId,
           source,
@@ -589,8 +599,15 @@ export class SharePointFileSession {
           converted: Boolean(prepared.note),
           fetches: this.downloads,
         });
+        // A file attached from the content store (by OpenAI file id) gets a
+        // prefixed name in the container: tell the model the exact path.
+        const pathNote =
+          path !== `/mnt/data/${prepared.name}`
+            ? `In the code interpreter this file is at ${path}. Use this exact path; /mnt/data/${prepared.name} does not exist.`
+            : undefined;
         return {
           path,
+          ...(pathNote ? { pathNote } : {}),
           name: prepared.name,
           sourcePath: file.relativePath,
           source,

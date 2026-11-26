@@ -61,7 +61,7 @@ vi.mock("../../chat-message-service", () => ({
 
 // ── Document service ──────────────────────────────────────────────────────────
 const mockFindDocuments = vi.fn(async () => ({ status: "OK", response: [] as any[] }));
-vi.mock("../../chat-document-service", () => ({
+vi.mock("../../chat-document-store", () => ({
   FindAllChatDocuments: (...a: any[]) => mockFindDocuments(...(a as [])),
 }));
 

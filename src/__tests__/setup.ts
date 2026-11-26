@@ -1,6 +1,12 @@
 import "@testing-library/jest-dom/vitest";
 import { vi, afterEach } from "vitest";
 import { cleanup } from "@testing-library/react";
+import { register, SERVICE_KEYS } from "@/features/common/services/service-container";
+import { createMemoryContentBlobBackend } from "@/features/common/services/content-store/memory-backend";
+
+// Unit tests never reach Azure Blob Storage: the content store runs on the
+// in-memory backend unless a test registers another one.
+register(SERVICE_KEYS.contentBlobs, createMemoryContentBlobBackend);
 
 process.env.NEXTAUTH_SECRET ||= "test-nextauth-secret-do-not-use-in-prod";
 process.env.NEXTAUTH_URL ||= "http://localhost:3000";

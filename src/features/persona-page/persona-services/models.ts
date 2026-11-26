@@ -43,6 +43,10 @@ export const PersonaDocumentSchema = z.object({
   id: z.string(),
   externalFile: SharePointFileSchema,
   userId: z.string(),
+  // SHA-256 of the file content in the content store (scope: agent owner).
+  // Absent on rows written before the content store; filled when the file
+  // is processed again.
+  sha256: z.string().regex(/^[0-9a-f]{64}$/).optional(),
   source: z.literal(EXTERNAL_SOURCE),
   type: z.literal(PERSONA_DOCUMENT_ATTRIBUTE),
 });
@@ -53,6 +57,10 @@ export const PersonaCIDocumentSchema = z.object({
   externalFile: SharePointFileSchema,
   fileName: z.string(), // Original file name from SharePoint
   userId: z.string(),
+  // SHA-256 of the file content in the content store (scope: agent owner).
+  // Absent on rows written before the content store; filled when the file
+  // is processed again.
+  sha256: z.string().regex(/^[0-9a-f]{64}$/).optional(),
   source: z.literal(EXTERNAL_SOURCE),
   type: z.literal(PERSONA_CI_DOCUMENT_ATTRIBUTE),
 });

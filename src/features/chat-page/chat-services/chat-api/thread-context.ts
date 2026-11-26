@@ -33,7 +33,7 @@ import { logDebug, logError, logInfo, logWarn } from "@/features/common/services
 import type { UIMessage } from "ai";
 import { createIdGenerator } from "ai";
 import { CreateChatMessage } from "../chat-message-service";
-import { FindAllChatDocuments } from "../chat-document-service";
+import { FindAllChatDocuments } from "../chat-document-store";
 import { FindAllChatMessagesForCurrentUser } from "../chat-message-service";
 import { EnsureChatThreadOperation } from "../chat-thread-service";
 import { canContinuePersonaThread } from "@/features/persona-page/persona-services/persona-access";

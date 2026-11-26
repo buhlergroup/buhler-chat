@@ -31,6 +31,8 @@ import "server-only";
 import { toFile } from "openai";
 import { OpenAIV1Instance } from "@/features/common/services/openai";
 import { logError, logInfo } from "@/features/common/services/logger";
+import { contentStore, contentStoreTakesBuffer } from "@/features/common/services/content-store";
+import { isValidId } from "@/features/common/odata-filter";
 
 /**
  * Idle window before Azure reclaims the container. This is the API default;
@@ -199,4 +201,51 @@ export async function uploadFileToCodeInterpreterContainer(
     path: typeof created?.path === "string" && created.path ? created.path : `/mnt/data/${fileName}`,
     fileId: created?.id,
   };
+}
+
+/**
+ * Puts one file into a container through the content store: the bytes are
+ * hashed on the server, and the OpenAI file of that content in `scope` (the
+ * agent owner for agent files) is reused, so the same file version is
+ * uploaded to OpenAI once and then only referenced (container file from
+ * `file_id`; the path is then `/mnt/data/<file id>-<name>`). On any error,
+ * or without a scope, the bytes are uploaded as before.
+ */
+export async function putFileIntoCodeInterpreterContainer(
+  containerId: string,
+  fileName: string,
+  data: Buffer,
+  scope?: string,
+): Promise<{ path: string; fileId?: string }> {
+  if (scope && isValidId(scope) && contentStoreTakesBuffer(data.length)) {
+    try {
+      const store = contentStore();
+      const { sha256 } = await store.put(scope, data);
+      const { fileId } = await store.openAiFile(scope, sha256, { name: fileName, bytes: data });
+      const client = OpenAIV1Instance();
+      const files = (client as { containers?: { files?: { create?: unknown } } }).containers?.files;
+      if (typeof files?.create === "function") {
+        const created = await (
+          files as {
+            create: (
+              containerId: string,
+              body: { file_id: string },
+            ) => Promise<{ id?: string; path?: string }>;
+          }
+        ).create(containerId, { file_id: fileId });
+        return {
+          path:
+            typeof created?.path === "string" && created.path
+              ? created.path
+              : `/mnt/data/${fileId}-${fileName}`,
+          fileId: created?.id,
+        };
+      }
+    } catch (err) {
+      logInfo("code-interpreter: content store path failed, uploading the bytes", {
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
+  return uploadFileToCodeInterpreterContainer(containerId, fileName, data);
 }

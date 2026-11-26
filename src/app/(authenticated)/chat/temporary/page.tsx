@@ -1,7 +1,7 @@
 import { userHashedId } from "@/features/auth-page/helpers";
 import { TemporaryChatPage } from "@/features/chat-page/temporary-chat-page";
 import { DEFAULT_MODEL } from "@/features/chat-page/chat-services/models";
-import { FindAllChatDocuments } from "@/features/chat-page/chat-services/chat-document-service";
+import { FindAllChatDocuments } from "@/features/chat-page/chat-services/chat-document-store";
 import { FindAllChatMessagesForCurrentUser } from "@/features/chat-page/chat-services/chat-message-service";
 import {
   CreateChatThread,

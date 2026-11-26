@@ -60,6 +60,7 @@ param storageServiceSku object = { name: 'Standard_LRS' }
 param storageServiceImageContainerName string = 'images'
 // Private container for agent skill packages (.zip). Hyphens allowed.
 param storageServiceSkillContainerName string = 'agent-skills'
+param storageServiceContentContainerName string = 'content'
 
 param resourceGroupName string = 'buhler-alm-chatgpt'
 
@@ -107,6 +108,7 @@ module resources 'resources.bicep' = {
     storageServiceSku: storageServiceSku
     storageServiceImageContainerName: storageServiceImageContainerName
     storageServiceSkillContainerName: storageServiceSkillContainerName
+    storageServiceContentContainerName: storageServiceContentContainerName
     location: location
   }
 }

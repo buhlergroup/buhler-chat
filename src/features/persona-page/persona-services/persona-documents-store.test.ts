@@ -41,11 +41,12 @@ vi.mock("@/features/chat-page/chat-services/azure-ai-search/azure-ai-search", ()
   DeleteSearchDocumentByPersonaDocumentId: (id: string, owner?: string) =>
     DeleteSearchDocumentByPersonaDocumentId(id, owner),
 }));
-vi.mock("@/features/chat-page/chat-services/chat-document-service", () => ({
-  ChunkDocumentWithOverlap: vi.fn(async (text: string) => [text]),
-}));
 vi.mock("@/features/common/services/document-intelligence", () => ({
   DocumentIntelligenceInstance: vi.fn(),
+}));
+const extract = vi.fn(async (_bytes: Uint8Array) => "Extracted text.");
+vi.mock("@/features/common/services/document-extraction", () => ({
+  extractTextWithDocumentIntelligence: (bytes: Uint8Array) => extract(bytes),
 }));
 vi.mock("@/features/common/services/microsoft-graph-client", () => ({
   getGraphClient: vi.fn(() => ({
@@ -57,6 +58,8 @@ vi.mock("@/features/common/services/microsoft-graph-client", () => ({
 }));
 
 import { addSearchDocument, deleteSearchDocument } from "./persona-documents-store";
+import { register, SERVICE_KEYS } from "@/features/common/services/service-container";
+import { createMemoryContentBlobBackend } from "@/features/common/services/content-store/memory-backend";
 
 const file = {
   documentId: "ITEM1",
@@ -127,5 +130,34 @@ describe("deleteSearchDocument", () => {
     expect(res.status).toBe("ERROR");
     expect(res.status === "ERROR" && res.errors[0].message).toMatch(/index entries.*search down/);
     expect(rows).toEqual([]);
+  });
+});
+
+describe("addSearchDocument with the content store", () => {
+  beforeEach(() => {
+    // A fresh in-memory content store for each test.
+    register(SERVICE_KEYS.contentBlobs, createMemoryContentBlobBackend);
+  });
+
+  it("the same file added again is not extracted again; each row is indexed and stores the hash", async () => {
+    const pdf = { ...file, name: "slides.pdf" };
+    const first = await addSearchDocument(pdf, "owner-hash");
+    const second = await addSearchDocument(pdf, "owner-hash");
+    expect(first.status).toBe("OK");
+    expect(second.status).toBe("OK");
+    expect(extract).toHaveBeenCalledTimes(1);
+    expect(IndexDocuments).toHaveBeenCalledTimes(2);
+    expect(IndexDocuments.mock.calls[1][0]).toEqual(["Extracted text."]);
+    const hashes = rows.map((r) => r.sha256);
+    expect(hashes).toHaveLength(2);
+    expect(hashes[0]).toMatch(/^[0-9a-f]{64}$/);
+    expect(hashes[1]).toBe(hashes[0]);
+  });
+
+  it("another owner extracts again (no reuse across scopes)", async () => {
+    const pdf = { ...file, name: "slides.pdf" };
+    await addSearchDocument(pdf, "owner-hash");
+    await addSearchDocument(pdf, "other-owner-hash");
+    expect(extract).toHaveBeenCalledTimes(2);
   });
 });

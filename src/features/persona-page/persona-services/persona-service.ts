@@ -31,8 +31,9 @@ import { personaCodeDocumentsByIds } from "./persona-document-access";
 import {
   CODE_FILE_NOT_VISIBLE,
   downloadCodeInterpreterFile,
+  recordCodeDocumentHash,
 } from "./persona-ci-documents-store";
-import { UploadFileForCodeInterpreter } from "@/features/chat-page/chat-services/code-interpreter-service";
+import { UploadFileForCodeInterpreterOnce } from "@/features/chat-page/chat-services/code-interpreter-service";
 import { UserAccessGroups } from "./access-group-service";
 import {
   canOpenPersona,
@@ -505,11 +506,21 @@ export const CreatePersonaChat = async (
 
             const { buffer, name, contentType } = downloadResult.response;
             
-            // Create a File object from the buffer
-            const file = new File([new Uint8Array(buffer)], name, { type: contentType });
-            
-            // Upload to OpenAI for Code Interpreter
-            const uploadResult = await UploadFileForCodeInterpreter(file);
+            // Upload to OpenAI for Code Interpreter once per content: the
+            // agent owner's scope (the row's partition) caches the file id,
+            // so the next chat with the same file version reuses it.
+            const uploadResult = await UploadFileForCodeInterpreterOnce(doc.userId, {
+              name,
+              contentType,
+              bytes: buffer,
+            });
+            if (
+              uploadResult.status === "OK" &&
+              uploadResult.response.sha256 &&
+              doc.sha256 !== uploadResult.response.sha256
+            ) {
+              await recordCodeDocumentHash(doc, uploadResult.response.sha256);
+            }
             
             if (uploadResult.status === "OK") {
               attachedFiles.push({

@@ -26,6 +26,7 @@ import {
   type AttachedFileModel,
   type ChatThreadModel,
 } from "./models";
+import { PERSONA_CI_DOCUMENT_ATTRIBUTE } from "@/features/persona-page/persona-services/models";
 
 const isCodeInterpreterEntry = (f: Pick<AttachedFileModel, "type">) =>
   f.type !== "search-indexed";
@@ -113,13 +114,47 @@ export async function findCodeInterpreterFileOfCurrentUser(
 }
 
 /**
+ * How many places of the caller use an OpenAI file: the caller's (not
+ * deleted) threads that list the id, plus the caller's agent Code files with
+ * the same content (`sha256` of the attached entry). The content store gives
+ * the same bytes of one owner one OpenAI file, so an upload can be attached
+ * to several threads, or be the file of the owner's agent; it is deleted
+ * from OpenAI only when the thread that asks is its last user (count 1).
+ */
+export async function countUsesOfCodeInterpreterFile(
+  fileId: string,
+  sha256?: string,
+): Promise<number> {
+  if (!fileId) return 0;
+  const userId = await userHashedId();
+  const { resources } = await HistoryContainer()
+    .items.query<number>(
+      {
+        query:
+          "SELECT VALUE COUNT(1) FROM root r WHERE r.userId = @userId AND ((r.type = @threadType AND r.isDeleted = false AND ARRAY_CONTAINS(r.attachedFiles, { \"id\": @fileId }, true)) OR (r.type = @codeFileType AND r.sha256 = @sha256))",
+        parameters: [
+          { name: "@userId", value: userId },
+          { name: "@threadType", value: CHAT_THREAD_ATTRIBUTE },
+          { name: "@codeFileType", value: PERSONA_CI_DOCUMENT_ATTRIBUTE },
+          { name: "@fileId", value: fileId },
+          // No hash (an entry from before the content store): no agent match.
+          { name: "@sha256", value: sha256 || "-" },
+        ],
+      },
+      { partitionKey: userId },
+    )
+    .fetchAll();
+  return resources?.[0] ?? 0;
+}
+
+/**
  * Records an uploaded code interpreter file on the caller's thread
  * (source "upload"). Returns false when the thread is not the caller's or
  * the write failed. Retries on a concurrent write (etag).
  */
 export async function recordCodeInterpreterUpload(
   threadId: string,
-  file: { id: string; name: string },
+  file: { id: string; name: string; sha256?: string },
 ): Promise<boolean> {
   const userId = await userHashedId();
   for (let attempt = 0; attempt < 3; attempt++) {
@@ -142,6 +177,7 @@ export async function recordCodeInterpreterUpload(
       type: "code-interpreter",
       uploadedAt: new Date(),
       source: "upload",
+      ...(file.sha256 ? { sha256: file.sha256 } : {}),
     };
     try {
       await HistoryContainer().items.upsert<ChatThreadModel>(

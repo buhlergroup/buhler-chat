@@ -1,11 +1,11 @@
 import {
   DeleteFileFromCodeInterpreter,
-  UploadFileForCodeInterpreter,
+  UploadFileForCodeInterpreterOnce,
 } from "@/features/chat-page/chat-services/code-interpreter-service";
 import { recordCodeInterpreterUpload } from "@/features/chat-page/chat-services/code-interpreter-file-access";
 import { FindChatThreadForCurrentUser } from "@/features/chat-page/chat-services/chat-thread-service";
 import { isCodeInterpreterSupportedFile } from "@/features/chat-page/chat-services/code-interpreter-constants";
-import { getCurrentUser } from "@/features/auth-page/helpers";
+import { getCurrentUser, userHashedId } from "@/features/auth-page/helpers";
 import { logError, logInfo } from "@/features/common/services/logger";
 
 export async function POST(request: Request) {
@@ -72,7 +72,15 @@ export async function POST(request: Request) {
       userEmail: user.email 
     });
 
-    const result = await UploadFileForCodeInterpreter(file);
+    // One OpenAI file per content and user: the same bytes again (in this
+    // or another thread of the user) reuse the stored file id.
+    // The File is streamed (hash, blob copy, OpenAI upload); it is never
+    // copied into one buffer.
+    const result = await UploadFileForCodeInterpreterOnce(await userHashedId(), {
+      name: file.name,
+      contentType: file.type,
+      blob: file,
+    });
 
     if (result.status !== "OK") {
       return new Response(JSON.stringify({ 
@@ -83,7 +91,11 @@ export async function POST(request: Request) {
       });
     }
 
-    const recorded = await recordCodeInterpreterUpload(threadId, result.response).catch(
+    const recorded = await recordCodeInterpreterUpload(threadId, {
+      id: result.response.id,
+      name: result.response.name,
+      sha256: result.response.sha256,
+    }).catch(
       (error) => {
         logError("Failed to record the Code Interpreter upload on the thread", {
           error: error instanceof Error ? error.message : String(error),
@@ -92,8 +104,11 @@ export async function POST(request: Request) {
       },
     );
     if (!recorded) {
-      // Not usable without the record: remove the orphan (best effort).
-      await DeleteFileFromCodeInterpreter(result.response.id).catch(() => undefined);
+      // Not usable without the record: remove the orphan (best effort). A
+      // reused file may be attached elsewhere and stays.
+      if (result.response.uploaded) {
+        await DeleteFileFromCodeInterpreter(result.response.id).catch(() => undefined);
+      }
       return new Response(JSON.stringify({ error: "The file could not be attached to the chat" }), {
         status: 500,
         headers: { "Content-Type": "application/json" }

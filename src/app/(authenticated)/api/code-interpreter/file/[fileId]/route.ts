@@ -4,6 +4,7 @@ import { logError, logDebug } from "@/features/common/services/logger";
 import { NextRequest } from "next/server";
 import { contentDisposition } from "@/features/common/safe-content-type";
 import {
+  countUsesOfCodeInterpreterFile,
   findCodeInterpreterFileOfCurrentUser,
   mayDeleteCodeInterpreterFile,
 } from "@/features/chat-page/chat-services/code-interpreter-file-access";
@@ -83,6 +84,17 @@ export async function DELETE(
     // never deleted here (a skill archive is shared by every chat with it).
     const owned = await findCodeInterpreterFileOfCurrentUser(fileId);
     if (!owned || !mayDeleteCodeInterpreterFile(owned.file)) return notFound();
+
+    // The same upload (same bytes) can be attached to several threads of
+    // the user, or be the file of the user's agent: only the last user
+    // deletes it from OpenAI.
+    if ((await countUsesOfCodeInterpreterFile(fileId, owned.file.sha256)) > 1) {
+      logDebug("Code Interpreter file kept: other threads use it", { fileId });
+      return new Response(JSON.stringify({ success: true }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
+    }
 
     logDebug("Deleting Code Interpreter file", { fileId, userEmail: user.email });
 

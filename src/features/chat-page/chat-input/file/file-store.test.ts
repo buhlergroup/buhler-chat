@@ -20,9 +20,7 @@ vi.mock("../../active-chat-store", () => ({
 }));
 
 vi.mock("../../chat-services/chat-document-service", () => ({
-  CrackDocument: vi.fn(),
-  CreateChatDocument: vi.fn(),
-  IndexChatDocuments: vi.fn(),
+  UploadChatDocument: vi.fn(),
 }));
 
 import { fileStore } from "./file-store";
