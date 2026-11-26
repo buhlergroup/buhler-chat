@@ -17,6 +17,7 @@ type TemporaryChatPageProps = ComponentProps<typeof ChatPage> & {
 
 const NO_MESSAGES: ChatMessageModel[] = [];
 const NO_DOCUMENTS: ChatDocumentModel[] = [];
+const NO_WORKSPACE = { uploads: [], fileCount: 0 };
 
 /**
  * The temporary chat starts empty each time the user enters the page.
@@ -87,6 +88,7 @@ export const TemporaryChatPage = (props: TemporaryChatPageProps) => {
       {...pageProps}
       messages={showsEntryContent ? NO_MESSAGES : pageProps.messages}
       chatDocuments={showsEntryContent ? NO_DOCUMENTS : pageProps.chatDocuments}
+      workspace={showsEntryContent && pageProps.workspace ? NO_WORKSPACE : pageProps.workspace}
     />
   );
 };

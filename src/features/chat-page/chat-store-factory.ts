@@ -21,6 +21,7 @@ import {
   DEFAULT_MODEL,
   MODEL_CONFIGS,
 } from "./chat-services/models";
+import type { WorkspaceFileInfo, WorkspaceSummary } from "./chat-services/workspace-file-model";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -48,6 +49,12 @@ export interface ChatStoreState {
   // --- files ---
   attachedFiles: AttachedFileModel[];
 
+  // --- chat workspace (Copilot path; never sent as code interpreter files) ---
+  /** The user's uploads in /workspace/uploads, newest first (the input field chips). */
+  workspaceUploads: WorkspaceFileInfo[];
+  /** Files under /workspace (the Files panel button). */
+  workspaceFileCount: number;
+
   // --- input draft (per-thread; speech & prompt-pick write here too) ---
   inputText: string;
 
@@ -70,6 +77,14 @@ export interface ChatStoreState {
   removeAttachedFile: (fileId: string) => void;
   clearAttachedFiles: () => void;
   getCodeInterpreterFileIds: () => string[];
+
+  /** Replaces the workspace state with the server's (page load, refresh). */
+  setWorkspace: (summary: WorkspaceSummary) => void;
+  /** A new upload (after a handled upload): one chip, one more file. */
+  addWorkspaceUpload: (file: WorkspaceFileInfo) => void;
+  /** Files gone from the workspace (paths relative to /workspace). */
+  removeWorkspaceFiles: (paths: string[]) => void;
+  setWorkspaceFileCount: (count: number) => void;
 
   setInputText: (text: string) => void;
 
@@ -163,6 +178,10 @@ export function createChatStore(options: CreateChatStoreOptions) {
     // --- files ---
     attachedFiles: chatThread?.attachedFiles ?? [],
 
+    // --- chat workspace ---
+    workspaceUploads: [],
+    workspaceFileCount: 0,
+
     // --- input draft ---
     inputText: "",
 
@@ -227,6 +246,29 @@ export function createChatStore(options: CreateChatStoreOptions) {
       get()
         .attachedFiles.filter((f) => f.type === "code-interpreter")
         .map((f) => f.id),
+
+    setWorkspace: (summary) =>
+      set({ workspaceUploads: summary.uploads, workspaceFileCount: summary.fileCount }),
+    addWorkspaceUpload: (file) =>
+      set((s) => {
+        const known = s.workspaceUploads.some((f) => f.path === file.path);
+        return {
+          // Newest first, also when a failed delete puts a chip back.
+          workspaceUploads: [file, ...s.workspaceUploads.filter((f) => f.path !== file.path)].sort((a, b) =>
+            b.modified.localeCompare(a.modified),
+          ),
+          workspaceFileCount: known ? s.workspaceFileCount : s.workspaceFileCount + 1,
+        };
+      }),
+    removeWorkspaceFiles: (paths) =>
+      set((s) => {
+        const gone = new Set(paths);
+        return {
+          workspaceUploads: s.workspaceUploads.filter((f) => !gone.has(f.path)),
+          workspaceFileCount: Math.max(0, s.workspaceFileCount - gone.size),
+        };
+      }),
+    setWorkspaceFileCount: (count) => set({ workspaceFileCount: Math.max(0, count) }),
 
     setInputText: (text) => set({ inputText: text }),
 
