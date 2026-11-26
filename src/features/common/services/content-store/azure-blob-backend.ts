@@ -1,5 +1,7 @@
 import "server-only";
 
+import { Readable } from "node:stream";
+import type { ReadableStream as NodeWebReadableStream } from "node:stream/web";
 import { BlobServiceClient, ContainerClient, RestError } from "@azure/storage-blob";
 import { isSafeBlobPath } from "@/features/common/blob-path";
 import { getAzureDefaultCredential } from "../azure-default-credential";
@@ -11,6 +13,9 @@ import type { ContentBlobBackend } from "./content-store";
  */
 export const contentBlobContainer = (): string =>
   process.env.AZURE_STORAGE_CONTENT_CONTAINER_NAME || "content";
+
+const STREAM_BLOCK_BYTES = 4 * 1024 * 1024;
+const STREAM_CONCURRENCY = 4;
 
 const statusOf = (error: unknown): number | undefined =>
   error instanceof RestError
@@ -87,6 +92,31 @@ export function createAzureContentBlobBackend(): ContentBlobBackend {
       } catch (error) {
         const status = statusOf(error);
         // 409 BlobAlreadyExists; 412 when a writer finished in between.
+        if (status === 409 || status === 412) return "exists";
+        throw error;
+      }
+    },
+
+    async createIfAbsentFromStream(key, open, _size, options) {
+      try {
+        // Blocks of 4 MB, at most 4 in flight: about 16 MB in memory,
+        // whatever the size of the upload. The commit carries
+        // If-None-Match: *, so a blob that exists is not overwritten.
+        await (await blob(key)).uploadStream(
+          Readable.fromWeb(open() as unknown as NodeWebReadableStream<Uint8Array>),
+          STREAM_BLOCK_BYTES,
+          STREAM_CONCURRENCY,
+          {
+            conditions: { ifNoneMatch: "*" },
+            blobHTTPHeaders: options.contentType
+              ? { blobContentType: options.contentType }
+              : undefined,
+            metadata: options.metadata,
+          }
+        );
+        return "created";
+      } catch (error) {
+        const status = statusOf(error);
         if (status === 409 || status === 412) return "exists";
         throw error;
       }

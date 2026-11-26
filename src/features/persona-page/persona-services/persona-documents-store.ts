@@ -24,13 +24,13 @@ import { getCurrentUser } from "@/features/auth-page/helpers";
 import { getGraphClient } from "@/features/common/services/microsoft-graph-client";
 import { HistoryContainer } from "@/features/common/services/cosmos";
 import { uniqueId } from "@/features/common/util";
-import { contentStore } from "@/features/common/services/content-store";
+import { contentStore, contentStoreTakesBuffer } from "@/features/common/services/content-store";
 import { extractTextWithDocumentIntelligence } from "@/features/common/services/document-extraction";
 import {
   DeleteSearchDocumentByPersonaDocumentId,
   IndexDocuments,
 } from "@/features/chat-page/chat-services/azure-ai-search/azure-ai-search";
-import { ChunkDocumentWithOverlap } from "@/features/chat-page/chat-services/chat-document-service";
+import { chunkTextWithOverlap } from "@/features/chat-page/chat-services/chat-document-chunks";
 import { SupportedFileExtensionsTextFiles } from "@/features/chat-page/chat-services/models";
 import {
   DocumentMetadata,
@@ -69,9 +69,13 @@ export async function addSearchDocument(
       errors: [{ message: `Failed to download files from SharePoint. Error: ${errorText(error)}` }],
     };
   }
-  let sha256: string;
+  // A buffer over CONTENT_STORE_MAX_BUFFERED_BYTES skips the content store
+  // (no hash on the row; extracted and indexed as before).
+  let sha256: string | undefined;
   try {
-    ({ sha256 } = await contentStore().put(ownerUserId, bytes));
+    if (contentStoreTakesBuffer(bytes.length)) {
+      ({ sha256 } = await contentStore().put(ownerUserId, bytes));
+    }
   } catch (error) {
     return {
       status: "ERROR",
@@ -86,7 +90,7 @@ export async function addSearchDocument(
       documentId: file.documentId,
       parentReference: { driveId: file.parentReference.driveId },
     },
-    sha256,
+    ...(sha256 ? { sha256 } : {}),
     source: EXTERNAL_SOURCE,
     type: PERSONA_DOCUMENT_ATTRIBUTE,
   };
@@ -146,9 +150,16 @@ async function indexSearchDocument(
   file: DocumentMetadata,
   ownerUserId: string,
   bytes: Buffer,
-  sha256: string
+  sha256: string | undefined
 ): Promise<ServerActionResponse<void>> {
   const store = contentStore();
+  const extract = async () =>
+    isTextFile(file.name)
+      ? new TextDecoder().decode(bytes)
+      : sha256
+        ? (await store.markdown(ownerUserId, sha256, () => extractTextWithDocumentIntelligence(bytes)))
+            .markdown
+        : await extractTextWithDocumentIntelligence(bytes);
   const noText: ServerActionResponse<void> = {
     status: "ERROR",
     errors: [{ message: `${file.name}: Document contains no text that can be indexed.` }],
@@ -156,21 +167,10 @@ async function indexSearchDocument(
   let outcome: ServerActionResponse<void> = { status: "OK", response: undefined };
 
   try {
-    await store.ensureIndexed(
-      ownerUserId,
-      sha256,
-      // A new row id has no chunks yet: the target is always indexed once.
-      { key: `persona-document:${personaDocumentId}`, isIndexed: async () => false },
-      async () => {
-        const text = isTextFile(file.name)
-          ? new TextDecoder().decode(bytes)
-          : (
-              await store.markdown(ownerUserId, sha256, () =>
-                extractTextWithDocumentIntelligence(bytes)
-              )
-            ).markdown;
+    const run = async () => {
+        const text = await extract();
 
-        const chunks = await ChunkDocumentWithOverlap(text);
+        const chunks = chunkTextWithOverlap(text);
         if (!chunks) {
           outcome = noText;
           return;
@@ -190,8 +190,18 @@ async function indexSearchDocument(
             errors: [...new Set(messages)].map((message) => ({ message })),
           };
         }
-      }
-    );
+    };
+    if (sha256) {
+      // A new row id has no chunks yet: the target is always indexed once.
+      await store.ensureIndexed(
+        ownerUserId,
+        sha256,
+        { key: `persona-document:${personaDocumentId}`, isIndexed: async () => false },
+        run
+      );
+    } else {
+      await run();
+    }
   } catch (error) {
     return {
       status: "ERROR",

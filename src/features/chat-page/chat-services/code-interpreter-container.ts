@@ -31,7 +31,7 @@ import "server-only";
 import { toFile } from "openai";
 import { OpenAIV1Instance } from "@/features/common/services/openai";
 import { logError, logInfo } from "@/features/common/services/logger";
-import { contentStore } from "@/features/common/services/content-store";
+import { contentStore, contentStoreTakesBuffer } from "@/features/common/services/content-store";
 import { isValidId } from "@/features/common/odata-filter";
 
 /**
@@ -217,7 +217,7 @@ export async function putFileIntoCodeInterpreterContainer(
   data: Buffer,
   scope?: string,
 ): Promise<{ path: string; fileId?: string }> {
-  if (scope && isValidId(scope)) {
+  if (scope && isValidId(scope) && contentStoreTakesBuffer(data.length)) {
     try {
       const store = contentStore();
       const { sha256 } = await store.put(scope, data);

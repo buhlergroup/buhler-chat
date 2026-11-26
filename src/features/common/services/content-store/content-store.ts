@@ -50,6 +50,16 @@ export interface ContentBlobBackend {
     data: Buffer,
     options: { contentType?: string; metadata?: Record<string, string> }
   ): Promise<"created" | "exists">;
+  /**
+   * Like createIfAbsent, from a stream that is read once (`open` is called
+   * once); only the chunks in flight are held in memory.
+   */
+  createIfAbsentFromStream(
+    key: string,
+    open: () => ReadableStream<Uint8Array>,
+    size: number,
+    options: { contentType?: string; metadata?: Record<string, string> }
+  ): Promise<"created" | "exists">;
   /** The bytes, or undefined when the blob does not exist. */
   read(key: string): Promise<Buffer | undefined>;
   /** Replaces the metadata (not the bytes). */
@@ -65,7 +75,7 @@ export interface ContentOpenAiFiles {
   /** False only when OpenAI answers that the file does not exist (404). */
   exists(fileId: string): Promise<boolean>;
   /** Uploads the bytes (purpose "assistants") and returns the file id. */
-  upload(data: Buffer, name: string, contentType: string): Promise<string>;
+  upload(data: Buffer | Blob, name: string, contentType: string): Promise<string>;
 }
 
 export interface ContentStoreDeps {
@@ -150,36 +160,28 @@ export function createContentStore(deps: ContentStoreDeps) {
   };
 
   /**
-   * Stores the bytes once under `content/{scope}/sha256/{hash}`. Content
+   * Stores content once under `content/{scope}/sha256/{hash}`. Content
    * already there is reused when its size matches; a different size means
    * the blob is not what its name says, and the call fails.
    */
-  async function put(
+  async function storeOnce(
     scope: string,
-    bytes: Uint8Array,
-    meta: { contentType?: string } = {}
+    sha256: string,
+    size: number,
+    contentType: string,
+    write: (blobKey: string, options: { contentType: string; metadata: Record<string, string> }) => Promise<"created" | "exists">
   ): Promise<StoredContent> {
-    assertScope(scope);
-    const data = Buffer.isBuffer(bytes) ? bytes : Buffer.from(bytes);
-    const sha256 = sha256Hex(data);
     const blobKey = contentBlobPath(scope, sha256);
-    const contentType = meta.contentType || "application/octet-stream";
 
     const reuse = (props: ContentBlobProperties): StoredContent => {
-      if (props.size !== data.length) {
+      if (props.size !== size) {
         throw new Error("Stored content does not match its hash (size differs)");
       }
       const stored = props.metadata[META_SHA256];
       if (stored && stored !== sha256) {
         throw new Error("Stored content does not match its hash");
       }
-      return {
-        sha256,
-        blobKey,
-        size: data.length,
-        contentType: props.contentType || contentType,
-        created: false,
-      };
+      return { sha256, blobKey, size, contentType: props.contentType || contentType, created: false };
     };
 
     const existing = await blobs.head(blobKey);
@@ -193,16 +195,56 @@ export function createContentStore(deps: ContentStoreDeps) {
       return stored;
     }
 
-    const result = await blobs.createIfAbsent(blobKey, data, {
-      contentType,
-      metadata: { [META_SHA256]: sha256 },
-    });
+    const result = await write(blobKey, { contentType, metadata: { [META_SHA256]: sha256 } });
     if (result === "exists") {
       const props = await blobs.head(blobKey);
       if (!props) throw new Error("Stored content disappeared during the write");
       return reuse(props);
     }
-    return { sha256, blobKey, size: data.length, contentType, created: true };
+    return { sha256, blobKey, size, contentType, created: true };
+  }
+
+  /** Stores bytes that are in memory already (see putBlob for uploads). */
+  async function put(
+    scope: string,
+    bytes: Uint8Array,
+    meta: { contentType?: string } = {}
+  ): Promise<StoredContent> {
+    assertScope(scope);
+    const data = Buffer.isBuffer(bytes) ? bytes : Buffer.from(bytes);
+    return storeOnce(
+      scope,
+      sha256Hex(data),
+      data.length,
+      meta.contentType || "application/octet-stream",
+      (key, options) => blobs.createIfAbsent(key, data, options)
+    );
+  }
+
+  /**
+   * Stores a Blob (an uploaded File) without copying it into one buffer:
+   * one streamed pass computes the hash, a second pass streams the bytes to
+   * the content key (blocks staged, committed with If-None-Match: *). Node
+   * holds only the chunks in flight. A Blob cannot change between the
+   * passes.
+   */
+  async function putBlob(
+    scope: string,
+    blob: Blob,
+    meta: { contentType?: string } = {}
+  ): Promise<StoredContent> {
+    assertScope(scope);
+    const hash = createHash("sha256");
+    for await (const chunk of blob.stream() as unknown as AsyncIterable<Uint8Array>) {
+      hash.update(chunk);
+    }
+    return storeOnce(
+      scope,
+      hash.digest("hex"),
+      blob.size,
+      meta.contentType || blob.type || "application/octet-stream",
+      (key, options) => blobs.createIfAbsentFromStream(key, () => blob.stream(), blob.size, options)
+    );
   }
 
   /**
@@ -246,11 +288,12 @@ export function createContentStore(deps: ContentStoreDeps) {
    * file under that name). A cached id that OpenAI no longer knows (404), or
    * one under another name, is replaced by a new upload. `bytes` saves the
    * read from the blob when the caller has them; they must hash to `sha256`.
+   * `blob` is the upload that putBlob stored in the same request.
    */
   async function openAiFile(
     scope: string,
     sha256: string,
-    file: { name: string; contentType?: string; bytes?: Uint8Array }
+    file: { name: string; contentType?: string; bytes?: Uint8Array; blob?: Blob }
   ): Promise<{ fileId: string; uploaded: boolean }> {
     assertScope(scope);
     assertHash(sha256);
@@ -273,13 +316,19 @@ export function createContentStore(deps: ContentStoreDeps) {
       const again = await cachedId();
       if (again) return { fileId: again, uploaded: false };
 
-      const data = file.bytes
-        ? Buffer.isBuffer(file.bytes)
-          ? file.bytes
-          : Buffer.from(file.bytes)
-        : await blobs.read(blobKey);
-      if (!data) throw new Error("Content not found in the store");
-      if (sha256Hex(data) !== sha256) throw new Error("Content does not match its hash");
+      // A Blob is passed through as it is (it was hashed by putBlob in the
+      // same request); bytes are checked against the hash.
+      let data: Buffer | Blob | undefined = file.blob;
+      if (!data) {
+        const bytes = file.bytes
+          ? Buffer.isBuffer(file.bytes)
+            ? file.bytes
+            : Buffer.from(file.bytes)
+          : await blobs.read(blobKey);
+        if (!bytes) throw new Error("Content not found in the store");
+        if (sha256Hex(bytes) !== sha256) throw new Error("Content does not match its hash");
+        data = bytes;
+      }
 
       const fileId = await deps
         .openAiFiles()
@@ -380,7 +429,7 @@ export function createContentStore(deps: ContentStoreDeps) {
     return result;
   }
 
-  return { put, markdown, openAiFile, ensureIndexed, cleanup };
+  return { put, putBlob, markdown, openAiFile, ensureIndexed, cleanup };
 }
 
 export type ContentStore = ReturnType<typeof createContentStore>;

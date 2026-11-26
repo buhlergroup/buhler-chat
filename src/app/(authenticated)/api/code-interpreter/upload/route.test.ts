@@ -90,11 +90,13 @@ describe("/api/code-interpreter/upload route", () => {
         name: "data.csv",
         sha256: "h".repeat(64),
       });
-      // Scope of the content store: the caller's hashed id, bytes from the form.
+      // Scope of the content store: the caller's hashed id.
       const [scope, sent] = mockedUpload.mock.calls[0];
       expect(scope).toBe("user-hash");
       expect(sent.name).toBe("data.csv");
-      expect(Buffer.isBuffer(sent.bytes)).toBe(true);
+      // The upload is streamed, not copied into a buffer.
+      expect(sent.blob).toBeInstanceOf(Blob);
+      expect(sent.bytes).toBeUndefined();
     });
 
     it("refuses an upload without a thread", async () => {

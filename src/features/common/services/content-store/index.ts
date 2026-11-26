@@ -54,7 +54,11 @@ export const openAiContentFiles = (): ContentOpenAiFiles => {
     },
     async upload(data, name, contentType) {
       const created = await openai.files.create({
-        file: await toFile(data, name, { type: contentType }),
+        // A Blob (an upload) is wrapped, not read: a File made from a Blob
+        // refers to its bytes, the SDK streams it.
+        file: Buffer.isBuffer(data)
+          ? await toFile(data, name, { type: contentType })
+          : new File([data], name, { type: contentType }),
         purpose: "assistants",
       });
       return created.id;
@@ -72,6 +76,21 @@ export const contentStore = (): ContentStore =>
     blobs: delegatingBackend,
     openAiFiles: openAiContentFiles,
   }));
+
+const DEFAULT_MAX_BUFFERED_BYTES = 50 * 1024 * 1024;
+
+/**
+ * True when a file that is only available as one in-memory buffer may go
+ * through the content store: at most CONTENT_STORE_MAX_BUFFERED_BYTES
+ * (default 50 MB). Larger files keep the path without the content store, so
+ * the store adds no work for them. Uploads (Blobs) are streamed and have no
+ * such limit (putBlob).
+ */
+export const contentStoreTakesBuffer = (size: number): boolean => {
+  const configured = Number(process.env.CONTENT_STORE_MAX_BUFFERED_BYTES);
+  const limit = Number.isFinite(configured) && configured > 0 ? configured : DEFAULT_MAX_BUFFERED_BYTES;
+  return size <= limit;
+};
 
 export { sha256Hex } from "./content-store";
 export type { IndexTarget, StoredContent } from "./content-store";

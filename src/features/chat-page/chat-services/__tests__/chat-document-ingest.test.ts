@@ -80,7 +80,13 @@ const userB = "b".repeat(64);
 const pdf = Buffer.from("%PDF-1.7 fake pdf bytes");
 
 const upload = (userId: string, threadId: string, bytes = pdf, fileName = "report.pdf") =>
-  ingestChatDocument({ userId, threadId, fileName, bytes, contentType: "application/pdf" });
+  ingestChatDocument({
+    userId,
+    threadId,
+    fileName,
+    file: new Blob([new Uint8Array(bytes)]),
+    contentType: "application/pdf",
+  });
 
 const blobs = () => resolve<MemoryContentBlobBackend>(SERVICE_KEYS.contentBlobs);
 

@@ -9,7 +9,11 @@ import { ServerActionResponse } from "@/features/common/server-action-response";
 import { logInfo, logError, logDebug } from "@/features/common/services/logger";
 import { CODE_INTERPRETER_SUPPORTED_EXTENSIONS } from "./code-interpreter-constants";
 import { storableContentType } from "@/features/common/safe-content-type";
-import { contentStore } from "@/features/common/services/content-store";
+import {
+  contentStore,
+  contentStoreTakesBuffer,
+  openAiContentFiles,
+} from "@/features/common/services/content-store";
 
 /**
  * Upload a file to OpenAI for use with Code Interpreter
@@ -73,12 +77,16 @@ export async function UploadFileForCodeInterpreter(
  * has the file. `uploaded` is false when an existing OpenAI file was reused;
  * such a file may be referenced elsewhere and must not be deleted as an
  * orphan.
+ *
+ * `blob` (an upload) is streamed, never copied into one buffer. `bytes`
+ * larger than CONTENT_STORE_MAX_BUFFERED_BYTES skip the content store and
+ * are uploaded as before (no `sha256` then).
  */
 export async function UploadFileForCodeInterpreterOnce(
   scope: string,
-  file: { name: string; contentType?: string; bytes: Buffer }
+  file: { name: string; contentType?: string; bytes?: Buffer; blob?: Blob }
 ): Promise<
-  ServerActionResponse<{ id: string; name: string; sha256: string; uploaded: boolean }>
+  ServerActionResponse<{ id: string; name: string; sha256?: string; uploaded: boolean }>
 > {
   try {
     const fileExtension = file.name.split(".").pop()?.toUpperCase();
@@ -88,12 +96,28 @@ export async function UploadFileForCodeInterpreterOnce(
         errors: [{ message: `File type .${fileExtension} is not supported for Code Interpreter` }],
       };
     }
+    if (!file.blob && (!file.bytes || !contentStoreTakesBuffer(file.bytes.length))) {
+      if (!file.bytes) throw new Error("No file content");
+      const id = await openAiContentFiles().upload(
+        file.bytes,
+        file.name,
+        file.contentType || "application/octet-stream"
+      );
+      logInfo("Code Interpreter file uploaded without the content store (large buffer)", {
+        fileId: id,
+        fileName: file.name,
+        size: file.bytes.length,
+      });
+      return { status: "OK", response: { id, name: file.name, uploaded: true } };
+    }
     const store = contentStore();
-    const stored = await store.put(scope, file.bytes, { contentType: file.contentType });
+    const stored = file.blob
+      ? await store.putBlob(scope, file.blob, { contentType: file.contentType })
+      : await store.put(scope, file.bytes!, { contentType: file.contentType });
     const { fileId, uploaded } = await store.openAiFile(scope, stored.sha256, {
       name: file.name,
       contentType: file.contentType,
-      bytes: file.bytes,
+      ...(file.blob ? { blob: file.blob } : { bytes: file.bytes }),
     });
     logInfo("Code Interpreter file ready", {
       fileId,

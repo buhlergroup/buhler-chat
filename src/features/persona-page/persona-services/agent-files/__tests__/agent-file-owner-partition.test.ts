@@ -112,9 +112,6 @@ vi.mock("@/features/chat-page/chat-services/azure-ai-search/azure-ai-search", ()
   DeleteSearchDocumentByPersonaDocumentId: (id: string, owner?: string) =>
     DeleteSearchDocumentByPersonaDocumentId(id, owner),
 }));
-vi.mock("@/features/chat-page/chat-services/chat-document-service", () => ({
-  ChunkDocumentWithOverlap: vi.fn(async (text: string) => [text]),
-}));
 vi.mock("@/features/common/services/document-intelligence", () => ({ DocumentIntelligenceInstance: vi.fn() }));
 
 // The text download of a Search file (Graph client).

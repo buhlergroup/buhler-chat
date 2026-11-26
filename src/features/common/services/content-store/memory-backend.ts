@@ -61,6 +61,12 @@ export function createMemoryContentBlobBackend(
       return "created";
     },
 
+    async createIfAbsentFromStream(key, open, _size, options) {
+      const chunks: Uint8Array[] = [];
+      for await (const chunk of open() as unknown as AsyncIterable<Uint8Array>) chunks.push(chunk);
+      return this.createIfAbsent(key, Buffer.concat(chunks), options);
+    },
+
     async read(key) {
       stats.reads++;
       const blob = blobs.get(key);

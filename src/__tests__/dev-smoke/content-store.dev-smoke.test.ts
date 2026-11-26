@@ -226,6 +226,15 @@ describe.skipIf(!RUN)("content store dev smoke", () => {
           cleanups.push(() => openai.containers.delete(created.id));
           const cf = await openai.containers.files.create(created.id, { file_id: ci1.response.id });
           console.log("[smoke] container file from file_id:", { id: cf?.id, path: cf?.path });
+          // Paths of the files a container is created with (chat start).
+          const withFiles = await openai.containers.create({
+            name: `smoke-files-${nonce}`,
+            file_ids: [ci1.response.id],
+          });
+          cleanups.push(() => openai.containers.delete(withFiles.id));
+          const listed: Array<{ id?: string; path?: string }> = [];
+          for await (const f of openai.containers.files.list(withFiles.id)) listed.push(f);
+          console.log("[smoke] container created with file_ids:", listed.map((f) => f.path));
         } catch (e: any) {
           console.log("[smoke] container file from file_id failed:", e?.status, e?.message);
         }

@@ -74,10 +74,12 @@ export async function POST(request: Request) {
 
     // One OpenAI file per content and user: the same bytes again (in this
     // or another thread of the user) reuse the stored file id.
+    // The File is streamed (hash, blob copy, OpenAI upload); it is never
+    // copied into one buffer.
     const result = await UploadFileForCodeInterpreterOnce(await userHashedId(), {
       name: file.name,
       contentType: file.type,
-      bytes: Buffer.from(await file.arrayBuffer()),
+      blob: file,
     });
 
     if (result.status !== "OK") {

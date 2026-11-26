@@ -93,10 +93,11 @@ export async function ingestChatDocument(args: {
   userId: string;
   threadId: string;
   fileName: string;
-  bytes: Buffer;
+  /** The upload; streamed into the store, read whole only to extract. */
+  file: Blob;
   contentType?: string;
 }): Promise<ServerActionResponse<ChatDocumentUploadResult>> {
-  const { userId, threadId, fileName, bytes } = args;
+  const { userId, threadId, fileName, file } = args;
   const isText = isTextFileName(fileName);
   if (!isText && !isDocumentIntelligenceFileName(fileName)) {
     return { status: "ERROR", errors: [{ message: "Error: Unsupported File Type" }] };
@@ -106,7 +107,7 @@ export async function ingestChatDocument(args: {
   if (index.status !== "OK") return index;
 
   const store = contentStore();
-  const stored = await store.put(userId, bytes, { contentType: args.contentType });
+  const stored = await store.putBlob(userId, file, { contentType: args.contentType });
   let extracted = false;
   let chunkCount = 0;
 
@@ -122,10 +123,12 @@ export async function ingestChatDocument(args: {
       async () => {
         let text: string;
         if (isText) {
-          text = bytes.toString("utf8");
+          text = await file.text();
         } else {
-          const md = await store.markdown(userId, stored.sha256, () =>
-            extractTextWithDocumentIntelligence(bytes)
+          // Read whole only when Document Intelligence runs (cache miss);
+          // chat documents are limited by MAX_UPLOAD_DOCUMENT_SIZE.
+          const md = await store.markdown(userId, stored.sha256, async () =>
+            extractTextWithDocumentIntelligence(new Uint8Array(await file.arrayBuffer()))
           );
           extracted = !md.cached;
           text = md.markdown;

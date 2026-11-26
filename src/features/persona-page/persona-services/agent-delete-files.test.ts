@@ -65,7 +65,6 @@ vi.mock("@/features/chat-page/chat-services/azure-ai-search/azure-ai-search", ()
     return { status: "OK", response: true };
   }),
 }));
-vi.mock("@/features/chat-page/chat-services/chat-document-service", () => ({ ChunkDocumentWithOverlap: vi.fn() }));
 vi.mock("@/features/common/services/document-intelligence", () => ({ DocumentIntelligenceInstance: vi.fn() }));
 vi.mock("@/features/common/services/microsoft-graph-client", () => ({ getGraphClient: vi.fn() }));
 const deletedBlobs: string[] = [];
