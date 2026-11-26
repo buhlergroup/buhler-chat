@@ -42,7 +42,9 @@ const loadDevEnv = () => {
   Object.assign(process.env, values);
 };
 
-const counts = { documentIntelligence: 0, blobWrites: 0, indexRuns: 0, openAiUploads: 0 };
+const counts = { documentIntelligence: 0, blobWrites: 0, indexRuns: 0 };
+
+vi.mock("@/features/auth-page/auth-api", () => ({ options: {}, authOptions: {} }));
 
 vi.mock("@/features/common/services/document-intelligence", async (importOriginal) => {
   const real = await importOriginal<typeof import("@/features/common/services/document-intelligence")>();
