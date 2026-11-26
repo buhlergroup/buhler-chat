@@ -16,7 +16,8 @@ export async function GET(
 ) {
   try {
     // Verify user is authenticated
-    const user = await getCurrentUser();
+    // getCurrentUser() throws without a session; answer 401, not 500.
+    const user = await getCurrentUser().catch(() => null);
     if (!user) {
       return new Response("Unauthorized", { status: 401 });
     }
@@ -63,7 +64,8 @@ export async function DELETE(
 ) {
   try {
     // Verify user is authenticated
-    const user = await getCurrentUser();
+    // getCurrentUser() throws without a session; answer 401, not 500.
+    const user = await getCurrentUser().catch(() => null);
     if (!user) {
       return new Response("Unauthorized", { status: 401 });
     }

@@ -84,6 +84,12 @@ jobs:
       - name: Check server actions resolve
         run: npm run check:server-actions
 
+      # Every route handler, page and Server Action of the build, probed
+      # without a session (in-memory backend, port 3200). Fails on any answer
+      # that is not a rejection, except the commented PUBLIC list in the script.
+      - name: Check unauthenticated access is rejected
+        run: npm run check:unauth
+
       - name: Install Playwright browsers
         run: npx playwright install --with-deps chromium
 
