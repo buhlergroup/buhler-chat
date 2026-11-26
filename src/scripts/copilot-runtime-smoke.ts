@@ -218,7 +218,7 @@ async function main() {
     user: "alice",
     model: gptModel,
     prompt:
-      "Use the glob tool to list all files under /workspace. Then use the docs search tool once to find what an Azure append blob is, and answer in one sentence.",
+      "Use the glob tool to list all files under /workspace and the rg tool to find alpha with line numbers (content mode). Then use the docs search tool once to find what an Azure append blob is, and answer in one sentence.",
   });
   console.log(`
 tools offered to ${gptModel}: ${(await session.liveSessionToolNames(threadA))?.join(", ")}`);

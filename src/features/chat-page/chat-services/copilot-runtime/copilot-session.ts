@@ -14,7 +14,7 @@ import {
 import type { UIMessage, UIMessageChunk } from "ai";
 import type { Tool as AiTool } from "@ai-sdk/provider-utils";
 import { logError, logInfo, logWarn } from "@/features/common/services/logger";
-import type { ChatModel } from "../models";
+import { MODEL_CONFIGS, type ChatModel } from "../models";
 import { BlobSessionFs, type BlobStore, type SessionFsOpListener } from "./blob-session-fs";
 import { getAgentWorkspaceLeases, getAgentWorkspaceStore } from "./azure-blob-store";
 import { acquireThreadLease, type LeaseBackend, type ThreadLeaseOptions } from "./thread-lease";
@@ -22,7 +22,8 @@ import { CopilotEventMapper, type MappedTurnResult, type TurnUsage } from "./eve
 import { buildCopilotInference, copilotModelSelectionId } from "./providers";
 import { resolveCopilotRuntimePath } from "./runtime-path";
 import { buildNamespace, normalizeSessionPath, SESSION_STATE_ROOT, WORKSPACE_ROOT } from "./session-path";
-import { WORKSPACE_TOOL_NAMES, workspaceTools } from "./workspace-tools";
+import { ALL_SEARCH_TOOL_NAMES, workspaceTools, type SearchToolFamily } from "./workspace-tools";
+import { copilotProviderFor } from "./runtime-flag";
 import { buildCopilotSystemMessage } from "./system-message";
 import { toCopilotTools, toolDescription, toolJsonSchema, type ToolCallRecord, type TurnToolBinding } from "./tool-adapter";
 
@@ -186,15 +187,21 @@ function permissionGate(appToolNames: () => ReadonlySet<string>): PermissionHand
 }
 
 function preToolGate(appToolNames: () => ReadonlySet<string>): PreToolUseHandler {
-  const files = new Set<string>([...COPILOT_FILE_TOOLS, ...WORKSPACE_TOOL_NAMES]);
+  const files = new Set<string>([...COPILOT_FILE_TOOLS, ...ALL_SEARCH_TOOL_NAMES]);
   return (input) =>
     files.has(input.toolName) || appToolNames().has(input.toolName)
       ? { permissionDecision: "allow" }
       : { permissionDecision: "deny", permissionDecisionReason: "Tool not allowed" };
 }
 
-async function toolSignature(toolset: Record<string, AiTool>): Promise<string> {
-  const parts: string[] = [];
+/** The runtime gives GPT models `rg` and Claude models `grep`; ours follow. */
+function searchFamily(modelId: ChatModel): SearchToolFamily {
+  const config = MODEL_CONFIGS[modelId];
+  return config && copilotProviderFor(config) === "anthropic" ? "claude" : "gpt";
+}
+
+async function toolSignature(toolset: Record<string, AiTool>, family: SearchToolFamily): Promise<string> {
+  const parts: string[] = [`search:${family}`];
   for (const name of Object.keys(toolset).sort()) {
     parts.push(`${name}:${toolDescription(toolset[name])}:${JSON.stringify(await toolJsonSchema(toolset[name]))}`);
   }
@@ -325,7 +332,7 @@ async function openSession(input: CopilotTurnInput): Promise<{ live: LiveSession
   const appToolNames = () => new Set(Object.keys(binding.current?.toolset ?? input.toolset));
   const definitions: CopilotTool[] = [
     ...(await toCopilotTools(input.toolset, () => binding.current)),
-    ...workspaceTools(fs),
+    ...workspaceTools(fs, searchFamily(input.modelId)),
   ];
   const config = {
     model: selectionId,
@@ -382,7 +389,7 @@ async function openSession(input: CopilotTurnInput): Promise<{ live: LiveSession
     fs,
     namespace,
     binding,
-    toolSignature: await toolSignature(input.toolset),
+    toolSignature: await toolSignature(input.toolset, searchFamily(input.modelId)),
     selectionId,
     reasoningEffort: input.reasoningEffort,
     busy: false,
@@ -465,12 +472,12 @@ async function runTurnInSession(input: CopilotTurnInput): Promise<CopilotTurnHan
       live.reasoningEffort = input.reasoningEffort;
     }
     // The toolset can change between turns (extensions, documents, skills).
-    const signature = await toolSignature(input.toolset);
+    const signature = await toolSignature(input.toolset, searchFamily(input.modelId));
     if (signature !== live.toolSignature) {
       // setTools replaces ALL client tools, so the workspace tools go along.
       await live.session.setTools([
         ...(await toCopilotTools(input.toolset, () => live.binding.current)),
-        ...workspaceTools(live.fs),
+        ...workspaceTools(live.fs, searchFamily(input.modelId)),
       ]);
       live.toolSignature = signature;
     }

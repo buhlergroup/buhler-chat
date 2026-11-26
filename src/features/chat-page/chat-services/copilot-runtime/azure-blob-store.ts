@@ -99,6 +99,14 @@ export class AzureBlobStore implements BlobStore {
     return names;
   }
 
+  async listDetailed(prefix: string) {
+    const out: Array<{ name: string; metadata: Record<string, string>; lastModified: Date }> = [];
+    for await (const blob of this.container.listBlobsFlat({ prefix, includeMetadata: true })) {
+      out.push({ name: blob.name, metadata: blob.metadata ?? {}, lastModified: blob.properties.lastModified });
+    }
+    return out;
+  }
+
   async listHierarchy(prefix: string): Promise<{ prefixes: string[]; names: string[] }> {
     const prefixes: string[] = [];
     const names: string[] = [];

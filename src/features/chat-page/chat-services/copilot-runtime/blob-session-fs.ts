@@ -22,12 +22,17 @@
  * same data blob; the destination is already correct.
  *
  * Data blobs are append blobs so the runtime's frequent appendFile on the
- * event journal is one append-block call, not a rewrite of the whole file.
+ * event journal (under /session-state) is one append-block call, not a
+ * rewrite of the whole file. Workspace files (/workspace) are never changed
+ * in place: every write, including an append, creates a new data blob. So a
+ * workspace data blob is immutable and its content can be cached by name
+ * (the workspace search tools do), and the pointer's `size` metadata is exact.
  */
 import { randomUUID } from "node:crypto";
 import type { SessionFsProvider } from "@microsoft/copilot-sdk";
 import {
   DIR_MARKER_NAME,
+  SESSION_STATE_ROOT,
   isRootPath,
   normalizeSessionPath,
   parentPath,
@@ -70,7 +75,66 @@ export interface BlobStore {
   listNames(prefix: string): Promise<string[]>;
   /** One level under the prefix: virtual sub-directories and blob names. */
   listHierarchy(prefix: string): Promise<{ prefixes: string[]; names: string[] }>;
+  /** All blobs under the prefix (flat) with their metadata, in ONE listing. */
+  listDetailed(prefix: string): Promise<Array<{ name: string; metadata: Record<string, string>; lastModified: Date }>>;
 }
+
+/** One workspace file as the search tools see it (from one listing, no per-file calls). */
+export interface WorkspaceEntry {
+  /** Normalised path, e.g. /workspace/notes/plan.txt. */
+  path: string;
+  /** Immutable data blob holding the content. */
+  dataKey: string;
+  /** Bytes, from the pointer metadata (undefined for pointers written before it existed). */
+  size?: number;
+  lastModified: Date;
+}
+
+/**
+ * Per-process LRU of workspace data blob contents, keyed by data blob name.
+ * Workspace data blobs never change (see header), so no staleness check.
+ */
+export class DataBlobCache {
+  private readonly entries = new Map<string, Buffer>();
+  private bytes = 0;
+  hits = 0;
+  misses = 0;
+  constructor(private readonly maxBytes: number) {}
+  get(key: string): Buffer | undefined {
+    const value = this.entries.get(key);
+    if (!value) {
+      this.misses++;
+      return undefined;
+    }
+    this.hits++;
+    this.entries.delete(key);
+    this.entries.set(key, value);
+    return value;
+  }
+  set(key: string, value: Buffer): void {
+    if (value.length > this.maxBytes) return;
+    const old = this.entries.get(key);
+    if (old) {
+      this.bytes -= old.length;
+      this.entries.delete(key);
+    }
+    this.entries.set(key, value);
+    this.bytes += value.length;
+    for (const [k, v] of this.entries) {
+      if (this.bytes <= this.maxBytes) break;
+      this.entries.delete(k);
+      this.bytes -= v.length;
+    }
+  }
+  get size(): number {
+    return this.bytes;
+  }
+}
+
+const g = globalThis as typeof globalThis & { __copilotDataCache?: DataBlobCache };
+/** Shared by all sessions of this process; 64 MB unless COPILOT_SEARCH_CACHE_MB says otherwise. */
+export const sharedDataCache = (): DataBlobCache =>
+  (g.__copilotDataCache ??= new DataBlobCache((Number(process.env.COPILOT_SEARCH_CACHE_MB) || 64) * 1024 * 1024));
 
 /** Biggest block one appendBlock call may carry (Azure limit 4 MiB). */
 const MAX_APPEND_BLOCK = 4 * 1024 * 1024;
@@ -88,6 +152,7 @@ export class BlobSessionFs implements SessionFsProvider {
     private readonly store: BlobStore,
     private readonly namespace: string,
     private readonly onOp?: SessionFsOpListener,
+    private readonly cache: DataBlobCache = sharedDataCache(),
   ) {
     if (!namespace || namespace.includes("..") || namespace.startsWith("/")) {
       throw new SessionPathError("Invalid namespace");
@@ -147,7 +212,10 @@ export class BlobSessionFs implements SessionFsProvider {
     await this.appendChunks(dataKey, data);
     // The pointer swap is the commit point: before it, readers see the old
     // content; after it, the new.
-    await this.store.upload(this.fileKey(normalized), Buffer.alloc(0), { target: dataKey });
+    await this.store.upload(this.fileKey(normalized), Buffer.alloc(0), {
+      target: dataKey,
+      size: String(data.length),
+    });
     if (previous && previous.target !== dataKey) {
       await this.store.delete(previous.target).catch(() => false);
     }
@@ -165,13 +233,50 @@ export class BlobSessionFs implements SessionFsProvider {
    * host disk, not this provider).
    */
   async listFiles(dir: string): Promise<string[]> {
-    const n = this.norm("listFiles", dir);
-    const prefix = this.dirPrefix(n);
-    const names = await this.store.listNames(prefix);
-    return names
-      .filter((name) => !name.endsWith(`/${DIR_MARKER_NAME}`))
-      .map((name) => `${n}/${name.slice(prefix.length)}`)
-      .sort();
+    return (await this.listEntries(dir)).map((e) => e.path).sort();
+  }
+
+  /**
+   * Files under `dir` in ONE flat listing with metadata. `literalPrefix` (the
+   * literal start of a glob, e.g. "notes/re") narrows the Blob prefix. Every
+   * name is checked against this namespace, and every target must be a data
+   * blob of this namespace.
+   */
+  async listEntries(dir: string, literalPrefix = ""): Promise<WorkspaceEntry[]> {
+    const n = this.norm("listEntries", dir, { literalPrefix });
+    if (literalPrefix.includes("..") || literalPrefix.startsWith("/")) {
+      throw new SessionPathError(`Invalid pattern prefix: ${literalPrefix}`);
+    }
+    const base = this.dirPrefix(n);
+    const listing = await this.store.listDetailed(base + literalPrefix);
+    const entries: WorkspaceEntry[] = [];
+    for (const blob of listing) {
+      if (!blob.name.startsWith(base)) continue;
+      const rel = blob.name.slice(base.length);
+      if (rel === DIR_MARKER_NAME || rel.endsWith(`/${DIR_MARKER_NAME}`) || rel.split("/").includes("..")) continue;
+      const target = blob.metadata?.target;
+      if (typeof target !== "string" || !target.startsWith(`${this.namespace}/d/`)) continue;
+      const size = Number(blob.metadata?.size);
+      entries.push({
+        path: `${n}/${rel}`,
+        dataKey: target,
+        ...(Number.isFinite(size) && blob.metadata?.size !== undefined ? { size } : {}),
+        lastModified: blob.lastModified,
+      });
+    }
+    return entries;
+  }
+
+  /** Content of a listed workspace file, from the process cache when possible. */
+  async readEntry(entry: WorkspaceEntry): Promise<Buffer> {
+    if (!entry.dataKey.startsWith(`${this.namespace}/d/`)) {
+      throw new SessionPathError("Entry outside this namespace");
+    }
+    const cached = this.cache.get(entry.dataKey);
+    if (cached) return cached;
+    const data = await this.store.download(entry.dataKey);
+    this.cache.set(entry.dataKey, data);
+    return data;
   }
 
   // ── SessionFsProvider ─────────────────────────────────────────────────
@@ -201,6 +306,12 @@ export class BlobSessionFs implements SessionFsProvider {
     const ptr = await this.pointer(n);
     if (!ptr) {
       await this.writeBuffer(n, data);
+      return;
+    }
+    if (!n.startsWith(`${SESSION_STATE_ROOT}/`)) {
+      // Workspace files stay immutable per data blob: append = new blob.
+      const current = await this.store.download(ptr.target);
+      await this.writeBuffer(n, Buffer.concat([current, data]));
       return;
     }
     try {
@@ -347,7 +458,11 @@ export class BlobSessionFs implements SessionFsProvider {
   ): Promise<void> {
     const replaced = await this.pointer(d);
     // 1. Commit: the destination pointer now names the source's data.
-    await this.store.upload(this.fileKey(d), Buffer.alloc(0), { target: ptr.target });
+    const size = ptr.props.metadata?.size;
+    await this.store.upload(this.fileKey(d), Buffer.alloc(0), {
+      target: ptr.target,
+      ...(size !== undefined ? { size } : {}),
+    });
     // 2. Drop the source pointer, only if nobody changed it meanwhile.
     try {
       await this.store.delete(this.fileKey(s), { ifMatch: ptr.props.etag });
