@@ -28,7 +28,11 @@ import {
   FindChatDocumentChunkIds,
   IndexDocuments,
 } from "./azure-ai-search/azure-ai-search";
-import { chunkTextWithOverlap } from "./chat-document-chunks";
+import {
+  chunkTextWithOverlap,
+  documentTooLongMessage,
+  maxDocumentChunks,
+} from "./chat-document-chunks";
 import {
   CHAT_DOCUMENT_ATTRIBUTE,
   ChatDocumentModel,
@@ -140,6 +144,11 @@ export async function ingestChatDocument(args: {
         if (chunks.length === 0) {
           throw new UserFacingError(`${fileName}: Document contains no text that can be indexed.`);
         }
+        // Before any embedding call (IndexDocuments checks it too).
+        const maxChunks = maxDocumentChunks();
+        if (chunks.length > maxChunks) {
+          throw new UserFacingError(`${fileName}: ${documentTooLongMessage(chunks.length, maxChunks)}`);
+        }
 
         // Older content under the same name: its chunks are collected before
         // the new ones exist, and deleted once the new ones are in.
@@ -149,12 +158,14 @@ export async function ingestChatDocument(args: {
         const oldChunkIds =
           replaced.length > 0 ? await FindChatDocumentChunkIds(threadId, userId, fileName) : [];
 
+        // A failed IndexDocuments has deleted its own chunks again; the old
+        // content stays as it is.
         const results = await IndexDocuments(chunks, fileName, threadId, undefined, userId);
         const failed = results.flatMap((r) => (r.status === "OK" ? [] : r.errors));
         if (results.length === 0 || failed.length > 0) {
           throw new UserFacingError(
-            "Looks like not all documents were indexed" +
-              failed.map((e) => e.message).join("\n")
+            `${fileName}: The document was not indexed. ` +
+              [...new Set(failed.map((e) => e.message))].join("\n")
           );
         }
         chunkCount = results.length;

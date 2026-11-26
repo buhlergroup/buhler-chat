@@ -15,6 +15,7 @@ import { uniqueId } from "@/features/common/util";
 import { AzureKeyCredential, SearchClient, SearchIndex } from "@azure/search-documents";
 import { logDebug, logError } from "@/features/common/services/logger";
 import { odataEq, odataSearchIn } from "@/features/common/odata-filter";
+import { documentTooLongMessage, maxDocumentChunks } from "../chat-document-chunks";
 
 export interface AzureSearchDocumentIndex {
   id: string;
@@ -29,6 +30,10 @@ export interface AzureSearchDocumentIndex {
 // Embeddings accept max 2048 inputs per call and Azure AI Search max 16 MB per
 // upload. One chunk with a 3072-dim vector is ~63 KB, so 100 stays well below both.
 const INDEX_BATCH_SIZE = 100;
+// Most actions in one index batch request.
+const DELETE_BATCH_SIZE = 1000;
+// Most chunks FindChatDocumentChunkIds reads from one thread.
+const MAX_THREAD_CHUNKS = 100_000;
 
 export type DocumentSearchResponse = {
   score: number;
@@ -315,73 +320,111 @@ export const IndexDocuments = async (
   personaDocumentId?: string,
   ownerUserId?: string
 ): Promise<Array<ServerActionResponse<boolean>>> => {
+  const texts = docs.filter((d) => d.trim().length > 0);
+
+  // Refused before the first embedding call: nothing is spent, nothing written.
+  const maxChunks = maxDocumentChunks();
+  if (texts.length > maxChunks) {
+    return [
+      { status: "ERROR", errors: [{ message: documentTooLongMessage(texts.length, maxChunks) }] },
+    ];
+  }
+
   const response: ServerActionResponse<boolean>[] = [];
+  // Ids of the chunks this call has written. When a later batch fails, they
+  // are deleted again: the index never keeps half a document.
+  const written: string[] = [];
+  // Ids of the batch whose upload is running; written or not when it throws.
+  let uploading: string[] = [];
+
+  const rollBack = async (
+    failure: ServerActionResponse<boolean>[]
+  ): Promise<ServerActionResponse<boolean>[]> => {
+    const ids = [...written, ...uploading];
+    if (ids.length === 0) return failure;
+    try {
+      await DeleteChunksByIds(ids);
+      return failure;
+    } catch (e) {
+      logError("IndexDocuments: chunks of the failed upload could not be deleted", {
+        chunkCount: ids.length,
+        error: e instanceof Error ? e.message : String(e),
+      });
+      return [
+        ...failure,
+        {
+          status: "ERROR",
+          errors: [
+            { message: `${ids.length} chunks written before the error could not be deleted: ${e}` },
+          ],
+        },
+      ];
+    }
+  };
 
   try {
     const user = ownerUserId ?? (await userHashedId());
     logDebug("IndexDocuments starting", {
-      docCount: docs.length,
+      docCount: texts.length,
       fileName,
       chatThreadId,
       personaDocumentId,
     });
-    
-    const documentsToIndex: AzureSearchDocumentIndex[] = [];
-
-    for (const doc of docs.filter((d) => d.trim().length > 0)) {
-      const docToAdd: AzureSearchDocumentIndex = {
-        id: uniqueId(),
-        chatThreadId: chatThreadId || null,
-        user,
-        pageContent: doc,
-        metadata: fileName || null,
-        embedding: [],
-        personaDocumentId: personaDocumentId || null,
-      };
-
-      documentsToIndex.push(docToAdd);
-    }
 
     const instance = AzureAISearchInstance();
 
-    for (let start = 0; start < documentsToIndex.length; start += INDEX_BATCH_SIZE) {
-      const batch = documentsToIndex.slice(start, start + INDEX_BATCH_SIZE);
+    for (let start = 0; start < texts.length; start += INDEX_BATCH_SIZE) {
+      // Only the documents of this batch exist. Their embeddings are dropped
+      // after the upload, so memory does not grow with the document length.
+      const batch: AzureSearchDocumentIndex[] = texts
+        .slice(start, start + INDEX_BATCH_SIZE)
+        .map((text) => ({
+          id: uniqueId(),
+          chatThreadId: chatThreadId || null,
+          user,
+          pageContent: text,
+          metadata: fileName || null,
+          embedding: [],
+          personaDocumentId: personaDocumentId || null,
+        }));
 
       logDebug("Creating embeddings for documents", {
         batchStart: start,
         documentCount: batch.length,
-        totalCount: documentsToIndex.length,
+        totalCount: texts.length,
       });
 
       const embeddingsResponse = await EmbedDocuments(batch);
 
       if (embeddingsResponse.status !== "OK") {
-        response.push(embeddingsResponse);
-        return response;
+        return await rollBack([embeddingsResponse]);
       }
 
       logDebug("Uploading documents to Azure AI Search", {
         batchStart: start,
-        documentCount: embeddingsResponse.response.length,
+        documentCount: batch.length,
       });
 
-      const uploadResponse = await instance.uploadDocuments(
-        embeddingsResponse.response
-      );
+      uploading = batch.map((d) => d.id);
+      const uploadResponse = await instance.uploadDocuments(batch);
+      uploading = [];
+      for (const doc of batch) doc.embedding = undefined;
 
       logDebug("Upload response received", {
         resultCount: uploadResponse.results.length,
         successCount: uploadResponse.results.filter(r => r.succeeded).length,
       });
 
-      uploadResponse.results.forEach((r) => {
+      const failed: ServerActionResponse<boolean>[] = [];
+      uploadResponse.results.forEach((r, i) => {
         if (r.succeeded) {
+          written.push(r.key ?? batch[i].id);
           response.push({
             status: "OK",
             response: r.succeeded,
           });
         } else {
-          response.push({
+          failed.push({
             status: "ERROR",
             errors: [
               {
@@ -392,8 +435,8 @@ export const IndexDocuments = async (
         }
       });
 
-      if (uploadResponse.results.some((r) => !r.succeeded)) {
-        return response;
+      if (failed.length > 0) {
+        return await rollBack(failed);
       }
     }
 
@@ -404,8 +447,7 @@ export const IndexDocuments = async (
       stack: e instanceof Error ? e.stack : undefined,
       errorType: (e as any)?.constructor?.name,
     });
-    return [
-      ...response,
+    return await rollBack([
       {
         status: "ERROR",
         errors: [
@@ -414,7 +456,7 @@ export const IndexDocuments = async (
           },
         ],
       },
-    ];
+    ]);
   }
 };
 
@@ -483,21 +525,35 @@ export const FindChatDocumentChunkIds = async (
   const instance = AzureAISearchInstance<AzureSearchDocumentIndex>();
   const filter = `${odataEq("chatThreadId", chatThreadId)} and ${odataEq("user", userId)}`;
   const ids: string[] = [];
-  const found = await instance.search("*", { filter, select: ["id", "metadata"], top: 1000 });
+  // Above 1000 results the service answers in pages of 1000, which the
+  // client follows: a document of more than 1000 chunks is found whole.
+  const found = await instance.search("*", {
+    filter,
+    select: ["id", "metadata"],
+    top: MAX_THREAD_CHUNKS,
+  });
   for await (const result of found.results) {
     if (result.document.metadata === fileName) ids.push(result.document.id);
   }
   return ids;
 };
 
-/** Deletes index chunks by id. */
+/**
+ * Deletes index chunks by id, at most 1000 per request (the limit of one
+ * index batch).
+ */
 export const DeleteChunksByIds = async (ids: string[]): Promise<void> => {
   if (ids.length === 0) return;
   const instance = AzureAISearchInstance<AzureSearchDocumentIndex>();
-  const deleted = await instance.deleteDocuments("id", ids);
-  const failed = deleted.results.filter((r) => !r.succeeded);
-  if (failed.length > 0) {
-    throw new Error(failed.map((r) => r.errorMessage || "Unknown error").join("; "));
+  const errors: string[] = [];
+  for (let start = 0; start < ids.length; start += DELETE_BATCH_SIZE) {
+    const deleted = await instance.deleteDocuments("id", ids.slice(start, start + DELETE_BATCH_SIZE));
+    for (const r of deleted.results) {
+      if (!r.succeeded) errors.push(r.errorMessage || "Unknown error");
+    }
+  }
+  if (errors.length > 0) {
+    throw new Error(errors.join("; "));
   }
 };
 
