@@ -5,7 +5,10 @@ import { BlobSessionFs, DataBlobCache } from "./blob-session-fs";
 import { FakeBlobStore } from "./fake-blob-store.test-helper";
 import {
   buildSearchRegex,
+  GLOB_LIMITS,
+  GlobPatternError,
   globToRegExp,
+  MAX_PATTERN_CHARS,
   literalGlobPrefix,
   runGlob,
   runRipgrep,
@@ -94,10 +97,10 @@ describe("rg / grep output (ripgrep format)", () => {
     expect(text(await runRipgrep(ws.fs, { pattern: "(?i)alpha upper", output_mode: "content" }))).toBe("./sub/b.md:ALPHA upper");
   });
 
-  it("a regex JavaScript cannot run fails with an explanation, not silently", async () => {
+  it("a regex the engine cannot run fails with an explanation, not silently", async () => {
     const res = await runRipgrep(ws.fs, { pattern: "(" });
     expect(res.resultType).toBe("failure");
-    expect(text(res)).toMatch(/^Error: rg: regex parse error: .*\nNote: patterns run as JavaScript regular expressions, not Rust regex/s);
+    expect(text(res)).toMatch(/^Error: rg: regex parse error: .*\nNote: patterns run on the RE2 engine/s);
     expect("error" in (buildSearchRegex("(?x) a b", {}) as object)).toBe(true);
   });
 
@@ -220,5 +223,96 @@ describe("namespace jail", () => {
   it("globToRegExp basics", () => {
     expect(globToRegExp("**/*.{md,txt}").test("x/y/z.md")).toBe(true);
     expect(globToRegExp("file[12].csv").test("file3.csv")).toBe(false);
+    expect(globToRegExp("file[!12].csv").test("file3.csv")).toBe(true);
+    expect(globToRegExp("a}b(c).txt").test("a}b(c).txt")).toBe(true);
+  });
+});
+
+describe("model-controlled patterns cannot block the server (ReDoS)", () => {
+  const EVIL = "(a+)+$";
+  const evilLine = `${"a".repeat(40)}!`;
+
+  it("the catastrophic-backtracking pattern returns at once, and the event loop keeps running", async () => {
+    // 40 files of 2,000 evil lines: a backtracking engine needs about 2^40
+    // steps for ONE line; RE2 is linear in the input.
+    const files: Record<string, string> = {};
+    for (let i = 0; i < 40; i++) files[`/workspace/evil/f${i}.txt`] = `${evilLine}\n`.repeat(2000);
+    files["/workspace/evil/hit.txt"] = "aaaa\n";
+    const { fs } = await workspace(files);
+
+    let ticks = 0;
+    const timer = setInterval(() => ticks++, 1);
+    const started = Date.now();
+    const res = await runRipgrep(fs, { pattern: EVIL, paths: "/workspace/evil" });
+    const ms = Date.now() - started;
+    clearInterval(timer);
+
+    expect(res.resultType).toBe("success");
+    expect(text(res)).toBe("/workspace/evil/hit.txt");
+    expect(ms).toBeLessThan(3000);
+    // Timers fired while the search ran: it yields between file batches.
+    expect(ticks).toBeGreaterThan(0);
+
+    // Same in multiline mode (one global pass over the whole file).
+    const multi = await runRipgrep(fs, { pattern: EVIL, paths: "/workspace/evil/f0.txt", multiline: true });
+    expect(text(multi)).toBe("No matches found.");
+    expect(buildSearchRegex("(x+x+)+y", {})).not.toHaveProperty("error");
+  });
+
+  it("look-around and backreferences fail with the engine note", async () => {
+    const { fs } = await workspace({ "/workspace/a.txt": "aa\n" });
+    for (const pattern of ["(?<=a)a", "a(?=a)", "(a)\\1", "(?<n>a)\\k<n>"]) {
+      const res = await runRipgrep(fs, { pattern });
+      expect(res.resultType, pattern).toBe("failure");
+      expect(text(res), pattern).toMatch(/regex parse error: .*\nNote: patterns run on the RE2 engine.*look-around, backreferences/s);
+    }
+    // An escaped backslash before a digit is a literal, not a backreference.
+    expect(buildSearchRegex("\\\\1", {})).not.toHaveProperty("error");
+  });
+
+  it("inline flags work anywhere (as in ripgrep), (?x) does not", async () => {
+    const { fs } = await workspace({ "/workspace/a.txt": "alpha ALPHA\n" });
+    expect(text(await runRipgrep(fs, { pattern: "alpha (?i)alpha", output_mode: "content" }))).toBe("./a.txt:alpha ALPHA");
+    expect(text(await runRipgrep(fs, { pattern: "(?i:ALPHA) ALPHA", output_mode: "count" }))).toBe("./a.txt:1");
+    expect(buildSearchRegex("(?x)a b", {})).toHaveProperty("error");
+  });
+
+  it("rejects patterns over the length cap", async () => {
+    const { fs } = await workspace({ "/workspace/a.txt": "a\n" });
+    expect(buildSearchRegex("a".repeat(MAX_PATTERN_CHARS), {})).not.toHaveProperty("error");
+    const res = await runRipgrep(fs, { pattern: "a".repeat(MAX_PATTERN_CHARS + 1) });
+    expect(res.resultType).toBe("failure");
+    expect(text(res)).toContain(`longer than ${MAX_PATTERN_CHARS} characters`);
+    expect(text(await runRipgrep(fs, { pattern: "a{1001}" }))).toMatch(/^Error: rg: regex parse error/);
+  });
+
+  it("limits glob size: groups, nesting, alternatives, classes, length", async () => {
+    const { fs } = await workspace({ "/workspace/a.txt": "a\n" });
+    const tooMany = [
+      "{a,b}".repeat(GLOB_LIMITS.maxBraceGroups + 1),
+      `${"{a,".repeat(GLOB_LIMITS.maxBraceDepth + 1)}b${"}".repeat(GLOB_LIMITS.maxBraceDepth + 1)}`,
+      `{${Array.from({ length: GLOB_LIMITS.maxAlternatives + 2 }, (_, i) => `x${i}`).join(",")}}`,
+      "[ab]".repeat(GLOB_LIMITS.maxClasses + 1),
+      "a".repeat(GLOB_LIMITS.maxChars + 1),
+    ];
+    for (const glob of tooMany) {
+      expect(() => globToRegExp(glob), glob.slice(0, 40)).toThrow(GlobPatternError);
+      const g = await runGlob(fs, { pattern: glob });
+      expect(g.resultType).toBe("failure");
+      expect(text(g)).toMatch(/^Error: glob: /);
+      const r = await runRipgrep(fs, { pattern: "a", glob });
+      expect(r.resultType).toBe("failure");
+      expect(text(r)).toMatch(/^Error: rg: glob /);
+    }
+    // Within the limits it still works.
+    expect(text(await runGlob(fs, { pattern: "{{a,b},c}.txt" }))).toBe("./a.txt");
+  });
+
+  it("stops at the time budget with the results so far and a note", async () => {
+    const { fs } = await workspace({ "/workspace/a.txt": "alpha\n", "/workspace/b.txt": "alpha\n" });
+    const res = await runRipgrep(fs, { pattern: "alpha" }, { timeBudgetMs: 0 });
+    expect(res.resultType).toBe("success");
+    expect(text(res)).toMatch(/^No matches found\.\n\[The search stopped after 0 s; the results above are incomplete/);
+    expect(text(await runRipgrep(fs, { pattern: "alpha" }))).toBe("./a.txt\n./b.txt");
   });
 });
