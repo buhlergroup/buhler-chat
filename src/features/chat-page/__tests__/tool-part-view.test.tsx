@@ -199,3 +199,24 @@ describe("renderToolOutput — MCP sign-in needed", () => {
     expect(screen.getByRole("button", { name: /Connect Market data/ })).toBeInTheDocument();
   });
 });
+
+describe("renderToolOutput: Copilot path image tools", () => {
+  it("renders generate_image like image_generation (blob ref -> /api/images)", async () => {
+    const { render, screen } = await import("@testing-library/react");
+    const node = renderToolOutput({ result: "blob://t1/abc.png", path: "/workspace/images/cat.png" }, "generate_image");
+    render(<>{node}</>);
+    expect(screen.getByRole("img")).toHaveAttribute("src", "/api/images?t=t1&img=abc.png");
+  });
+
+  it("renders run_code image outputs and the rest as JSON", async () => {
+    const { render, screen } = await import("@testing-library/react");
+    const node = renderToolOutput(
+      { stdout: "ok", files: ["/workspace/outputs/chart.png"], images: ["blob://t1/c1.png", "not-a-ref"] },
+      "run_code",
+    );
+    const { container } = render(<>{node}</>);
+    expect(screen.getAllByRole("img").map((i) => i.getAttribute("src"))).toEqual(["/api/images?t=t1&img=c1.png"]);
+    expect(container.textContent).toContain("/workspace/outputs/chart.png");
+    expect(container.textContent).not.toContain("blob://");
+  });
+});

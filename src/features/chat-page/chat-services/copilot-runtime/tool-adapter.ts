@@ -184,6 +184,21 @@ export async function toCopilotTools(
   return tools;
 }
 
+/**
+ * The model text from a tool's `toModelOutput`, when it has one: a `text`
+ * output as is, a `json` output as JSON; undefined for other output kinds
+ * (the raw output is used then).
+ */
+export async function modelOutputText(definition: AiTool, toolCallId: string, input: unknown, output: unknown): Promise<string | undefined> {
+  const toModel = (definition as { toModelOutput?: unknown }).toModelOutput;
+  if (typeof toModel !== "function") return undefined;
+  const result = await (toModel as (o: { toolCallId: string; input: unknown; output: unknown }) => unknown)({ toolCallId, input, output });
+  const r = result as { type?: string; value?: unknown } | undefined;
+  if (r?.type === "text" && typeof r.value === "string") return r.value;
+  if (r?.type === "json") return JSON.stringify(r.value ?? null);
+  return undefined;
+}
+
 /** Runs one call against the current turn's toolset. Exported for tests. */
 export async function runAppTool(
   name: string,
@@ -233,15 +248,18 @@ export async function runAppTool(
       for await (const chunk of output) last = chunk;
       output = last;
     }
+    // A tool's toModelOutput (AI SDK) decides what the model sees; the chat
+    // UI keeps the full output (e.g. an image ref the model must not echo).
+    const modelOutput = await modelOutputText(definition, toolCallId, input, output);
     if (binding?.spill) {
-      const spilled = await spillLargeResult(name, toolCallId, output, binding.spill);
+      const spilled = await spillLargeResult(name, toolCallId, modelOutput ?? output, binding.spill);
       if (spilled) {
-        binding.onResult?.({ toolCallId, toolName: name, input, output: spilled.display });
+        binding.onResult?.({ toolCallId, toolName: name, input, output: modelOutput === undefined ? spilled.display : output });
         return spilled.result;
       }
     }
     binding?.onResult?.({ toolCallId, toolName: name, input, output });
-    return { textResultForLlm: toModelText(output), resultType: "success" };
+    return { textResultForLlm: modelOutput ?? toModelText(output), resultType: "success" };
   } catch (err) {
     return fail(err instanceof Error ? err.message : String(err), input, err);
   }
