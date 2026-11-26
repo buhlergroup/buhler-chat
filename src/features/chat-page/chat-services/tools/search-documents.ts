@@ -122,7 +122,7 @@ export function searchDocumentsTool(ctx: ToolContext) {
       const documents: Array<{
         id: string;
         content: string;
-        metadata: string;
+        metadata: string | null;
         relevanceScore?: number;
       }> = withoutEmbedding.map((result, index) => ({
         id: uniqueId(),
