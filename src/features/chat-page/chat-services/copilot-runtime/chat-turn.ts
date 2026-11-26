@@ -100,8 +100,10 @@ export async function runCopilotChatTurn(args: CopilotChatTurnArgs): Promise<Res
       ...(args.builtInToggles ? providerTools({ fs, threadId, userKey, toggles: args.builtInToggles }) : {}),
     };
     // Sub-agents: `general` + the chat agent's sub-agents the user may open.
+    // The agent's current list (loadThreadContext; stored list only for a
+    // legacy thread without agent id), never a copy on the thread.
     const subAgents = await resolveSubAgents({
-      subAgentIds: ctx.thread.subAgentIds,
+      subAgentIds: ctx.subAgentIds,
       parentPersonaId: ctx.thread.personaId,
       ctx: { user: ctx.user.id, threadId, threadDocumentIds: ctx.threadDocumentIds, clientDateTime: args.clientDateTime },
     });

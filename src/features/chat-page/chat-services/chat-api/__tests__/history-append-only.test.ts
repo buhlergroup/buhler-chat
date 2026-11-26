@@ -48,8 +48,11 @@ vi.mock("@/features/auth-page/helpers", () => ({
 // ── Thread service ────────────────────────────────────────────────────────────
 const mockEnsureThread = vi.fn();
 vi.mock("../../chat-thread-service", () => ({
-  EnsureChatThreadOperation: (...a: any[]) => mockEnsureThread(...a),
   UpdateChatThreadUsage: vi.fn(async () => ({ status: "OK" })),
+}));
+vi.mock("../../chat-thread-read", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../../chat-thread-read")>()),
+  ensureChatThreadRow: (...a: any[]) => mockEnsureThread(...a),
 }));
 
 // ── Message service ───────────────────────────────────────────────────────────
@@ -126,7 +129,6 @@ function makeThread(overrides: Partial<ChatThreadModel> = {}): ChatThreadModel {
     bookmarked: false,
     selectedModel: "gpt-5.6-sol",
     extension: [],
-    personaDocumentIds: [],
     attachedFiles: [],
     personaMessage: PERSONA,
     ...overrides,

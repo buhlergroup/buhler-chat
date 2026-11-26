@@ -18,8 +18,9 @@ vi.mock("./workspace-files", () => ({
   workspaceExtractDeps: () => ({}),
   workspaceUploadsNote: async () => "Files the user uploaded to this chat: /workspace/uploads/a.pdf",
 }));
+const resolveSubAgents = vi.fn(async (_args: unknown) => ({ personas: [] }));
 vi.mock("./subagent-resolver", () => ({
-  resolveSubAgents: async () => ({ personas: [] }),
+  resolveSubAgents: (args: unknown) => resolveSubAgents(args),
   canUsePersona: async () => true,
 }));
 const recordAgent = vi.fn(async (_id: string, _u: unknown) => undefined);
@@ -47,7 +48,8 @@ const modelConfig = {
 
 const ctx = (threadId: string) =>
   ({
-    thread: { id: threadId, personaId: "agent-1", isTemporary: false, subAgentIds: [] },
+    thread: { id: threadId, personaId: "agent-1", isTemporary: false },
+    subAgentIds: ["sub-current"],
     user: { id: "user@example.invalid" },
     threadDocumentIds: [],
     history: [{ id: "u1", role: "user", parts: [{ type: "text", text: "hello" }] }],
@@ -214,6 +216,11 @@ describe("runCopilotChatTurn", () => {
     expect(Object.keys(input.toolset)).not.toContain("call_sub_agent");
     expect(Object.keys(input.toolset)).not.toContain("search_sub_agent");
     expect(input.subAgents).toEqual({ personas: [] });
+    // The agent's current sub-agents from the thread context, not a thread copy.
+    expect(resolveSubAgents.mock.calls.at(-1)![0]).toMatchObject({
+      subAgentIds: ["sub-current"],
+      parentPersonaId: "agent-1",
+    });
     abortPublisher("thread-tools");
   });
 

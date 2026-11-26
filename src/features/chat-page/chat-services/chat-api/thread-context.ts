@@ -35,8 +35,11 @@ import { createIdGenerator } from "ai";
 import { CreateChatMessage } from "../chat-message-service";
 import { FindAllChatDocuments } from "../chat-document-store";
 import { FindAllChatMessagesForCurrentUser } from "../chat-message-service";
-import { EnsureChatThreadOperation } from "../chat-thread-service";
-import { canContinuePersonaThread } from "@/features/persona-page/persona-services/persona-access";
+import {
+  ensureChatThreadRow,
+  legacyThreadAgentIdLists,
+} from "../chat-thread-read";
+import { resolveThreadAgent } from "@/features/persona-page/persona-services/persona-access";
 import { uiMessagesFromChatMessages } from "./message-adapter";
 import { compareByCodepoint } from "../tools/stabilize-toolset";
 import { getBase64ImageReference } from "../chat-image-persistence-service";
@@ -65,6 +68,7 @@ import {
   DefaultTools,
   MODEL_CONFIGS,
   UserPrompt,
+  withoutAgentIdLists,
 } from "../models";
 
 // ---------------------------------------------------------------------------
@@ -577,7 +581,19 @@ export interface ThreadContext {
    */
   documentHintPlacement: "tail-message" | "developer-message" | "none";
   threadDocumentIds: string[];
+  /**
+   * Search file ids of the thread's agent, read from the agent's current row
+   * on this turn (resolveThreadAgent). Only a legacy thread (no personaId)
+   * uses the ids stored on its row (legacyThreadAgentIdLists). Empty for a
+   * thread without documents or whose agent was deleted.
+   */
   personaDocumentIds: string[];
+  /**
+   * Sub-agent ids configured on the thread's agent, read like
+   * `personaDocumentIds`. Undefined for a thread without an agent (and for a
+   * legacy row without stored sub-agents).
+   */
+  subAgentIds: string[] | undefined;
   defaultTools: DefaultTools | undefined;
   extensions: string[];
   attachedFiles: AttachedFileModel[];
@@ -631,7 +647,9 @@ export async function loadThreadContext(
   payload: UserPrompt
 ): Promise<ThreadContext> {
   // 1. Resolve / create thread
-  const threadResponse = await EnsureChatThreadOperation(payload.id);
+  // The stored row: a legacy thread (no agent id) keeps its agent id lists
+  // there. `thread` itself, which the route holds, carries no lists.
+  const threadResponse = await ensureChatThreadRow(payload.id);
   if (threadResponse.status !== "OK") {
     const err = Object.assign(
       new Error("Unauthorized"),
@@ -639,16 +657,31 @@ export async function loadThreadContext(
     );
     throw err;
   }
-  const thread = threadResponse.response;
+  const threadRow = threadResponse.response;
+  const thread: ChatThreadModel = withoutAgentIdLists(threadRow);
 
   // 1b. A thread started from an agent continues only while the user can
   // still open that agent (persona-access.ts). The thread stays readable;
-  // only a new turn is refused, before anything is written.
-  if (!(await canContinuePersonaThread(thread.personaId))) {
+  // only a new turn is refused, before anything is written. The same lookup
+  // returns the agent's row: its Search file ids and sub-agent ids are read
+  // from there, the thread stores no copy of them.
+  const threadAgent = await resolveThreadAgent(thread.personaId);
+  if (!threadAgent.allowed) {
     throw Object.assign(new Error(AGENT_NOT_AVAILABLE_MESSAGE), {
       status: 403,
     });
   }
+  // A legacy thread (started from an agent before threads stored the agent
+  // id) has no agent to read: it keeps using the lists stored on its row.
+  // The per-user checks still apply on use: search_documents filters the ids
+  // with the file access rule, call_sub_agent opens agents with the open rule.
+  const legacyLists = legacyThreadAgentIdLists(threadRow);
+  const agentLists = legacyLists ?? {
+    personaDocumentIds: threadAgent.persona?.personaDocumentIds ?? [],
+    subAgentIds: threadAgent.persona
+      ? (threadAgent.persona.subAgentIds ?? [])
+      : undefined,
+  };
 
   // 2. Current user (needed for message authorship)
   const currentUser = await getCurrentUser();
@@ -720,8 +753,7 @@ export async function loadThreadContext(
     hasChatDocuments
       ? documentsResponse.response.map((d) => d.id)
       : [];
-  const personaDocumentIds: string[] =
-    thread.personaDocumentIds ?? [];
+  const personaDocumentIds: string[] = agentLists.personaDocumentIds;
   const hasPersonaDocuments = personaDocumentIds.length > 0;
   const hasAnyDocuments = hasChatDocuments || hasPersonaDocuments;
 
@@ -867,6 +899,7 @@ export async function loadThreadContext(
     documentHintPlacement,
     threadDocumentIds: chatDocumentIds,
     personaDocumentIds,
+    subAgentIds: agentLists.subAgentIds,
     defaultTools: thread.defaultTools,
     extensions,
     attachedFiles: thread.attachedFiles ?? [],

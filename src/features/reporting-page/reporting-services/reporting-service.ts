@@ -4,6 +4,7 @@ import {
   ChatMessageModel,
   ChatThreadModel,
   MESSAGE_ATTRIBUTE,
+  withoutAgentIdLists,
 } from "@/features/chat-page/chat-services/models";
 import { ServerActionResponse } from "@/features/common/server-action-response";
 import { HistoryContainer } from "@/features/common/services/cosmos";
@@ -45,9 +46,11 @@ export const FindAllChatThreadsForAdmin = async (
     const { resources } = await HistoryContainer()
       .items.query<ChatThreadModel>(querySpec)
       .fetchAll();
+    // The rows go to the reporting page: without the agent id lists that
+    // older rows carry (THREAD_AGENT_ID_LIST_FIELDS).
     return {
       status: "OK",
-      response: resources,
+      response: resources.map(withoutAgentIdLists),
     };
   } catch (error) {
     return {

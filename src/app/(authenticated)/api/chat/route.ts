@@ -421,7 +421,8 @@ export async function POST(req: Request) {
     personaDocumentIds: ctx.personaDocumentIds,
     defaultTools: ctx.defaultTools ?? {},
     extensions: resolvedExtensions,
-    subAgentIds: ctx.thread.subAgentIds,
+    // The agent's current sub-agents (loadThreadContext), not a thread copy.
+    subAgentIds: ctx.subAgentIds,
     // Copilot path: no MCP output cap; large results become workspace files.
     ...(useCopilotRuntime
       ? { mcpOutputLimit: Number.POSITIVE_INFINITY, searchDocumentsAlways: true }

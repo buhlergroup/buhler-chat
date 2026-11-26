@@ -801,6 +801,31 @@ describe("persona-service.ts", () => {
     expect(saved.extensionIds).toEqual(["e-own"]);
   });
 
+  // 014c – the new thread row stores the agent id, not the agent's id lists:
+  // the thread goes to the browser, and the lists are editor-only fields.
+  it("014c CreatePersonaChat stores the agent id and no agent id lists on the thread", async () => {
+    seedPersona({
+      id: "p-chat-lists",
+      userId: "agent-owner-hash",
+      isPublished: true,
+      personaDocumentIds: ["doc-1", "doc-2"],
+      subAgentIds: ["sub-1"],
+    });
+
+    const result = await CreatePersonaChat("p-chat-lists");
+
+    expect(result.status).toBe("OK");
+    const row = vi.mocked(createChatThreadWithServerFiles).mock.calls[0][0] as any;
+    expect(row.personaId).toBe("p-chat-lists");
+    expect(row).not.toHaveProperty("personaDocumentIds");
+    expect(row).not.toHaveProperty("subAgentIds");
+    expect(row).not.toHaveProperty("codeInterpreterDocumentIds");
+    if (result.status === "OK") {
+      expect(result.response).not.toHaveProperty("personaDocumentIds");
+      expect(result.response).not.toHaveProperty("subAgentIds");
+    }
+  });
+
   // 015 – CreatePersonaChat continues after a single CI doc fails to download
   it("015 CreatePersonaChat continues after a single CI doc fails to download", async () => {
     seedPersona({ id: "p-chat-ci-partial", codeInterpreterDocumentIds: ["d1", "d2"] });
@@ -1052,13 +1077,15 @@ describe("persona payloads for users who cannot edit the agent", () => {
     hasNoIds(byId["p-theirs"]);
   });
 
-  it("CreatePersonaChat still builds the thread from the whole row for a viewer", async () => {
+  it("CreatePersonaChat: a viewer's thread holds the agent id, not its file or sub-agent ids", async () => {
     await setSession(defaultSession);
     seedPersona({ id: "p-pub-chat", userId: "other-hash", isPublished: true, ...withIds });
     const result = await CreatePersonaChat("p-pub-chat");
     expect(result.status).toBe("OK");
     const callArg = vi.mocked(createChatThreadWithServerFiles).mock.calls[0][0] as any;
-    expect(callArg.personaDocumentIds).toEqual(["doc-1"]);
-    expect(callArg.subAgentIds).toEqual(["sub-1"]);
+    // The chat route reads the lists from the agent on every turn.
+    expect(callArg.personaId).toBe("p-pub-chat");
+    hasNoIds(callArg);
+    if (result.status === "OK") hasNoIds(result.response as any);
   });
 });

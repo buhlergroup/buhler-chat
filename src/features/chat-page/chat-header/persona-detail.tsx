@@ -17,7 +17,7 @@ import { useRouter } from "next/navigation";
 import { FindChatThreadForCurrentUser } from "../chat-services/chat-thread-service";
 import { showError } from "@/features/globals/global-message-store";
 import { DocumentMetadata } from "@/features/persona-page/persona-services/models";
-import { DocumentDetails } from "@/features/persona-page/persona-services/persona-documents-service";
+import { AgentDocumentDetailsForThread } from "@/features/persona-page/persona-services/persona-documents-service";
 import { toast } from "@/features/ui/use-toast";
 import {
   Tooltip,
@@ -34,49 +34,10 @@ interface Props {
 
 export const PersonaDetail: FC<Props> = ({ chatThread }) => {
   const [documents, setDocuments] = useState<DocumentMetadata[]>([]);
-  const [noAccessDocuments, setNoAccessDocuments] = useState<
-    { documentId: string }[]
-  >([]);
+  const [noAccessDocumentsCount, setNoAccessDocumentsCount] = useState(0);
 
-  const { personaMessageTitle, personaMessage, personaDocumentIds, id } =
-    chatThread;
+  const { personaMessageTitle, personaMessage, personaId, id } = chatThread;
   const router = useRouter();
-
-  useEffect(() => {
-    fetchDocumentMetadata(personaDocumentIds);
-  }, [personaDocumentIds]);
-
-  // The thread lists the Search file row ids of the agent. DocumentDetails
-  // looks up each row with the access rule and reads the details from
-  // SharePoint with the user's token; files the user cannot use come back
-  // as "unsuccessful" (counted, no name).
-  const fetchDocumentMetadata = async (
-    documentIds: string[] | undefined
-  ): Promise<void> => {
-    if (!documentIds || documentIds.length === 0) return;
-
-    try {
-      const response = await DocumentDetails(documentIds.map((id) => ({ id })));
-
-      if (response.status === "OK") {
-        setDocuments(response.response.successful);
-        setNoAccessDocuments(response.response.unsuccessful || []);
-        if (response.response.unsuccessful.length > 0) {
-          displayToastWarning(
-            "Some documents are not accessible",
-            "Your agent chat experience may suffer from the lack of documents."
-          );
-        }
-      } else {
-        displayError(
-          response.errors,
-          "Error fetching document details. Please try again."
-        );
-      }
-    } catch {
-      displayToastError("An unexpected error occurred. Please try again.");
-    }
-  };
 
   const handleDuplicateAndCustomize = async () => {
     try {
@@ -122,6 +83,43 @@ export const PersonaDetail: FC<Props> = ({ chatThread }) => {
     });
   };
 
+  // The thread holds only the agent id. The server loads the agent's Search
+  // files (with the open rule and the access rule of each file) and reads
+  // the details from SharePoint with the user's token; files the user cannot
+  // use come back as a number only (no name, no id). After the helpers
+  // above: the effect calls them.
+  useEffect(() => {
+    if (!personaId) return;
+    let active = true;
+    AgentDocumentDetailsForThread(id)
+      .then((response) => {
+        if (!active) return;
+        if (response.status === "OK") {
+          setDocuments(response.response.documents);
+          setNoAccessDocumentsCount(response.response.notAvailableCount);
+          if (response.response.notAvailableCount > 0) {
+            displayToastWarning(
+              "Some documents are not accessible",
+              "Your agent chat experience may suffer from the lack of documents."
+            );
+          }
+        } else {
+          displayError(
+            response.errors,
+            "Error fetching document details. Please try again."
+          );
+        }
+      })
+      .catch(() => {
+        if (active) {
+          displayToastError("An unexpected error occurred. Please try again.");
+        }
+      });
+    return () => {
+      active = false;
+    };
+  }, [id, personaId]);
+
   return (
     <Sheet>
       <SheetTrigger asChild>
@@ -152,7 +150,7 @@ export const PersonaDetail: FC<Props> = ({ chatThread }) => {
             </div>
             <PersonaDocumentsSection
               documents={documents}
-              noAccessDocumentsCount={noAccessDocuments.length}
+              noAccessDocumentsCount={noAccessDocumentsCount}
             />
           </div>
         </ScrollArea>

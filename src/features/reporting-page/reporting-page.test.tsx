@@ -111,7 +111,6 @@ function makeThread(id: string, name: string, useName: string): ChatThreadModel 
     personaMessageTitle: "",
     extension: [],
     type: "CHAT_THREAD",
-    personaDocumentIds: [],
   };
 }
 

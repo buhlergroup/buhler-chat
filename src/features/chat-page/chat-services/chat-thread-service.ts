@@ -31,6 +31,7 @@ import {
   AttachedFileModel,
   normalizeChatModelId,
   withNormalizedSelectedModel,
+  withoutAgentIdLists,
 } from "./models";
 import { mergeClientAttachedFiles } from "./code-interpreter-file-access";
 import type { ThreadResetLock } from "./copilot-runtime/workspace-files";
@@ -53,6 +54,22 @@ import { redirect } from "next/navigation";
 import { RevalidateCache } from "@/features/common/navigation-helpers";
 import { ChatApiTitleAndIntent } from "./chat-api/chat-api-text";
 import { applyUserThreadChanges, saveChatThread } from "./chat-thread-write";
+import {
+  ensureChatThreadRow,
+  readChatThreadRow,
+  rowForSave,
+} from "./chat-thread-read";
+
+// A thread as it may go to the client: without the agent id lists of legacy
+// rows (THREAD_AGENT_ID_LIST_FIELDS). Every action below that returns a
+// thread returns it through here. Not exported: a "use server" file may
+// export only async functions.
+const forClient = (
+  response: ServerActionResponse<ChatThreadModel>
+): ServerActionResponse<ChatThreadModel> =>
+  response.status === "OK"
+    ? { ...response, response: withoutAgentIdLists(response.response) }
+    : response;
 import { findUsableExtension } from "@/features/extensions-page/extension-services/extension-runtime";
 
 export const FindAllChatThreadForCurrentUser = async (): Promise<
@@ -87,9 +104,12 @@ export const FindAllChatThreadForCurrentUser = async (): Promise<
         partitionKey: await userHashedId(),
       })
       .fetchAll();
+    // Older rows carry copies of the agent's id lists: never to the client.
     return {
       status: "OK",
-      response: resources.map(withNormalizedSelectedModel),
+      response: resources.map((thread) =>
+        withoutAgentIdLists(withNormalizedSelectedModel(thread))
+      ),
     };
   } catch (error) {
     return {
@@ -101,39 +121,8 @@ export const FindAllChatThreadForCurrentUser = async (): Promise<
 
 export const FindChatThreadForCurrentUser = async (
   id: string
-): Promise<ServerActionResponse<ChatThreadModel>> => {
-  try {
-    const userId = await userHashedId();
-
-    const { resource } = await HistoryContainer()
-      .item(id, userId)
-      .read<ChatThreadModel>();
-
-    if (!resource) {
-      return {
-        status: "NOT_FOUND",
-        errors: [{ message: `Chat thread not found` }],
-      };
-    }
-
-    if (resource.type !== CHAT_THREAD_ATTRIBUTE || resource.isDeleted) {
-      return {
-        status: "NOT_FOUND",
-        errors: [{ message: `Chat thread not found` }],
-      };
-    }
-
-    return {
-      status: "OK",
-      response: withNormalizedSelectedModel(resource),
-    };
-  } catch (error) {
-    return {
-      status: "ERROR",
-      errors: [{ message: `${error}` }],
-    };
-  }
-};
+): Promise<ServerActionResponse<ChatThreadModel>> =>
+  forClient(await readChatThreadRow(id));
 
 /**
  * Returns the start index for deletion, validating existence of untilMessageId or untilMessageIndex.
@@ -165,7 +154,7 @@ export const SoftDeleteChatContentsForCurrentUser = async (
 ): Promise<ServerActionResponse<ChatThreadModel>> => {
   let lock: ThreadResetLock | undefined;
   try {
-    const chatThreadResponse = await FindChatThreadForCurrentUser(chatThreadID);
+    const chatThreadResponse = await readChatThreadRow(chatThreadID);
 
     if (chatThreadResponse.status === "OK") {
       const chatResponse = await FindAllChatMessagesForCurrentUser(
@@ -236,7 +225,7 @@ export const SoftDeleteChatContentsForCurrentUser = async (
       await SoftDeleteChatHistorySummary(chatThreadID);
     }
 
-    return chatThreadResponse;
+    return forClient(chatThreadResponse);
   } catch (error) {
     return {
       status: "ERROR",
@@ -277,7 +266,7 @@ export const SoftDeleteChatThreadForCurrentUser = async (
   chatThreadID: string
 ): Promise<ServerActionResponse<ChatThreadModel>> => {
   try {
-    const chatThreadResponse = await FindChatThreadForCurrentUser(chatThreadID);
+    const chatThreadResponse = await readChatThreadRow(chatThreadID);
 
     if (chatThreadResponse.status === "OK") {
       const response = await SoftDeleteChatContentsForCurrentUser(chatThreadID);
@@ -285,12 +274,12 @@ export const SoftDeleteChatThreadForCurrentUser = async (
         return response;
       }
       chatThreadResponse.response.isDeleted = true;
-      await HistoryContainer().items.upsert(chatThreadResponse.response);
+      await HistoryContainer().items.upsert(rowForSave(chatThreadResponse.response));
       // The whole agent workspace and session state of the thread (Copilot path).
       await removeAgentWorkspaceFiles(chatThreadID, "all");
     }
 
-    return chatThreadResponse;
+    return forClient(chatThreadResponse);
   } catch (error) {
     return {
       status: "ERROR",
@@ -340,32 +329,15 @@ export const SoftDeleteChatDocumentsForCurrentUser = async (
 
 export const EnsureChatThreadOperation = async (
   chatThreadID: string
-): Promise<ServerActionResponse<ChatThreadModel>> => {
-  const response = await FindChatThreadForCurrentUser(chatThreadID);
-
-  if (response.status !== "OK") {
-    return response;
-  }
-
-  const currentUser = await getCurrentUser();
-  const hashedId = await userHashedId();
-
-  if (currentUser.isAdmin || response.response.userId === hashedId) {
-    return response;
-  }
-
-  return {
-    status: "UNAUTHORIZED",
-    errors: [{ message: "You are not authorized to access this chat thread." }],
-  };
-};
+): Promise<ServerActionResponse<ChatThreadModel>> =>
+  forClient(await ensureChatThreadRow(chatThreadID));
 
 export const AddExtensionToChatThread = async (props: {
   chatThreadId: string;
   extensionId: string;
 }): Promise<ServerActionResponse<ChatThreadModel>> => {
   try {
-    const response = await FindChatThreadForCurrentUser(props.chatThreadId);
+    const response = await readChatThreadRow(props.chatThreadId);
     if (response.status === "OK") {
       const chatThread = response.response;
 
@@ -395,7 +367,7 @@ export const AddExtensionToChatThread = async (props: {
 
       return {
         status: "OK",
-        response: chatThread,
+        response: withoutAgentIdLists(chatThread),
       };
     }
 
@@ -412,7 +384,7 @@ export const RemoveExtensionFromChatThread = async (props: {
   chatThreadId: string;
   extensionId: string;
 }): Promise<ServerActionResponse<ChatThreadModel>> => {
-  const response = await FindChatThreadForCurrentUser(props.chatThreadId);
+  const response = await readChatThreadRow(props.chatThreadId);
   if (response.status === "OK") {
     const chatThread = response.response;
     chatThread.extension = chatThread.extension.filter(
@@ -429,10 +401,11 @@ export const RemoveExtensionFromChatThread = async (props: {
  * Client-facing update of an EXISTING chat thread that the user may change.
  *
  * Only the fields of `applyUserThreadChanges` (name, bookmarked) are taken
- * from the input. Every other field, e.g. personaId, extension ids, persona
- * documents, sub-agents, default tools and userId, comes from the stored
- * thread, so a client cannot attach an agent or an extension to a thread, or
- * write a thread for another user. A changed personaId is ignored.
+ * from the input. Every other field, e.g. personaId, extension ids, default
+ * tools and userId, comes from the stored thread, so a client cannot attach
+ * an agent or an extension to a thread, or write a thread for another user. A
+ * changed personaId is ignored. Agent id lists never come from the client
+ * (see THREAD_AGENT_ID_LIST_FIELDS).
  *
  * The client's `attachedFiles` list is merged on the server with
  * `mergeClientAttachedFiles`: code interpreter files can only be kept or
@@ -453,7 +426,7 @@ export const UpsertChatThread = async (
       };
     }
 
-    const response = await EnsureChatThreadOperation(chatThread.id);
+    const response = await ensureChatThreadRow(chatThread.id);
     if (response.status !== "OK") {
       return response;
     }
@@ -501,7 +474,6 @@ export const CreateChatThread = async (options?: {
       personaMessageTitle: CHAT_DEFAULT_PERSONA,
       selectedModel: DEFAULT_MODEL,
       extension: [],
-      personaDocumentIds: [],
       isTemporary: options?.temporary ?? false,
     };
 
@@ -544,7 +516,7 @@ export const UpdateChatTitle = async (
   prompt: string
 ): Promise<ServerActionResponse<ChatThreadModel>> => {
   try {
-    const response = await FindChatThreadForCurrentUser(chatThreadId);
+    const response = await readChatThreadRow(chatThreadId);
     if (response.status === "OK") {
       const chatThread = response.response;
 
@@ -588,7 +560,7 @@ export const UpdateChatThreadSelectedModel = async (
     };
   }
   try {
-    const response = await FindChatThreadForCurrentUser(chatThreadId);
+    const response = await readChatThreadRow(chatThreadId);
     if (response.status === "OK") {
       const chatThread = response.response;
       chatThread.selectedModel = selectedModel;
@@ -618,7 +590,7 @@ export const UpdateChatThreadReasoningEffort = async (
     };
   }
   try {
-    const response = await FindChatThreadForCurrentUser(chatThreadId);
+    const response = await readChatThreadRow(chatThreadId);
     if (response.status === "OK") {
       const chatThread = response.response;
       chatThread.reasoningEffort = reasoningEffort;
@@ -639,7 +611,7 @@ export const UpdateChatThreadCodeInterpreterContainer = async (
   fileIdsSignature?: string
 ): Promise<ServerActionResponse<ChatThreadModel>> => {
   try {
-    const response = await FindChatThreadForCurrentUser(chatThreadId);
+    const response = await readChatThreadRow(chatThreadId);
     if (response.status === "OK") {
       const chatThread = response.response;
       chatThread.codeInterpreterContainerId = containerId;
@@ -662,7 +634,7 @@ export const UpdateChatThreadAttachedFiles = async (
   attachedFiles: AttachedFileModel[]
 ): Promise<ServerActionResponse<ChatThreadModel>> => {
   try {
-    const response = await FindChatThreadForCurrentUser(chatThreadId);
+    const response = await readChatThreadRow(chatThreadId);
     if (response.status === "OK") {
       const chatThread = response.response;
       chatThread.attachedFiles = attachedFiles;
@@ -682,7 +654,7 @@ export const AddAttachedFile = async (
   file: AttachedFileModel
 ): Promise<ServerActionResponse<ChatThreadModel>> => {
   try {
-    const response = await FindChatThreadForCurrentUser(chatThreadId);
+    const response = await readChatThreadRow(chatThreadId);
     if (response.status === "OK") {
       const chatThread = response.response;
       const existingFiles = chatThread.attachedFiles || [];
@@ -699,7 +671,7 @@ export const AddAttachedFile = async (
         chatThread.attachedFiles = [...existingFiles, file];
         return await saveChatThread(chatThread);
       }
-      return response;
+      return forClient(response);
     }
     return response;
   } catch (error) {
@@ -715,7 +687,7 @@ export const RemoveAttachedFile = async (
   fileId: string
 ): Promise<ServerActionResponse<ChatThreadModel>> => {
   try {
-    const response = await FindChatThreadForCurrentUser(chatThreadId);
+    const response = await readChatThreadRow(chatThreadId);
     if (response.status === "OK") {
       const chatThread = response.response;
       chatThread.attachedFiles = (chatThread.attachedFiles || []).filter(f => f.id !== fileId);
@@ -750,7 +722,7 @@ export const UpdateChatThreadUsage = async (
   lastPromptTokens?: number
 ): Promise<ServerActionResponse<ChatThreadModel>> => {
   try {
-    const response = await FindChatThreadForCurrentUser(chatThreadId);
+    const response = await readChatThreadRow(chatThreadId);
     if (response.status === "OK") {
       const chatThread = response.response;
       const existing = chatThread.usage || {

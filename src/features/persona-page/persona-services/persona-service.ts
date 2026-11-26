@@ -606,10 +606,12 @@ export const CreatePersonaChat = async (
       personaMessageTitle: persona.name,
       personaId: persona.id,
       extension: extensionIds,
-      personaDocumentIds: persona.personaDocumentIds || [],
+      // No copy of the agent's Search file ids or sub-agent ids: the thread
+      // goes to the browser, and those ids are editor-only fields of the
+      // agent. The chat route reads them from the agent on every turn
+      // (thread-context.ts, through personaId).
       attachedFiles: attachedFiles.length > 0 ? attachedFiles : undefined,
       selectedModel: persona.selectedModel as ChatModel | undefined,
-      subAgentIds: persona.subAgentIds || [],
       defaultTools: persona.defaultTools,
       ...(unavailableAgentFiles.length > 0 ? { unavailableAgentFiles } : {}),
       ...(notFoundFileCount > 0 ? { notFoundAgentFileCount: notFoundFileCount } : {}),

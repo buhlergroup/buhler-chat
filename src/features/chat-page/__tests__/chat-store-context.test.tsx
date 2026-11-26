@@ -45,7 +45,6 @@ const makeThread = (id: string): ChatThreadModel => ({
   personaMessageTitle: "",
   extension: [],
   type: "CHAT_THREAD",
-  personaDocumentIds: [],
   selectedModel: "gpt-5.4-mini",
 });
 
