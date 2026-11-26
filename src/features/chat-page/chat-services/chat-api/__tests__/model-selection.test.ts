@@ -421,9 +421,13 @@ describe("resolveModelAndLimits — cap downgrade respects vision capability", (
 
 describe("resolveModelAndLimits — intent downgrade respects vision capability", () => {
   let savedKimi: string | undefined;
+  let savedDefault: string | undefined;
   beforeEach(() => {
     savedKimi = (MODEL_CONFIGS["Kimi-K2.6"] as any).deploymentName;
+    savedDefault = (MODEL_CONFIGS[DEFAULT_MODEL] as any).deploymentName;
     (MODEL_CONFIGS["Kimi-K2.6"] as any).deploymentName = "kimi-test";
+    // The image turn stays on the default model, which then needs a deployment.
+    (MODEL_CONFIGS[DEFAULT_MODEL] as any).deploymentName = "default-test";
     mockGetDowngradeTargets.mockReturnValue({
       hardCapSet: [],
       intentByClass: { translation: "Kimi-K2.6" },
@@ -431,6 +435,7 @@ describe("resolveModelAndLimits — intent downgrade respects vision capability"
   });
   afterEach(() => {
     (MODEL_CONFIGS["Kimi-K2.6"] as any).deploymentName = savedKimi;
+    (MODEL_CONFIGS[DEFAULT_MODEL] as any).deploymentName = savedDefault;
   });
 
   it("routes a TEXT turn to the intent target without vision", async () => {
@@ -446,7 +451,7 @@ describe("resolveModelAndLimits — intent downgrade respects vision capability"
       thread,
     );
     expect(result.fallbackInfo.fellBack).toBe(false);
-    expect(result.selectedModel).not.toBe("Kimi-K2.6");
+    expect(result.selectedModel).toBe(DEFAULT_MODEL);
   });
 });
 

@@ -22,9 +22,9 @@ const NO_DOCUMENTS: ChatDocumentModel[] = [];
  * The temporary chat starts empty each time the user enters the page.
  *
  * The reset runs here, once per mount, and not in the server page. The server
- * page renders again on every router.refresh() and on every server action that
- * revalidates the chat layout (the title refresh after the first turn, a file
- * upload, the background-generation poll). A reset in the server render wiped
+ * page renders again on every router.refresh() (the title refresh after the
+ * first turn, the background-generation poll) and after server actions that
+ * revalidate a chat path. A reset in the server render wiped
  * the conversation the user was reading at each of those refreshes.
  */
 export const TemporaryChatPage = (props: TemporaryChatPageProps) => {
