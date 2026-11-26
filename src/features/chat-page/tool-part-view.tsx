@@ -220,6 +220,14 @@ function extractImageGenSrc(output: unknown): string | null {
   return null;
 }
 
+/** Same-origin image URLs from an output's `images` array of blob:// refs. */
+function extractImageRefs(output: unknown): string[] {
+  if (!isPlainObject(output) || !Array.isArray(output.images)) return [];
+  return output.images.flatMap((ref) =>
+    typeof ref === "string" && isImageReference(ref) ? [resolveBlobReferenceToPath(ref)].filter((u): u is string => !!u) : [],
+  );
+}
+
 /**
  * Renders a tool's output body. The five cases cover the common shapes
  * tool results take in this codebase:
@@ -273,7 +281,8 @@ export function renderToolOutput(output: unknown, toolName?: string): ReactNode 
       </div>
     );
   }
-  if (toolName === "image_generation") {
+  // generate_image: the Copilot path's own image tool, same output shape.
+  if (toolName === "image_generation" || toolName === "generate_image") {
     const src = extractImageGenSrc(output);
     if (src) {
       return (
@@ -285,6 +294,20 @@ export function renderToolOutput(output: unknown, toolName?: string): ReactNode 
         />
       );
     }
+  }
+  // run_code (Copilot path): image outputs as blob refs in `images`.
+  const codeImages = toolName === "run_code" ? extractImageRefs(output) : [];
+  if (codeImages.length > 0) {
+    const rest = Object.fromEntries(Object.entries(output as Record<string, unknown>).filter(([k]) => k !== "images"));
+    return (
+      <div className="flex flex-col gap-2">
+        {codeImages.map((src) => (
+          // eslint-disable-next-line @next/next/no-img-element
+          <img key={src} src={src} alt="Code output" className="max-w-full rounded-md border border-border/40" />
+        ))}
+        <pre className="whitespace-pre-wrap break-words text-xs">{JSON.stringify(rest, null, 2)}</pre>
+      </div>
+    );
   }
   if (isPrimitive(output)) return String(output);
   if (isObjectOfPrimitives(output)) return <KeyValueTable data={output} />;

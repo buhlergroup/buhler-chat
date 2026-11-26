@@ -1,0 +1,180 @@
+import "server-only";
+
+/**
+ * Production ProviderClients for provider-tools.ts: the app's Azure OpenAI
+ * v1 client (same endpoint and auth as the rest of the app), the chat image
+ * store, and the code interpreter container helpers of the AI SDK path.
+ */
+import { AzureOpenAI, toFile } from "openai";
+import { OpenAIV1Instance } from "@/features/common/services/openai";
+import { getAzureCognitiveServicesTokenProvider } from "@/features/common/services/azure-default-credential";
+import { logInfo } from "@/features/common/services/logger";
+import { MODEL_CONFIGS } from "../models";
+import { persistBase64Image } from "../chat-image-persistence-service";
+import { ensureCodeInterpreterContainer } from "../code-interpreter-container";
+import { ToolUserError } from "../tools/tool-user-error";
+import {
+  resolveResponsesDeployment,
+  type CodeRunResult,
+  type ContainerFile,
+  type ProviderClients,
+  type ProviderToolDeps,
+  type WebCitation,
+} from "./provider-tools";
+
+const RUN_CODE_TIMEOUT_MS = 5 * 60 * 1000;
+const WEB_SEARCH_TIMEOUT_MS = 90 * 1000;
+const IMAGE_TIMEOUT_MS = 3 * 60 * 1000;
+
+/**
+ * The image deployment's own images endpoint (deployment-scoped path; the
+ * v1 path answers 404 for image deployments, measured). Same auth rule as
+ * openai.production.ts: an API key only when the app uses one, else Entra.
+ */
+function imageClient(deployment: string): AzureOpenAI {
+  const apiKey = process.env.AZURE_OPENAI_API_KEY;
+  return new AzureOpenAI({
+    ...(apiKey ? { apiKey } : { azureADTokenProvider: getAzureCognitiveServicesTokenProvider() }),
+    endpoint: `https://${process.env.AZURE_OPENAI_API_INSTANCE_NAME}.openai.azure.com`,
+    deployment,
+    apiVersion: process.env.COPILOT_IMAGE_API_VERSION?.trim() || "2025-04-01-preview",
+    maxRetries: 2,
+  });
+}
+
+const withTimeout = (signal: AbortSignal | undefined, ms: number) =>
+  signal ? AbortSignal.any([signal, AbortSignal.timeout(ms)]) : AbortSignal.timeout(ms);
+
+// One code interpreter container per thread and process. Azure removes an
+// idle container after 20 minutes; ensureCodeInterpreterContainer checks a
+// known id and replaces it when it has gone.
+const g = globalThis as typeof globalThis & { __copilotRunCodeContainers?: Map<string, string> };
+const containers = (g.__copilotRunCodeContainers ??= new Map<string, string>());
+
+type Responses = {
+  create(body: Record<string, unknown>, options?: { signal?: AbortSignal }): Promise<{
+    output?: Array<Record<string, unknown>>;
+    output_text?: string;
+  }>;
+};
+
+function textAndCitations(output: Array<Record<string, unknown>> | undefined): { text: string; citations: WebCitation[] } {
+  let text = "";
+  const citations: WebCitation[] = [];
+  for (const item of output ?? []) {
+    if (item.type !== "message" || !Array.isArray(item.content)) continue;
+    for (const part of item.content as Array<Record<string, unknown>>) {
+      if (part.type !== "output_text") continue;
+      text += String(part.text ?? "");
+      for (const a of (Array.isArray(part.annotations) ? part.annotations : []) as Array<Record<string, unknown>>) {
+        if (a.type === "url_citation" && typeof a.url === "string") {
+          citations.push({ url: a.url, ...(typeof a.title === "string" && a.title ? { title: a.title } : {}) });
+        }
+      }
+    }
+  }
+  return { text, citations };
+}
+
+export function productionProviderClients(deps: Pick<ProviderToolDeps, "threadId" | "userKey">): ProviderClients {
+  const containerKey = `${deps.userKey}/${deps.threadId}`;
+  const responses = () => (OpenAIV1Instance() as unknown as { responses: Responses }).responses;
+  const deployment = (envName: string) => {
+    const d = resolveResponsesDeployment(MODEL_CONFIGS, process.env[envName]);
+    if (!d) throw new ToolUserError("No model for this tool is deployed here.");
+    return d;
+  };
+
+  return {
+    async generateImage({ prompt, size }, signal) {
+      const model = process.env.AZURE_OPENAI_GPT_IMAGE_DEPLOYMENT_NAME?.trim();
+      if (!model) throw new ToolUserError("generate_image: image generation is not configured here.");
+      const res = await imageClient(model).images.generate(
+        { model, prompt, n: 1, ...(size ? { size: size as "1024x1024" } : {}) },
+        { signal: withTimeout(signal, IMAGE_TIMEOUT_MS) },
+      );
+      const first = res.data?.[0];
+      return { base64: first?.b64_json ?? "", ...(first?.revised_prompt ? { revisedPrompt: first.revised_prompt } : {}) };
+    },
+
+    async webSearch({ query }, signal) {
+      const res = await responses().create(
+        {
+          model: deployment("COPILOT_WEB_SEARCH_MODEL"),
+          instructions:
+            "Answer the question with a web search. Be short and factual. Cite every source you use.",
+          input: query,
+          tools: [{ type: "web_search_preview" }],
+          store: false,
+          max_output_tokens: 4000,
+        },
+        { signal: withTimeout(signal, WEB_SEARCH_TIMEOUT_MS) },
+      );
+      const parsed = textAndCitations(res.output);
+      return { text: parsed.text || res.output_text || "", citations: parsed.citations };
+    },
+
+    async ensureContainer() {
+      const existing = containers.get(containerKey);
+      const id = await ensureCodeInterpreterContainer({ threadId: deps.threadId, existingContainerId: existing, fileIds: [] });
+      if (!id) throw new ToolUserError("run_code: the code interpreter is not available here.");
+      if (id !== existing) {
+        containers.set(containerKey, id);
+        logInfo("copilot-runtime: run_code container", { threadId: deps.threadId, reused: false });
+      }
+      return id;
+    },
+
+    async uploadToContainer(containerId, name, data) {
+      const created = await OpenAIV1Instance().containers.files.create(containerId, { file: await toFile(data, name) });
+      return { path: created.path || `/mnt/data/${name}` };
+    },
+
+    async listContainerFiles(containerId) {
+      const out: ContainerFile[] = [];
+      for await (const f of OpenAIV1Instance().containers.files.list(containerId, { limit: 100 })) {
+        out.push({ id: f.id, path: f.path, bytes: f.bytes });
+        if (out.length >= 1000) break;
+      }
+      return out;
+    },
+
+    async downloadContainerFile(containerId, fileId) {
+      const res = await OpenAIV1Instance().containers.files.content.retrieve(fileId, { container_id: containerId });
+      return Buffer.from(await res.arrayBuffer());
+    },
+
+    async runCode(containerId, { instructions, input }, signal): Promise<CodeRunResult> {
+      const res = await responses().create(
+        {
+          model: deployment("COPILOT_RUN_CODE_MODEL"),
+          instructions,
+          input,
+          tools: [{ type: "code_interpreter", container: containerId }],
+          tool_choice: "required",
+          include: ["code_interpreter_call.outputs"],
+          store: false,
+          max_output_tokens: 8000,
+        },
+        { signal: withTimeout(signal, RUN_CODE_TIMEOUT_MS) },
+      );
+      const result: CodeRunResult = { logs: "", text: "", code: [], images: [] };
+      for (const item of res.output ?? []) {
+        if (item.type !== "code_interpreter_call") continue;
+        if (typeof item.code === "string") result.code.push(item.code);
+        for (const o of (Array.isArray(item.outputs) ? item.outputs : []) as Array<Record<string, unknown>>) {
+          if (o.type === "logs" && typeof o.logs === "string") result.logs += o.logs;
+          if (o.type === "image" && typeof o.url === "string") result.images.push(o.url);
+        }
+      }
+      result.text = textAndCitations(res.output).text || res.output_text || "";
+      return result;
+    },
+
+    async persistImage(dataUrl) {
+      const stored = await persistBase64Image(deps.threadId, dataUrl);
+      if (stored.status !== "OK") throw new Error("Could not store the image for the chat.");
+      return stored.response;
+    },
+  };
+}

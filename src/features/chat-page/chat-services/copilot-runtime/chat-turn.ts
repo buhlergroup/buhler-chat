@@ -16,6 +16,7 @@ import { startPublisher, unregisterPublisher } from "../chat-api/stream-publishe
 import { UpdateChatTitle } from "../chat-thread-service";
 import { runCopilotTurn } from "./copilot-session";
 import { indexDocumentTool } from "./index-document";
+import { providerTools, type ProviderToolToggles } from "./provider-tools";
 import { chatDocumentIndexDeps, threadWorkspace, workspaceUploadsNote } from "./workspace-files";
 import { ThreadBusyError } from "./thread-lease";
 
@@ -31,6 +32,8 @@ export interface CopilotChatTurnArgs {
   /** The app's system message, WITHOUT the per-turn document hint. */
   systemMessage: string;
   toolset: Record<string, AiTool>;
+  /** Requested built-in toggles: served by our own tools (provider-tools.ts). */
+  builtInToggles?: ProviderToolToggles;
 }
 
 /**
@@ -69,6 +72,8 @@ export async function runCopilotChatTurn(args: CopilotChatTurnArgs): Promise<Res
     const toolset: Record<string, AiTool> = {
       ...args.toolset,
       index_document: indexDocumentTool(chatDocumentIndexDeps({ fs, threadId, userKey })),
+      // generate_image / web_search / run_code when their toggle is on.
+      ...(args.builtInToggles ? providerTools({ fs, threadId, userKey, toggles: args.builtInToggles }) : {}),
     };
     const uploads = await workspaceUploadsNote(fs).catch(() => undefined);
     const contextNote = [ctx.documentHintText, uploads].filter(Boolean).join(NOTE_SEPARATOR) || undefined;

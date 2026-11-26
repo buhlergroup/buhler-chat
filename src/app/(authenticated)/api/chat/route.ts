@@ -446,6 +446,8 @@ export async function POST(req: Request) {
       fallbackInfo: fallbackInfo.fellBack ? fallbackInfo : undefined,
       systemMessage: system,
       toolset: tools,
+      // The provider-hosted built-ins become our own tools on this path.
+      builtInToggles: effectiveTools,
     });
   }
 

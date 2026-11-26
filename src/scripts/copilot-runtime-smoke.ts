@@ -139,7 +139,7 @@ async function main() {
   const listener = (ns: string) => (op: string, p: string) => fsOps.push({ ns, op, path: p });
 
   const summary: Json[] = [];
-  // SMOKE_ONLY=A,B,... runs only those sections (A B C D F L E U M).
+  // SMOKE_ONLY=A,B,... runs only those sections (A B C D F L E U M P).
   const only = process.env.SMOKE_ONLY?.split(",").map((x) => x.trim().toUpperCase());
   const section = (name: string) => !only || only.includes(name);
 
@@ -543,6 +543,61 @@ compactions in thread F: ${JSON.stringify(session.liveSessionCompactions(threadF
       prompt:
         "Without fetching again: use rg on the saved docs result file from before to find the limit for resource groups per subscription, and quote the line.",
     });
+  }
+
+  // ── P: provider built-ins as our own tools (generate_image, web_search, run_code) ─
+  if (section("P")) {
+    const pFiles = await import("@/features/chat-page/chat-services/copilot-runtime/workspace-files");
+    const { providerTools } = await import("@/features/chat-page/chat-services/copilot-runtime/provider-tools");
+    const user = userKey("paula");
+    const threadP = `smoke-p-${runId}`;
+    const { fs: pFs, store: pStore } = await pFiles.threadWorkspace(user, threadP);
+    const extra = providerTools({
+      fs: pFs,
+      threadId: threadP,
+      userKey: user,
+      toggles: { imageGeneration: true, webSearch: true, codeInterpreter: true },
+    });
+    const showTools = (r: Awaited<ReturnType<typeof turn>>) => {
+      for (const t of r.steps.flatMap((s) => s.toolResults)) {
+        console.log(`  tool output part ${t.toolName}: ${JSON.stringify(t.output).slice(0, 900)}`);
+      }
+    };
+    const p1 = await turn("P1 generate_image into the workspace", {
+      threadId: threadP,
+      user: "paula",
+      model: gptModel,
+      extraTools: extra,
+      prompt: "Use generate_image to draw a small red bicycle on a white background (name it bicycle). Then tell me the workspace path.",
+    });
+    showTools(p1);
+    const imgs = await pFs.listEntries("/workspace/images");
+    console.log(`  /workspace/images: ${JSON.stringify(imgs.map((e) => ({ path: e.path, bytes: e.size })))}`);
+    const p2 = await turn("P2 web_search with citations", {
+      threadId: threadP,
+      user: "paula",
+      model: gptModel,
+      extraTools: extra,
+      prompt: "Use web_search: what is the latest stable version of Node.js LTS? Answer in one sentence and cite the sources as markdown links.",
+    });
+    showTools(p2);
+    const csv = ["month,units", "Jan,120", "Feb,135", "Mar,160", "Apr,150", "May,180", "Jun,210"].join(String.fromCharCode(10));
+    const up = await pFiles.uploadToThreadWorkspace(user, threadP, "sales.csv", Buffer.from(csv));
+    console.log(`  uploaded ${up.path} (${up.bytes} bytes)`);
+    const p3 = await turn("P3 run_code on the uploaded CSV -> chart", {
+      threadId: threadP,
+      user: "paula",
+      model: gptModel,
+      extraTools: extra,
+      contextNote: await pFiles.workspaceUploadsNote(pFs),
+      prompt:
+        "Use run_code with /workspace/uploads/sales.csv: make a bar chart of units per month saved as sales_chart.png, and print the total units. Tell me the total and where the chart is.",
+    });
+    showTools(p3);
+    const outs = await pFs.listEntries("/workspace/outputs");
+    console.log(`  /workspace/outputs: ${JSON.stringify(outs.map((e) => ({ path: e.path, bytes: e.size })))}`);
+    const removedP = await pFiles.removeThreadWorkspaceFiles(user, threadP, "all", pStore);
+    console.log(`  cleaned ${removedP} blobs of thread P`);
   }
 
   // ── Runtime process memory ──────────────────────────────────────────────
