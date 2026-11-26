@@ -126,6 +126,14 @@ describe.skipIf(!RUN)("content store dev smoke", () => {
           }
           return result;
         },
+        createIfAbsentFromStream: async (key: string, open: any, size: number, options: any) => {
+          const result = await real.createIfAbsentFromStream(key, open, size, options);
+          if (result === "created") {
+            counts.blobWrites++;
+            written.push(key);
+          }
+          return result;
+        },
       }));
 
       const { userHashedId } = await import("@/features/auth-page/helpers");

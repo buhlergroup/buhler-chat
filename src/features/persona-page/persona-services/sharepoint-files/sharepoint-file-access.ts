@@ -599,8 +599,15 @@ export class SharePointFileSession {
           converted: Boolean(prepared.note),
           fetches: this.downloads,
         });
+        // A file attached from the content store (by OpenAI file id) gets a
+        // prefixed name in the container: tell the model the exact path.
+        const pathNote =
+          path !== `/mnt/data/${prepared.name}`
+            ? `In the code interpreter this file is at ${path}. Use this exact path; /mnt/data/${prepared.name} does not exist.`
+            : undefined;
         return {
           path,
+          ...(pathNote ? { pathNote } : {}),
           name: prepared.name,
           sourcePath: file.relativePath,
           source,

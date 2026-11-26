@@ -150,6 +150,22 @@ describe("SharePoint file tools in buildToolset", () => {
     const calls = vi.mocked(fetch).mock.calls.map((c) => String(c[0]));
     expect(calls.filter((u) => u.includes("/children"))).toHaveLength(1);
   });
+
+  it("tells the model the exact path when the container prefixed the name", async () => {
+    // A file attached by OpenAI file id (content store) is /mnt/data/<file id>-<name>.
+    uploadToContainer.mockResolvedValueOnce({ path: "/mnt/data/assistant-abc-notes.txt" });
+    const tools = await buildToolset(baseCtx());
+    const fetched = await exec(tools.fetch_sharepoint_file, { name: "notes.txt" });
+    expect(fetched.path).toBe("/mnt/data/assistant-abc-notes.txt");
+    expect(fetched.pathNote).toContain("/mnt/data/assistant-abc-notes.txt");
+    expect(fetched.pathNote).toContain("/mnt/data/notes.txt does not exist");
+  });
+
+  it("adds no path note when the path is /mnt/data/<name>", async () => {
+    const tools = await buildToolset(baseCtx());
+    const fetched = await exec(tools.fetch_sharepoint_file, { name: "notes.txt" });
+    expect(fetched.pathNote).toBeUndefined();
+  });
 });
 
 describe("readSharePointFileLimits", () => {
