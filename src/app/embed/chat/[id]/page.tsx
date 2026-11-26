@@ -2,6 +2,7 @@ import { userSession } from "@/features/auth-page/helpers";
 import { ChatPage } from "@/features/chat-page/chat-page";
 import { DEFAULT_MODEL } from "@/features/chat-page/chat-services/models";
 import { FindAllChatDocuments } from "@/features/chat-page/chat-services/chat-document-store";
+import { FindWorkspaceSummaryForCurrentUser } from "@/features/chat-page/chat-services/copilot-runtime/workspace-page-data";
 import { FindAllChatMessagesForCurrentUser } from "@/features/chat-page/chat-services/chat-message-service";
 import { FindChatThreadForCurrentUser } from "@/features/chat-page/chat-services/chat-thread-service";
 import { FindChatHistorySummary } from "@/features/chat-page/chat-services/chat-api/history-summary-service";
@@ -42,12 +43,15 @@ export default async function EmbedChat(props: EmbedChatParams) {
 
   // Same reads as /chat/[id], including the compaction row: an embedded
   // thread is trimmed by the same budget, so it needs the same divider.
-  const [chatResponse, chatThreadResponse, docsResponse, historySummary] =
+  // The workspace read runs only for users on the Copilot path (null
+  // otherwise, without a Blob call) and only in the caller's own namespace.
+  const [chatResponse, chatThreadResponse, docsResponse, historySummary, workspace] =
     await Promise.all([
       FindAllChatMessagesForCurrentUser(id),
       FindChatThreadForCurrentUser(id),
       FindAllChatDocuments(id),
       FindChatHistorySummary(id),
+      FindWorkspaceSummaryForCurrentUser(id),
     ]);
 
   if (docsResponse.status !== "OK") {
@@ -79,6 +83,7 @@ export default async function EmbedChat(props: EmbedChatParams) {
         messages={chatResponse.response}
         chatThread={chatThreadResponse.response}
         chatDocuments={docsResponse.response}
+        workspace={workspace}
         extensions={extensionResponse.response}
         defaultModel={DEFAULT_MODEL}
         compactionMarker={threadCompactionMarker(historySummary)}

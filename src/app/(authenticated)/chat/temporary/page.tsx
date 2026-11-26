@@ -2,6 +2,7 @@ import { userHashedId } from "@/features/auth-page/helpers";
 import { TemporaryChatPage } from "@/features/chat-page/temporary-chat-page";
 import { DEFAULT_MODEL } from "@/features/chat-page/chat-services/models";
 import { FindAllChatDocuments } from "@/features/chat-page/chat-services/chat-document-store";
+import { FindWorkspaceSummaryForCurrentUser } from "@/features/chat-page/chat-services/copilot-runtime/workspace-page-data";
 import { FindAllChatMessagesForCurrentUser } from "@/features/chat-page/chat-services/chat-message-service";
 import {
   CreateChatThread,
@@ -24,10 +25,11 @@ interface HomeParams {
 
 export default async function Home(props: HomeParams) {
   const userIdAsChatThreadId = await userHashedId();
-  let [chatResponse, chatThreadResponse, docsResponse] = await Promise.all([
+  let [chatResponse, chatThreadResponse, docsResponse, workspace] = await Promise.all([
     FindAllChatMessagesForCurrentUser(userIdAsChatThreadId),
     FindChatThreadForCurrentUser(userIdAsChatThreadId),
     FindAllChatDocuments(userIdAsChatThreadId),
+    FindWorkspaceSummaryForCurrentUser(userIdAsChatThreadId),
   ]);
 
   // Do not reset the thread here. This render runs again on every
@@ -64,6 +66,7 @@ export default async function Home(props: HomeParams) {
       messages={chatResponse.response}
       chatThread={chatThreadResponse.response}
       chatDocuments={docsResponse.response}
+      workspace={workspace}
       extensions={extensionResponse.response}
       defaultModel={DEFAULT_MODEL}
     />

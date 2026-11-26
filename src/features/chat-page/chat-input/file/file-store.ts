@@ -104,6 +104,19 @@ class FileStore {
         showError(workspace.errors.map((e) => e.message).join(", "));
         return;
       }
+      if (workspace.response.handled && workspace.response.path) {
+        // The chip in the input field, at once (the server list follows on
+        // the next page load). Not a code interpreter file: nothing here
+        // goes into the request's file ids.
+        const name = workspace.response.path.slice(workspace.response.path.lastIndexOf("/") + 1);
+        getActiveChatStore()?.getState().addWorkspaceUpload({
+          path: workspace.response.path.replace(/^\/workspace\//, ""),
+          name,
+          size: workspace.response.size ?? file.size,
+          modified: workspace.response.modified ?? new Date().toISOString(),
+          group: "uploaded",
+        });
+      }
       if (workspace.response.handled && !isInputImage) {
         showSuccess({
           title: "File upload",

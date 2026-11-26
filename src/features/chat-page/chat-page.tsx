@@ -56,12 +56,21 @@ import {
   type ThreadCompactionMarker,
 } from "./chat-services/chat-api/compaction-part";
 import { useEmbedMode } from "@/features/embed/embed-mode-context";
+import type { WorkspaceSummary } from "./chat-services/workspace-file-model";
+import { WorkspaceUploadChips } from "./workspace-files/workspace-upload-chips";
+import { WorkspaceFilesPanel } from "./workspace-files/workspace-files-panel";
 
 interface ChatPageProps {
   messages: Array<ChatMessageModel>;
   chatThread: ChatThreadModel;
   chatDocuments: Array<ChatDocumentModel>;
   extensions: Array<ExtensionModel>;
+  /**
+   * The chat workspace (Copilot path only): the user's uploads for the input
+   * field chips and the file count for the Files panel. Null or absent on
+   * the AI SDK path: no chips, no panel.
+   */
+  workspace?: WorkspaceSummary | null;
   /**
    * The thread's persisted compaction row, if it has ever been trimmed. Read
    * once by the page and rendered as a divider at the watermark; it is display
@@ -709,6 +718,11 @@ const ChatPageInner = (props: ChatPageProps) => {
             </div>
           )}
 
+          {/* Files the user uploaded to the chat workspace (Copilot path) */}
+          {props.workspace && (
+            <WorkspaceUploadChips threadId={chatThreadId} summary={props.workspace} />
+          )}
+
           {props.chatDocuments.length > 0 && (
             <div className="flex flex-wrap gap-2 p-2">
               {props.chatDocuments.map((doc, i) => (
@@ -778,6 +792,7 @@ const ChatPageInner = (props: ChatPageProps) => {
                   e.target.value = "";
                 }}
               />
+              {props.workspace && <WorkspaceFilesPanel threadId={chatThreadId} />}
               <ToolToggles />
               <ReasoningEffortSelector
                 value={reasoningEffort}

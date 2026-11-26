@@ -1,6 +1,7 @@
 import { ChatPage } from "@/features/chat-page/chat-page";
 import { DEFAULT_MODEL } from "@/features/chat-page/chat-services/models";
 import { FindAllChatDocuments } from "@/features/chat-page/chat-services/chat-document-store";
+import { FindWorkspaceSummaryForCurrentUser } from "@/features/chat-page/chat-services/copilot-runtime/workspace-page-data";
 import { FindAllChatMessagesForCurrentUser } from "@/features/chat-page/chat-services/chat-message-service";
 import { FindChatThreadForCurrentUser } from "@/features/chat-page/chat-services/chat-thread-service";
 import { FindChatHistorySummary } from "@/features/chat-page/chat-services/chat-api/history-summary-service";
@@ -33,12 +34,15 @@ export default async function Home(props: HomeParams) {
   // thread. It marks where the conversation the model sees begins, so the
   // divider survives a reload without a message row of its own. Display only
   // -- the prompt's own copy of the summary is assembled in thread-context.ts.
-  const [chatResponse, chatThreadResponse, docsResponse, historySummary] =
+  // The workspace read runs only for users on the Copilot path (null
+  // otherwise, without a Blob call) and only in the caller's own namespace.
+  const [chatResponse, chatThreadResponse, docsResponse, historySummary, workspace] =
     await Promise.all([
       FindAllChatMessagesForCurrentUser(id),
       FindChatThreadForCurrentUser(id),
       FindAllChatDocuments(id),
       FindChatHistorySummary(id),
+      FindWorkspaceSummaryForCurrentUser(id),
     ]);
 
   if (docsResponse.status !== "OK") {
@@ -66,6 +70,7 @@ export default async function Home(props: HomeParams) {
       messages={chatResponse.response}
       chatThread={chatThreadResponse.response}
       chatDocuments={docsResponse.response}
+      workspace={workspace}
       extensions={extensionResponse.response}
       defaultModel={DEFAULT_MODEL}
       compactionMarker={threadCompactionMarker(historySummary)}

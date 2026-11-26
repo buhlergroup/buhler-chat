@@ -7,7 +7,12 @@ import { ServerActionResponse } from "@/features/common/server-action-response";
 import { logError } from "@/features/common/services/logger";
 import { FindChatThreadForCurrentUser } from "../chat-thread-service";
 import { resolveAgentRuntimeForCurrentUser } from "./runtime-selection";
-import { uploadToThreadWorkspace } from "./workspace-files";
+import {
+  removeThreadWorkspaceFile,
+  threadWorkspaceListing,
+  uploadToThreadWorkspace,
+} from "./workspace-files";
+import type { WorkspaceListing } from "./workspace-listing";
 import { maxWorkspaceUploadBytes } from "./workspace-uploads";
 
 /**
@@ -22,7 +27,9 @@ import { maxWorkspaceUploadBytes } from "./workspace-uploads";
  */
 export async function UploadFileToAgentWorkspace(
   formData: FormData,
-): Promise<ServerActionResponse<{ handled: boolean; path?: string }>> {
+): Promise<
+  ServerActionResponse<{ handled: boolean; path?: string; size?: number; modified?: string }>
+> {
   try {
     // Every export here is a Server Action: check the session here too, not
     // only in the proxy.
@@ -53,10 +60,73 @@ export async function UploadFileToAgentWorkspace(
     const stored = await uploadToThreadWorkspace(await userHashedId(), threadId, file.name, data);
     return {
       status: "OK",
-      response: { handled: true, path: stored.path },
+      response: { handled: true, path: stored.path, size: stored.bytes, modified: new Date().toISOString() },
     };
   } catch (e) {
     logError("UploadFileToAgentWorkspace failed", { error: e instanceof Error ? e.message : String(e) });
     return { status: "ERROR", errors: [{ message: "The file could not be stored in the chat workspace." }] };
+  }
+}
+
+/**
+ * Session, thread id, Copilot path and thread owner, in this order.
+ * Undefined when all hold; else the response to return.
+ */
+async function refuseWorkspaceAccess(threadId: unknown): Promise<ServerActionResponse<never> | undefined> {
+  if (!(await userSession())) {
+    return { status: "UNAUTHORIZED", errors: [{ message: "Not signed in" }] };
+  }
+  if (!isValidId(threadId)) return { status: "ERROR", errors: [{ message: "Invalid chat thread" }] };
+  if ((await resolveAgentRuntimeForCurrentUser()) !== "copilot") {
+    return { status: "NOT_FOUND", errors: [{ message: "This chat has no file workspace." }] };
+  }
+  const thread = await FindChatThreadForCurrentUser(threadId);
+  if (thread.status !== "OK") return { status: "NOT_FOUND", errors: [{ message: "Chat thread not found" }] };
+  return undefined;
+}
+
+/**
+ * Every file under /workspace of the thread (Copilot path), newest first and
+ * bounded (workspace-listing.ts). Never /session-state.
+ */
+export async function ListWorkspaceFiles(threadId: string): Promise<ServerActionResponse<WorkspaceListing>> {
+  try {
+    const refused = await refuseWorkspaceAccess(threadId);
+    if (refused) return refused;
+    return { status: "OK", response: await threadWorkspaceListing(await userHashedId(), threadId) };
+  } catch (e) {
+    logError("ListWorkspaceFiles failed", { error: e instanceof Error ? e.message : String(e) });
+    return { status: "ERROR", errors: [{ message: "The files of this chat could not be listed." }] };
+  }
+}
+
+/**
+ * Deletes one file under /workspace of the thread (Copilot path): `path` is
+ * relative to /workspace ("uploads/report.pdf"). For a PDF / Office file its
+ * text extracts (<file>.md, <file>.p<pages>.md) go too. Never a folder,
+ * never /session-state, never another thread's or user's files.
+ */
+export async function RemoveWorkspaceFile(
+  threadId: string,
+  path: string,
+): Promise<ServerActionResponse<{ removed: string[] }>> {
+  try {
+    const refused = await refuseWorkspaceAccess(threadId);
+    if (refused) return refused;
+    const removed = await removeThreadWorkspaceFile(await userHashedId(), threadId, path);
+    return { status: "OK", response: { removed } };
+  } catch (e) {
+    const name = (e as { name?: unknown })?.name;
+    if (name === "SessionPathError") return { status: "ERROR", errors: [{ message: "Invalid file path" }] };
+    if (name === "WorkspaceFileNotFoundError") return { status: "NOT_FOUND", errors: [{ message: "File not found" }] };
+    if (name === "WorkspaceIndexRemovalError") {
+      logError("RemoveWorkspaceFile: index entries not deleted, file kept", { error: (e as Error).message });
+      return {
+        status: "ERROR",
+        errors: [{ message: "The search index entries of the file could not be deleted. The file is kept; try again." }],
+      };
+    }
+    logError("RemoveWorkspaceFile failed", { error: e instanceof Error ? e.message : String(e) });
+    return { status: "ERROR", errors: [{ message: "The file could not be deleted." }] };
   }
 }

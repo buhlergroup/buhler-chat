@@ -19,6 +19,14 @@ import {
   uploadsNote,
   type StoredUpload,
 } from "./workspace-uploads";
+import {
+  listWorkspaceFiles,
+  removeWorkspaceFile,
+  summarizeWorkspace,
+  type WorkspaceListing,
+  type WorkspaceSummary,
+} from "./workspace-listing";
+import { removeWorkspaceIndexEntries } from "./workspace-index-removal";
 
 /** True when this deployment can use the Copilot path at all (global or opt-in). */
 export function copilotRuntimeConfigured(env: Record<string, string | undefined> = process.env): boolean {
@@ -49,6 +57,34 @@ export async function uploadToThreadWorkspace(
     bytes: result.bytes,
   });
   return result;
+}
+
+/** The upload chips and the file count of a thread's workspace (see workspace-listing.ts). */
+export async function threadWorkspaceSummary(userKey: string, threadId: string): Promise<WorkspaceSummary> {
+  const { fs } = await threadWorkspace(userKey, threadId);
+  return summarizeWorkspace({ fs });
+}
+
+/** Every file under /workspace of a thread, for the Files panel (see workspace-listing.ts). */
+export async function threadWorkspaceListing(userKey: string, threadId: string): Promise<WorkspaceListing> {
+  const { fs } = await threadWorkspace(userKey, threadId);
+  return listWorkspaceFiles({ fs });
+}
+
+/**
+ * Removes one file under /workspace of a thread (a path relative to
+ * /workspace, from the browser), its text extracts and their search index
+ * entries (chunks and CHAT_DOCUMENT row). Returns the removed paths relative
+ * to /workspace.
+ */
+export async function removeThreadWorkspaceFile(userKey: string, threadId: string, path: unknown): Promise<string[]> {
+  const { fs } = await threadWorkspace(userKey, threadId);
+  const removed = await removeWorkspaceFile(
+    { fs, removeIndexEntries: (paths) => removeWorkspaceIndexEntries({ threadId, userKey, paths }) },
+    path,
+  );
+  logInfo("copilot-runtime: workspace file removed by the user", { threadId, files: removed.length });
+  return removed;
 }
 
 /**
