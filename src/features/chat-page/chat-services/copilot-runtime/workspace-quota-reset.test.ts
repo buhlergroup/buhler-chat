@@ -1,0 +1,135 @@
+import { describe, it, expect, vi, beforeEach } from "vitest";
+
+vi.mock("@/features/common/services/logger", () => ({ logInfo: vi.fn(), logWarn: vi.fn(), logError: vi.fn() }));
+vi.mock("@/features/common/services/cosmos", () => ({ HistoryContainer: vi.fn() }));
+vi.mock("./document-pipeline", () => ({ extractMarkdown: vi.fn(), indexDocument: vi.fn() }));
+vi.mock("./azure-blob-store", () => ({ getAgentWorkspaceStore: vi.fn(), getExistingAgentWorkspaceStore: vi.fn() }));
+const invalidate = vi.fn(async (_u: string, _t: string) => undefined);
+vi.mock("./copilot-session", () => ({ invalidateThreadSessions: (u: string, t: string) => invalidate(u, t) }));
+
+import { BlobSessionFs, DataBlobCache, WorkspaceQuota, WorkspaceQuotaError } from "./blob-session-fs";
+import { FakeBlobStore } from "./fake-blob-store.test-helper";
+import { removeThreadWorkspaceFiles, resetThreadRuntimeQuietly } from "./workspace-files";
+import { acquireThreadLease, type LeaseBackend } from "./thread-lease";
+
+const USER = "c".repeat(64);
+const ns = (t: string) => `${USER}/${t}`;
+const fsFor = (store: FakeBlobStore, thread: string, quota?: WorkspaceQuota) =>
+  new BlobSessionFs(store, ns(thread), undefined, new DataBlobCache(1 << 20), quota);
+
+describe("workspace quota", () => {
+  it("refuses a write over the byte quota; the journal is not counted", async () => {
+    const store = new FakeBlobStore();
+    const fs = fsFor(store, "t1", new WorkspaceQuota(100, 10));
+    await fs.writeFile("/workspace/a.txt", "x".repeat(60));
+    await expect(fs.writeFile("/workspace/b.txt", "y".repeat(50))).rejects.toBeInstanceOf(WorkspaceQuotaError);
+    // Overwriting a file counts only the difference.
+    await fs.writeFile("/workspace/a.txt", "x".repeat(90));
+    // The runtime's own state is outside the quota.
+    await fs.writeFile("/session-state/events.jsonl", "z".repeat(500));
+    await fs.appendFile("/session-state/events.jsonl", "z".repeat(500));
+  });
+
+  it("refuses a new file over the file-count quota", async () => {
+    const store = new FakeBlobStore();
+    const fs = fsFor(store, "t2", new WorkspaceQuota(1 << 20, 2));
+    await fs.writeFile("/workspace/1.txt", "1");
+    await fs.writeFile("/workspace/2.txt", "2");
+    const err = await fs.writeFile("/workspace/3.txt", "3").catch((e) => e);
+    expect(err).toBeInstanceOf(WorkspaceQuotaError);
+    expect((err as Error).message).toMatch(/limit 2/);
+    // Rewriting an existing file is fine; after a delete there is room again.
+    await fs.writeFile("/workspace/2.txt", "22");
+    await fs.rm("/workspace/1.txt", false, false);
+    await fs.writeFile("/workspace/3.txt", "3");
+  });
+
+  it("measures usage written by another instance (one listing)", async () => {
+    const store = new FakeBlobStore();
+    await fsFor(store, "t3", undefined).writeFile("/workspace/big.bin", "b".repeat(80));
+    const fs = fsFor(store, "t3", new WorkspaceQuota(100, 10));
+    await expect(fs.writeFile("/workspace/c.txt", "c".repeat(30))).rejects.toThrow(/quota/);
+  });
+});
+
+/** In-memory lease backend that keeps metadata like the Azure one. */
+function memoryLeases(): LeaseBackend & { meta: Map<string, Record<string, string>>; held: Set<string> } {
+  const meta = new Map<string, Record<string, string>>();
+  const held = new Set<string>();
+  return {
+    meta,
+    held,
+    async ensureBlob(name) {
+      if (!meta.has(name)) meta.set(name, {});
+    },
+    async acquire(name) {
+      if (held.has(name)) return undefined;
+      held.add(name);
+      return `lease-${name}`;
+    },
+    async renew() {},
+    async release(name, _id, m) {
+      meta.set(name, m);
+      held.delete(name);
+    },
+    async readMetadata(name) {
+      return meta.get(name) ?? {};
+    },
+  };
+}
+
+describe("reset / rewind clean-up", () => {
+  beforeEach(() => invalidate.mockClear());
+
+  it("session-state scope removes the journal only; workspace scope removes the model's files", async () => {
+    const store = new FakeBlobStore();
+    const fs = fsFor(store, "t4");
+    await fs.writeFile("/session-state/events.jsonl", "{}\n");
+    await fs.writeFile("/session-state/workspace.yaml", "a: 1");
+    await fs.writeFile("/workspace/notes/plan.md", "plan");
+    await fs.writeFile("/workspace/uploads/a.pdf", "pdf");
+    await removeThreadWorkspaceFiles(USER, "t4", "session-state", store);
+    expect(await fs.exists("/session-state/events.jsonl")).toBe(false);
+    expect(await fs.exists("/session-state/workspace.yaml")).toBe(false);
+    expect(await fs.exists("/workspace/notes/plan.md")).toBe(true);
+    await removeThreadWorkspaceFiles(USER, "t4", "workspace", store);
+    expect(await fs.exists("/workspace/notes/plan.md")).toBe(false);
+    expect(await fs.exists("/workspace/uploads/a.pdf")).toBe(false);
+    // No orphaned data blobs are left.
+    expect([...store.blobs.keys()].filter((k) => k.startsWith(`${ns("t4")}/d/`))).toEqual([]);
+  });
+
+  it("resetThreadRuntimeQuietly: rewind drops the session and the journal, reset also the workspace", async () => {
+    const env = { ...process.env };
+    process.env.AGENT_RUNTIME = "copilot";
+    const store = new FakeBlobStore();
+    const { getExistingAgentWorkspaceStore } = await import("./azure-blob-store");
+    vi.mocked(getExistingAgentWorkspaceStore).mockResolvedValue(store as never);
+    const fs = fsFor(store, "t5");
+    await fs.writeFile("/session-state/events.jsonl", "{}\n");
+    await fs.writeFile("/workspace/notes.md", "n");
+    await resetThreadRuntimeQuietly(USER, "t5", "rewind");
+    expect(invalidate).toHaveBeenCalledWith(USER, "t5");
+    expect(await fs.exists("/session-state/events.jsonl")).toBe(false);
+    expect(await fs.exists("/workspace/notes.md")).toBe(true);
+    await fs.writeFile("/session-state/events.jsonl", "{}\n");
+    await resetThreadRuntimeQuietly(USER, "t5", "reset");
+    expect(await fs.exists("/session-state/events.jsonl")).toBe(false);
+    expect(await fs.exists("/workspace/notes.md")).toBe(false);
+    process.env = env;
+  });
+
+  it("an invalidation (holder reset-…) makes every instance drop its live session on the next turn", async () => {
+    const leases = memoryLeases();
+    const name = `${ns("t6")}/lease`;
+    // Instance A ran the thread last.
+    await (await acquireThreadLease(leases, name, { holder: "instance-a" })).release();
+    // A reset elsewhere gives the lease blob a new generation.
+    await (await acquireThreadLease(leases, name, { holder: "reset-123" })).release();
+    const next = await acquireThreadLease(leases, name, { holder: "instance-a" });
+    // copilot-session drops its live session when previousHolder is not its own id.
+    expect(next.previousHolder).toBe("reset-123");
+    expect(next.previousHolder).not.toBe("instance-a");
+    await next.release();
+  });
+});

@@ -4,7 +4,7 @@ import { createIdGenerator, createUIMessageStream, createUIMessageStreamResponse
 import type { Tool as AiTool } from "@ai-sdk/provider-utils";
 import { userHashedId } from "@/features/auth-page/helpers";
 import { logError, logInfo, logWarn } from "@/features/common/services/logger";
-import type { ChatModel, ModelConfig, UserPrompt } from "../models";
+import { MODEL_CONFIGS, type ChatModel, type ModelConfig, type UserPrompt } from "../models";
 import type { ThreadContext } from "../chat-api/thread-context";
 import {
   friendlyErrorMessage,
@@ -19,6 +19,11 @@ import { indexDocumentTool } from "./index-document";
 import { providerTools, type ProviderToolToggles } from "./provider-tools";
 import { chatDocumentIndexDeps, threadWorkspace, workspaceUploadsNote } from "./workspace-files";
 import { ThreadBusyError } from "./thread-lease";
+import { TurnLimitError } from "./runtime-limits";
+import { canUsePersona, resolveSubAgents } from "./subagent-resolver";
+import { turnCostUsd } from "./usage-cost";
+import type { TurnUsage } from "./event-mapper";
+import { RecordAgentInteraction } from "@/features/common/services/agent-stats-service";
 
 const NOTE_SEPARATOR = String.fromCharCode(10, 10);
 
@@ -34,7 +39,18 @@ export interface CopilotChatTurnArgs {
   toolset: Record<string, AiTool>;
   /** Requested built-in toggles: served by our own tools (provider-tools.ts). */
   builtInToggles?: ProviderToolToggles;
+  /** Browser-local datetime (get_current_time of persona sub-agents). */
+  clientDateTime?: string;
 }
+
+/** call_sub_agent / search_sub_agent stay on the AI SDK path; the Copilot path delegates with `task`. */
+export function withoutAiSdkSubAgentTools(toolset: Record<string, AiTool>): Record<string, AiTool> {
+  const { call_sub_agent: _call, search_sub_agent: _search, ...rest } = toolset;
+  return rest;
+}
+
+/** Text of the 500 answer when a turn cannot start; the cause goes to the log only. */
+export const TURN_START_FAILED = "The reply could not be started. Please try again.";
 
 /**
  * /api/chat on the Copilot runtime (AGENT_RUNTIME=copilot). Same contract as
@@ -70,11 +86,18 @@ export async function runCopilotChatTurn(args: CopilotChatTurnArgs): Promise<Res
     // told which uploads it holds (sent again only when the list changes).
     const { fs } = await threadWorkspace(userKey, threadId);
     const toolset: Record<string, AiTool> = {
-      ...args.toolset,
+      // Sub-agents are the runtime's own (`task`) on this path.
+      ...withoutAiSdkSubAgentTools(args.toolset),
       index_document: indexDocumentTool(chatDocumentIndexDeps({ fs, threadId, userKey })),
       // generate_image / web_search / run_code when their toggle is on.
       ...(args.builtInToggles ? providerTools({ fs, threadId, userKey, toggles: args.builtInToggles }) : {}),
     };
+    // Sub-agents: `general` + the chat agent's sub-agents the user may open.
+    const subAgents = await resolveSubAgents({
+      subAgentIds: ctx.thread.subAgentIds,
+      parentPersonaId: ctx.thread.personaId,
+      ctx: { user: ctx.user.id, threadId, threadDocumentIds: ctx.threadDocumentIds, clientDateTime: args.clientDateTime },
+    });
     const uploads = await workspaceUploadsNote(fs).catch(() => undefined);
     const contextNote = [ctx.documentHintText, uploads].filter(Boolean).join(NOTE_SEPARATOR) || undefined;
     handle = await runCopilotTurn({
@@ -90,27 +113,35 @@ export async function runCopilotChatTurn(args: CopilotChatTurnArgs): Promise<Res
       images: payload.multimodalImages,
       contextNote,
       abortSignal: abortController.signal,
+      subAgents,
+      canUsePersona,
       finishMetadata: (usage): ChatMessageMetadata => ({
-        usage: computeRequestUsage({
-          inputTokens: usage.inputTokens,
-          outputTokens: usage.outputTokens,
-          cachedTokens: usage.cacheReadTokens,
-          cacheWriteTokens: usage.cacheWriteTokens,
-          ...(typeof usage.lastInputTokens === "number" ? { lastPromptTokens: usage.lastInputTokens } : {}),
-          ...(usage.calls > 0 ? { stepCount: usage.calls } : {}),
-          modelConfig,
-        }),
+        usage: {
+          ...computeRequestUsage({
+            inputTokens: usage.inputTokens,
+            outputTokens: usage.outputTokens,
+            cachedTokens: usage.cacheReadTokens,
+            cacheWriteTokens: usage.cacheWriteTokens,
+            ...(typeof usage.lastInputTokens === "number" ? { lastPromptTokens: usage.lastInputTokens } : {}),
+            ...(usage.calls > 0 ? { stepCount: usage.calls } : {}),
+            modelConfig,
+          }),
+          // Sub-agents may run on other models: each model at its own price.
+          costUsd: turnCostUsd(usage, modelConfig, MODEL_CONFIGS),
+        },
       }),
     });
   } catch (err) {
     unregisterPublisher(threadId);
     const message = err instanceof Error ? err.message : String(err);
-    const busy = err instanceof ThreadBusyError;
-    logError("/api/chat copilot: turn did not start", { threadId, turnId: ctx.turnId, message, busy });
-    await writeSentinel(busy ? message : friendlyErrorMessage({ message, name: "CopilotRuntimeError" })).catch(
+    // Our own refusals carry a text meant for the user; anything else stays in the log.
+    const userFacing = err instanceof ThreadBusyError || err instanceof TurnLimitError;
+    const status = err instanceof ThreadBusyError ? 409 : err instanceof TurnLimitError ? 429 : 500;
+    logError("/api/chat copilot: turn did not start", { threadId, turnId: ctx.turnId, message, status });
+    await writeSentinel(userFacing ? message : friendlyErrorMessage({ message, name: "CopilotRuntimeError" })).catch(
       () => undefined,
     );
-    return new Response(message, { status: busy ? 409 : 500 });
+    return new Response(userFacing ? message : TURN_START_FAILED, { status });
   }
 
   void handle.result
@@ -137,7 +168,9 @@ export async function runCopilotChatTurn(args: CopilotChatTurnArgs): Promise<Res
         streamError: result.error,
         reasoningDurationMs: result.reasoningDurationMs,
         personaId: ctx.thread.isTemporary ? undefined : ctx.thread.personaId,
+        costUsd: turnCostUsd(result.turnUsage, modelConfig, MODEL_CONFIGS),
       });
+      recordSubAgentInteractions(result.turnUsage, result.subAgentPersonas ?? {});
       if (ctx.history.length === 1) {
         UpdateChatTitle(threadId, payload.message).catch((err) =>
           logWarn("/api/chat copilot: UpdateChatTitle failed", {
@@ -163,7 +196,10 @@ export async function runCopilotChatTurn(args: CopilotChatTurnArgs): Promise<Res
     stream: createUIMessageStream({
       originalMessages: ctx.history,
       generateId: createIdGenerator({ prefix: "msg", size: 16 }),
-      onError: (err) => (err instanceof Error ? err.message : String(err)),
+      onError: (err) => {
+        logError("/api/chat copilot: stream error", { threadId, error: err instanceof Error ? err.message : String(err) });
+        return TURN_START_FAILED;
+      },
       execute: ({ writer }) => {
         writer.merge(handle.stream);
       },
@@ -177,4 +213,26 @@ export async function runCopilotChatTurn(args: CopilotChatTurnArgs): Promise<Res
     statusText: framed.statusText,
     headers: framed.headers,
   });
+}
+
+/** Per-agent stats for the persona sub-agents that ran in the turn (their own tokens). */
+export function recordSubAgentInteractions(
+  usage: Pick<TurnUsage, "bySubAgent">,
+  personas: Record<string, string>,
+  record: typeof RecordAgentInteraction = RecordAgentInteraction,
+): void {
+  for (const [name, personaId] of Object.entries(personas)) {
+    const u = usage.bySubAgent?.[name];
+    if (!u) continue;
+    record(personaId, {
+      inputTokens: u.inputTokens,
+      outputTokens: u.outputTokens,
+      cachedTokens: u.cacheReadTokens,
+    }).catch((err: unknown) =>
+      logWarn("/api/chat copilot: sub-agent stats failed", {
+        personaId,
+        error: err instanceof Error ? err.message : String(err),
+      }),
+    );
+  }
 }

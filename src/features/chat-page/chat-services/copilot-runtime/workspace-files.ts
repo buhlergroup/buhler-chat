@@ -5,9 +5,9 @@ import { HistoryContainer } from "@/features/common/services/cosmos";
 import { uniqueId } from "@/features/common/util";
 import { logInfo, logWarn } from "@/features/common/services/logger";
 import { CHAT_DOCUMENT_ATTRIBUTE, type ChatDocumentModel } from "../models";
-import { BlobSessionFs, type BlobStore } from "./blob-session-fs";
+import { BlobSessionFs, sharedWorkspaceQuota, type BlobStore } from "./blob-session-fs";
 import { getAgentWorkspaceStore, getExistingAgentWorkspaceStore } from "./azure-blob-store";
-import { buildNamespace } from "./session-path";
+import { buildNamespace, SESSION_STATE_ROOT, WORKSPACE_ROOT } from "./session-path";
 import { extractMarkdown, indexDocument } from "./document-pipeline";
 import type { IndexDocumentDeps } from "./index-document";
 import { storeUpload, UPLOADS_DIR, uploadsNote, type StoredUpload } from "./workspace-uploads";
@@ -48,17 +48,27 @@ export async function workspaceUploadsNote(fs: BlobSessionFs): Promise<string | 
   return uploadsNote(await fs.listEntries(UPLOADS_DIR));
 }
 
+/** What a clean-up removes: see removeThreadWorkspaceFiles. */
+export type WorkspaceCleanupScope = "uploads" | "all" | "session-state" | "workspace";
+
+const SCOPE_ROOTS: Record<Exclude<WorkspaceCleanupScope, "all">, string> = {
+  uploads: UPLOADS_DIR,
+  "session-state": SESSION_STATE_ROOT,
+  workspace: WORKSPACE_ROOT,
+};
+
 /**
  * Removes a thread's workspace files: "uploads" when the chat documents are
- * deleted, "all" (workspace files, tool results and session state) when the
- * thread is. Hard delete, like the AI Search chunks of deleted chat
- * documents. Never creates the container; does nothing in deployments
- * without the Copilot path.
+ * deleted, "session-state" (the runtime journal) on a rewind, "workspace"
+ * (all model files) on a reset, "all" (workspace files, tool results,
+ * session state, lease) when the thread is deleted. Hard delete, like the AI
+ * Search chunks of deleted chat documents. Never creates the container; does
+ * nothing in deployments without the Copilot path.
  */
 export async function removeThreadWorkspaceFiles(
   userKey: string,
   threadId: string,
-  scope: "uploads" | "all",
+  scope: WorkspaceCleanupScope,
   store?: BlobStore,
 ): Promise<number> {
   if (!store && !copilotRuntimeConfigured()) return 0;
@@ -69,7 +79,7 @@ export async function removeThreadWorkspaceFiles(
   if (scope === "all") {
     names = await s.listNames(`${ns}/`);
   } else {
-    const pointers = await s.listDetailed(`${ns}/f${UPLOADS_DIR}/`);
+    const pointers = await s.listDetailed(`${ns}/f${SCOPE_ROOTS[scope]}/`);
     names = pointers.flatMap((p) => {
       const target = p.metadata?.target;
       return typeof target === "string" && target.startsWith(`${ns}/d/`) ? [p.name, target] : [p.name];
@@ -78,6 +88,7 @@ export async function removeThreadWorkspaceFiles(
   for (let i = 0; i < names.length; i += 32) {
     await Promise.all(names.slice(i, i + 32).map((n) => s.delete(n).catch(() => false)));
   }
+  sharedWorkspaceQuota().forget(ns);
   return names.length;
 }
 
@@ -85,7 +96,7 @@ export async function removeThreadWorkspaceFiles(
 export async function removeThreadWorkspaceFilesQuietly(
   userKey: string,
   threadId: string,
-  scope: "uploads" | "all",
+  scope: WorkspaceCleanupScope,
 ): Promise<void> {
   try {
     const removed = await removeThreadWorkspaceFiles(userKey, threadId, scope);
@@ -97,6 +108,33 @@ export async function removeThreadWorkspaceFilesQuietly(
       error: err instanceof Error ? err.message : String(err),
     });
   }
+}
+
+/**
+ * After a rewind ("rewind") or reset ("reset") of a chat: the runtime must
+ * not continue the deleted history. Drops the live session in every
+ * instance (the lease blob gets a new generation, see
+ * invalidateThreadSessions), and deletes the journal under /session-state;
+ * a reset also deletes /workspace. The next turn creates a new session and
+ * seeds it from the Cosmos rows that are left. Never fails the caller.
+ */
+export async function resetThreadRuntimeQuietly(
+  userKey: string,
+  threadId: string,
+  mode: "rewind" | "reset",
+): Promise<void> {
+  if (!copilotRuntimeConfigured()) return;
+  try {
+    const { invalidateThreadSessions } = await import("./copilot-session");
+    await invalidateThreadSessions(userKey, threadId);
+  } catch (err) {
+    logWarn("copilot-runtime: could not invalidate the live session", {
+      threadId,
+      error: err instanceof Error ? err.message : String(err),
+    });
+  }
+  await removeThreadWorkspaceFilesQuietly(userKey, threadId, "session-state");
+  if (mode === "reset") await removeThreadWorkspaceFilesQuietly(userKey, threadId, "workspace");
 }
 
 /** index_document against the app's Cosmos rows and AI Search index, for one thread. */

@@ -13,13 +13,59 @@
  *   abort                       -> abort
  *   session.idle                -> finish (with usage metadata)
  *
- * One model call is one AI SDK "step" (start-step ... finish-step). Events of
- * runtime sub-agents (envelope `agentId`) are ignored: the app's own
- * call_sub_agent tool is an ordinary custom tool.
+ * One model call is one AI SDK "step" (start-step ... finish-step).
+ *
+ * Sub-agents: the parent's `task` call becomes ONE tool part `sub_agent`
+ * (input: agent and task; output: the sub-agent's answer), rendered as
+ * "Sub-agent <name>". Events of the sub-agent itself (envelope `agentId`)
+ * add their model usage to the turn and are otherwise not shown.
+ *
+ * Runtime compactions become the `data-compaction` notice the AI SDK path
+ * uses (see compactionPart).
  *
  * Pure and synchronous: the caller feeds events and writes the chunks.
  */
 import type { UIMessageChunk } from "ai";
+import { COMPACTION_DATA_PART_TYPE, COMPACTION_PART_ID, type CompactionDataPart } from "../chat-api/compaction-part";
+
+/** The runtime's tool that starts a sub-agent, and the tool part the chat shows for it. */
+export const RUNTIME_SUBAGENT_TOOL = "task";
+export const SUBAGENT_PART_TOOL = "sub_agent";
+
+/** Tokens of one model (or one sub-agent). */
+export interface UsageBucket {
+  inputTokens: number;
+  outputTokens: number;
+  cacheReadTokens: number;
+  cacheWriteTokens: number;
+  calls: number;
+}
+
+const emptyBucket = (): UsageBucket => ({ inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, calls: 0 });
+
+/** One runtime compaction, as the session reported it. */
+export interface RuntimeCompaction {
+  success: boolean;
+  preTokens?: number;
+  postTokens?: number;
+  durationMs?: number;
+}
+
+/** The data-compaction part for a runtime compaction (no turn count: the runtime summarises the whole older history). */
+export function compactionPart(c: RuntimeCompaction): CompactionDataPart {
+  return {
+    type: COMPACTION_DATA_PART_TYPE,
+    id: COMPACTION_PART_ID,
+    data: {
+      status: "done",
+      trimmedTurns: 0,
+      summaryOutcome: c.success ? "ok" : "failed",
+      durationMs: c.durationMs ?? 0,
+      ...(typeof c.preTokens === "number" ? { tokensBefore: c.preTokens } : {}),
+      ...(typeof c.postTokens === "number" ? { tokensAfter: c.postTokens } : {}),
+    },
+  };
+}
 
 /** The part of a Copilot session event this mapper reads. */
 export interface CopilotEventLike {
@@ -38,8 +84,12 @@ export interface TurnUsage {
   reasoningTokens: number;
   /** Input tokens of the LAST model call (the prompt size now in context). */
   lastInputTokens?: number;
-  /** Number of model calls. */
+  /** Number of model calls of the main agent. */
   calls: number;
+  /** Tokens per model, main agent AND sub-agents (cost is priced per model). */
+  byModel: Record<string, UsageBucket>;
+  /** Tokens per sub-agent name (included in the totals above). */
+  bySubAgent: Record<string, UsageBucket>;
   /** Time to first token of the first model call, as the runtime measured it. */
   firstTimeToFirstTokenMs?: number;
 }
@@ -94,6 +144,12 @@ export interface EventMapperOptions {
   rawToolOutput?: (toolCallId: string) => { output?: unknown } | undefined;
   /** UI-safe error text of an app tool call (see ToolUserError); built-ins use the runtime's text. */
   toolErrorText?: (toolCallId: string) => string | undefined;
+  /** Display name of a sub-agent by its runtime name. */
+  subAgentDisplayName?: (name: string) => string;
+  /** Runtime name of a sub-agent instance (envelope agentId), for usage per sub-agent. */
+  subAgentNameOf?: (agentId: string) => string | undefined;
+  /** Text shown for a runtime session error (the details go to the log). */
+  errorText?: (message: string, errorType?: string) => string;
 }
 
 const FINISH_REASONS: Record<string, MappedFinishReason> = {
@@ -121,7 +177,10 @@ export class CopilotEventMapper {
     cacheWriteTokens: 0,
     reasoningTokens: 0,
     calls: 0,
+    byModel: {},
+    bySubAgent: {},
   };
+  private readonly compactionStarts: number[] = [];
   private lastFinishReason: MappedFinishReason = "stop";
   private error: { message: string; name?: string } | undefined;
   private aborted = false;
@@ -151,9 +210,13 @@ export class CopilotEventMapper {
   /** Feeds one event. Returns true once the turn is over (session.idle). */
   handle(event: CopilotEventLike): boolean {
     if (this.finished) return true;
-    if (event.agentId) return false;
-    this.start();
     const data = event.data ?? {};
+    if (event.agentId) {
+      // A sub-agent's own events: only its model usage counts (into the turn).
+      if (event.type === "assistant.usage") this.onUsage(data, event.agentId);
+      return false;
+    }
+    this.start();
     switch (event.type) {
       case "assistant.reasoning_delta":
         this.onReasoningDelta(String(data.reasoningId ?? "reasoning"), String(data.deltaContent ?? ""));
@@ -179,7 +242,18 @@ export class CopilotEventMapper {
       case "session.error":
         this.error = { message: String(data.message ?? "Unknown error"), name: data.errorType };
         this.lastFinishReason = "error";
-        this.emit({ type: "error", errorText: this.error.message });
+        this.emit({ type: "error", errorText: this.uiErrorText(this.error.message, this.error.name) });
+        break;
+      case "session.compaction_start":
+        this.compactionStarts.push(Date.now());
+        break;
+      case "session.compaction_complete":
+        this.emitCompaction({
+          success: data.success === true,
+          preTokens: data.preCompactionTokens,
+          postTokens: data.postCompactionTokens,
+          durationMs: this.compactionStarts.length > 0 ? Date.now() - this.compactionStarts.shift()! : undefined,
+        });
         break;
       case "abort":
         this.aborted = true;
@@ -200,8 +274,19 @@ export class CopilotEventMapper {
     this.start();
     this.error = { message, name };
     this.lastFinishReason = "error";
-    this.emit({ type: "error", errorText: message });
+    this.emit({ type: "error", errorText: this.uiErrorText(message, name) });
     this.finish();
+  }
+
+  /** Shows a runtime compaction (also one that finished between turns). */
+  emitCompaction(c: RuntimeCompaction): void {
+    if (this.finished || !c.success) return;
+    this.start();
+    this.emit(compactionPart(c) as unknown as UIMessageChunk);
+  }
+
+  private uiErrorText(message: string, name?: string): string {
+    return this.options.errorText ? this.options.errorText(message, name) : message;
   }
 
   /** Ends the turn as aborted (stop button) when the runtime sends no idle. */
@@ -355,7 +440,7 @@ export class CopilotEventMapper {
     this.stepState = "closed";
   }
 
-  private onUsage(data: any): void {
+  private onUsage(data: any, agentId?: string): void {
     const num = (v: unknown) => (typeof v === "number" && Number.isFinite(v) ? v : 0);
     const input = num(data.inputTokens);
     const output = num(data.outputTokens);
@@ -366,6 +451,21 @@ export class CopilotEventMapper {
     this.usage.cacheReadTokens += cacheRead;
     this.usage.cacheWriteTokens += cacheWrite;
     this.usage.reasoningTokens += num(data.reasoningTokens);
+    const add = (bucket: UsageBucket) => {
+      bucket.inputTokens += input;
+      bucket.outputTokens += output;
+      bucket.cacheReadTokens += cacheRead;
+      bucket.cacheWriteTokens += cacheWrite;
+      bucket.calls += 1;
+    };
+    const model = typeof data.model === "string" && data.model ? data.model : "unknown";
+    add((this.usage.byModel[model] ??= emptyBucket()));
+    if (agentId) {
+      // A sub-agent's call: billed with the turn, but not a step of the main agent.
+      const name = this.options.subAgentNameOf?.(agentId) ?? "unknown";
+      add((this.usage.bySubAgent[name] ??= emptyBucket()));
+      return;
+    }
     this.usage.lastInputTokens = input;
     this.usage.calls += 1;
     if (this.usage.firstTimeToFirstTokenMs === undefined && typeof data.timeToFirstTokenMs === "number") {
@@ -391,8 +491,20 @@ export class CopilotEventMapper {
 
   private onToolStart(data: any): void {
     const toolCallId = String(data.toolCallId);
-    const toolName = String(data.toolName ?? "unknown");
-    const input = data.arguments ?? {};
+    let toolName = String(data.toolName ?? "unknown");
+    let input = data.arguments ?? {};
+    if (toolName === RUNTIME_SUBAGENT_TOOL) {
+      // A sub-agent start: one "Sub-agent <name>" part with the task.
+      const args = (input && typeof input === "object" ? input : {}) as Record<string, unknown>;
+      const agentType = String(args.agent_type ?? "");
+      toolName = SUBAGENT_PART_TOOL;
+      input = {
+        agent: this.options.subAgentDisplayName?.(agentType) ?? agentType,
+        agentName: agentType,
+        task: String(args.description ?? args.name ?? ""),
+        prompt: String(args.prompt ?? ""),
+      };
+    }
     const step = this.toolStep();
     this.closeParts();
     this.toolCalls.set(toolCallId, { toolName, input, step });
@@ -415,8 +527,11 @@ export class CopilotEventMapper {
     const dynamic = this.isDynamic(toolName) ? { dynamic: true } : {};
     if (data.success === true) {
       const raw = this.options.rawToolOutput?.(toolCallId);
-      const output =
+      let output =
         raw && "output" in raw ? raw.output : (data.result?.content ?? data.result?.detailedContent ?? null);
+      if (toolName === SUBAGENT_PART_TOOL) {
+        output = { agent: (call?.input as { agent?: string } | undefined)?.agent ?? "", response: output };
+      }
       this.emit({ type: "tool-output-available", toolCallId, output, ...dynamic });
       (call?.step ?? this.toolStep()).toolResults.push({
         type: "tool-result",

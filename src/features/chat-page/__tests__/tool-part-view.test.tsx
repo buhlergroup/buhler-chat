@@ -220,3 +220,12 @@ describe("renderToolOutput: Copilot path image tools", () => {
     expect(container.textContent).not.toContain("blob://");
   });
 });
+
+describe("sub-agent tool part label (Copilot path)", () => {
+  it("reads 'Sub-agent <name>'", async () => {
+    const { toolPartLabel } = await import("../tool-part-view");
+    expect(toolPartLabel("sub_agent", { agent: "Research" })).toBe("Sub-agent Research");
+    expect(toolPartLabel("sub_agent", {})).toBe("Sub-agent");
+    expect(toolPartLabel("search_documents", { agent: "x" })).toBeUndefined();
+  });
+});

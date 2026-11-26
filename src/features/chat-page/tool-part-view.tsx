@@ -323,8 +323,20 @@ export function renderToolOutput(output: unknown, toolName?: string): ReactNode 
 // Public component
 // ---------------------------------------------------------------------------
 
+/**
+ * Header label of a tool part, when it is not the tool name: a sub-agent run
+ * on the Copilot path (`sub_agent`, input.agent = its display name) reads
+ * "Sub-agent <name>".
+ */
+export function toolPartLabel(toolName: string, input: unknown): string | undefined {
+  if (toolName !== "sub_agent") return undefined;
+  const agent = (input as { agent?: unknown } | null | undefined)?.agent;
+  return typeof agent === "string" && agent.length > 0 ? `Sub-agent ${agent}` : "Sub-agent";
+}
+
 export function ToolPartView({ part, index }: { part: UIMessagePart; index: number }) {
   const normalized = normalizeToolPart(part, index);
+  const label = toolPartLabel(normalized.toolName, normalized.input);
   return (
     // Failed calls open expanded so the error message is visible without a
     // click; successful calls stay collapsed as before.
@@ -332,6 +344,7 @@ export function ToolPartView({ part, index }: { part: UIMessagePart; index: numb
       <ToolHeader
         type={`tool-${normalized.toolName}` as `tool-${string}`}
         state={normalized.state}
+        {...(label ? { label } : {})}
       />
       <ToolContent>
         <ToolInput input={normalized.input} />

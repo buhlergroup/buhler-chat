@@ -218,3 +218,68 @@ describe("CopilotEventMapper", () => {
     expect(aborted.result()).toMatchObject({ aborted: true, finishReason: "other" });
   });
 });
+
+describe("CopilotEventMapper: sub-agents, compaction, errors", () => {
+  it("a task call is one 'sub_agent' part; sub-agent usage counts into the turn, per model and per agent", () => {
+    const names: Record<string, string> = { "ag-1": "general", "ag-2": "research-abc123" };
+    const { chunks, mapper } = run(
+      [
+        { type: "assistant.message", data: { messageId: "m1", content: "", toolRequests: [{ toolCallId: "t1", name: "task" }, { toolCallId: "t2", name: "task" }] } },
+        usage({ model: "gpt-main", inputTokens: 100, outputTokens: 10 }),
+        { type: "tool.execution_start", data: { toolCallId: "t1", toolName: "task", arguments: { agent_type: "general", name: "a", description: "Write alpha", prompt: "Write /workspace/a.txt", mode: "sync" } } },
+        { type: "tool.execution_start", data: { toolCallId: "t2", toolName: "task", arguments: { agent_type: "research-abc123", name: "b", description: "Look up", prompt: "Find X" } } },
+        { type: "subagent.started", agentId: "ag-1", data: { toolCallId: "t1", agentName: "general" } },
+        { type: "assistant.usage", agentId: "ag-1", data: { model: "gpt-fast", inputTokens: 50, outputTokens: 5, cacheReadTokens: 20 } },
+        { type: "assistant.message", agentId: "ag-1", data: { messageId: "x", content: "inner text is not shown" } },
+        { type: "assistant.usage", agentId: "ag-2", data: { model: "gpt-main", inputTokens: 30, outputTokens: 3 } },
+        { type: "tool.execution_complete", data: { toolCallId: "t1", success: true, result: { content: "Wrote /workspace/a.txt" } } },
+        { type: "tool.execution_complete", data: { toolCallId: "t2", success: false, error: { message: "failed" } } },
+        { type: "assistant.message", data: { messageId: "m2", content: "Done" } },
+        usage({ model: "gpt-main", inputTokens: 120, outputTokens: 4 }),
+        { type: "session.idle", data: {} },
+      ],
+      {
+        subAgentDisplayName: (n) => (n === "general" ? "General" : "Research"),
+        subAgentNameOf: (id) => names[id],
+      },
+    );
+    const starts = chunks.filter((c) => c.type === "tool-input-available") as Array<{ toolName: string; input: Record<string, string> }>;
+    expect(starts.map((c) => c.toolName)).toEqual(["sub_agent", "sub_agent"]);
+    expect(starts[0].input).toEqual({ agent: "General", agentName: "general", task: "Write alpha", prompt: "Write /workspace/a.txt" });
+    expect(chunks).toContainEqual({ type: "tool-output-available", toolCallId: "t1", output: { agent: "General", response: "Wrote /workspace/a.txt" }, dynamic: true });
+    expect(chunks.some((c) => c.type === "text-delta" && (c as { delta: string }).delta.includes("inner"))).toBe(false);
+    const u = mapper.turnUsage;
+    expect(u.inputTokens).toBe(300);
+    expect(u.calls).toBe(2);
+    expect(u.lastInputTokens).toBe(120);
+    expect(u.byModel["gpt-fast"]).toMatchObject({ inputTokens: 50, cacheReadTokens: 20, calls: 1 });
+    expect(u.byModel["gpt-main"]).toMatchObject({ inputTokens: 250, calls: 3 });
+    expect(u.bySubAgent).toMatchObject({ general: { inputTokens: 50 }, "research-abc123": { inputTokens: 30 } });
+  });
+
+  it("a runtime compaction becomes the data-compaction notice", () => {
+    const { chunks } = run([
+      { type: "session.compaction_start", data: {} },
+      { type: "session.compaction_complete", data: { success: true, preCompactionTokens: 12428, postCompactionTokens: 8061 } },
+      { type: "session.idle", data: {} },
+    ]);
+    const part = chunks.find((c) => c.type === "data-compaction") as unknown as { id: string; data: Record<string, unknown> };
+    expect(part.id).toBe("compaction");
+    expect(part.data).toMatchObject({ status: "done", summaryOutcome: "ok", tokensBefore: 12428, tokensAfter: 8061, trimmedTurns: 0 });
+  });
+
+  it("session errors reach the chat as the friendly text, not the raw message", () => {
+    const { chunks, mapper } = run(
+      [
+        { type: "session.error", data: { message: "Request to https://internal.example/v1 failed: key=abc", errorType: "provider" } },
+        { type: "session.idle", data: {} },
+      ],
+      { errorText: () => "Something went wrong." },
+    );
+    expect(chunks).toContainEqual({ type: "error", errorText: "Something went wrong." });
+    expect(JSON.stringify(chunks)).not.toContain("internal.example");
+    // The raw message stays on the result (for the server log / persistence classification).
+    expect(mapper.result().error?.message).toContain("internal.example");
+  });
+});
+

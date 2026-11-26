@@ -38,6 +38,7 @@
 import RE2 from "re2";
 import type { Tool as CopilotTool, ToolResultObject } from "@microsoft/copilot-sdk";
 import builtin from "./builtin-search-tools.json";
+import { spillLargeResult } from "./tool-adapter";
 import { normalizeSessionPath, WORKSPACE_ROOT } from "./session-path";
 import type { WorkspaceEntry } from "./blob-session-fs";
 
@@ -524,7 +525,44 @@ export async function runGlob(fs: WorkspaceFiles, args: { pattern?: string; path
 }
 
 /** The search tools for a model family, with the runtime's names and schemas. */
-export function workspaceTools(fs: WorkspaceFiles, family: SearchToolFamily): CopilotTool[] {
+export interface WorkspaceToolOptions {
+  /**
+   * Writes a large result into the workspace (our own spill, see
+   * tool-adapter.ts spillLargeResult). Every result is marked
+   * skipLargeOutputProcessing, so the runtime never spills these itself.
+   */
+  spill?: (path: string, content: string) => Promise<void>;
+  /** Normalised paths the search may not read (journal files with secrets). */
+  readDenied?: (normalizedPath: string) => boolean;
+}
+
+/** Large outputs become a workspace file + preview; all results skip the runtime's spill. */
+async function finishResult(
+  name: string,
+  result: ToolResultObject,
+  callId: string,
+  spill: WorkspaceToolOptions["spill"],
+): Promise<ToolResultObject> {
+  if (spill && result.resultType === "success") {
+    const spilled = await spillLargeResult(name, callId, result.textResultForLlm, spill);
+    if (spilled) return spilled.result;
+  }
+  return { ...result, skipLargeOutputProcessing: true };
+}
+
+/** The search tools for a model family, with the runtime's names and schemas. */
+export function workspaceTools(
+  fs: WorkspaceFiles,
+  family: SearchToolFamily,
+  options: WorkspaceToolOptions = {},
+): CopilotTool[] {
+  const files: WorkspaceFiles = options.readDenied
+    ? {
+        listEntries: async (dir, prefix) =>
+          (await fs.listEntries(dir, prefix)).filter((e) => !options.readDenied!(e.path)),
+        readEntry: (entry) => fs.readEntry(entry),
+      }
+    : fs;
   return SEARCH_TOOLS_BY_FAMILY[family].map((name) => {
     const def = builtin.tools[name];
     return {
@@ -534,13 +572,15 @@ export function workspaceTools(fs: WorkspaceFiles, family: SearchToolFamily): Co
       overridesBuiltInTool: true,
       skipPermission: true,
       defer: "never" as const,
-      handler: async (args: unknown) => {
+      handler: async (args: unknown, invocation?: { toolCallId?: string }) => {
         try {
-          return name === "glob"
-            ? await runGlob(fs, (args ?? {}) as { pattern?: string; paths?: unknown })
-            : await runRipgrep(fs, (args ?? {}) as RgArgs);
+          const result =
+            name === "glob"
+              ? await runGlob(files, (args ?? {}) as { pattern?: string; paths?: unknown })
+              : await runRipgrep(files, (args ?? {}) as RgArgs);
+          return await finishResult(name, result, invocation?.toolCallId ?? `${Date.now()}`, options.spill);
         } catch (err) {
-          return failure(`Error: ${err instanceof Error ? err.message : String(err)}`);
+          return { ...failure(`Error: ${err instanceof Error ? err.message : String(err)}`), skipLargeOutputProcessing: true };
         }
       },
     };

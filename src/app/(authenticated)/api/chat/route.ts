@@ -448,6 +448,7 @@ export async function POST(req: Request) {
       toolset: tools,
       // The provider-hosted built-ins become our own tools on this path.
       builtInToggles: effectiveTools,
+      clientDateTime: req.headers.get("x-client-datetime") ?? undefined,
     });
   }
 

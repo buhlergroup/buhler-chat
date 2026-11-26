@@ -27,12 +27,18 @@
  * in place: every write, including an append, creates a new data blob. So a
  * workspace data blob is immutable and its content can be cached by name
  * (the workspace search tools do), and the pointer's `size` metadata is exact.
+ *
+ * Quota: writes under /workspace (uploads, tool-result spills, model writes)
+ * are checked against a per-thread byte and file-count quota (WorkspaceQuota,
+ * COPILOT_WORKSPACE_MAX_BYTES / COPILOT_WORKSPACE_MAX_FILES). The runtime's
+ * own /session-state is not counted.
  */
 import { randomUUID } from "node:crypto";
 import type { SessionFsProvider } from "@microsoft/copilot-sdk";
 import {
   DIR_MARKER_NAME,
   SESSION_STATE_ROOT,
+  WORKSPACE_ROOT,
   isRootPath,
   normalizeSessionPath,
   parentPath,
@@ -147,12 +153,101 @@ const enoent = (path: string): Error =>
 /** Optional hook for tests and the smoke script: sees every operation. */
 export type SessionFsOpListener = (op: string, path: string, extra?: unknown) => void;
 
+/** Thrown when a write would exceed the thread's workspace quota. */
+export class WorkspaceQuotaError extends Error {
+  readonly code = "ENOSPC";
+  constructor(message: string) {
+    super(message);
+    this.name = "WorkspaceQuotaError";
+  }
+}
+
+const isWorkspacePath = (normalized: string) =>
+  normalized === WORKSPACE_ROOT || normalized.startsWith(`${WORKSPACE_ROOT}/`);
+
+interface QuotaUsage {
+  bytes: number;
+  files: number;
+  at: number;
+}
+
+/**
+ * Per-thread quota of /workspace: bytes and file count. Usage comes from one
+ * listing with metadata (pointer `size`), cached per namespace for `ttlMs`
+ * and updated by this process's own writes in between. Other instances'
+ * writes are seen after the cache expires, so the limit is approximate by
+ * at most one TTL of concurrent writes.
+ */
+export class WorkspaceQuota {
+  private readonly usage = new Map<string, QuotaUsage>();
+
+  constructor(
+    readonly maxBytes: number,
+    readonly maxFiles: number,
+    private readonly ttlMs = 60_000,
+  ) {}
+
+  /** Throws WorkspaceQuotaError when adding `deltaBytes` / `deltaFiles` would exceed the quota. */
+  async check(store: BlobStore, namespace: string, deltaBytes: number, deltaFiles: number): Promise<void> {
+    let u = this.usage.get(namespace);
+    if (!u || Date.now() - u.at > this.ttlMs) {
+      u = await this.measure(store, namespace);
+      if (this.usage.size > 10_000) this.usage.clear();
+      this.usage.set(namespace, u);
+    }
+    const mb = (n: number) => `${Math.round(n / (1024 * 1024))} MB`;
+    if (deltaBytes > 0 && u.bytes + deltaBytes > this.maxBytes) {
+      throw new WorkspaceQuotaError(
+        `Workspace quota exceeded: this chat's files would use ${mb(u.bytes + deltaBytes)} of ${mb(this.maxBytes)}. Delete files in /workspace first.`,
+      );
+    }
+    if (deltaFiles > 0 && u.files + deltaFiles > this.maxFiles) {
+      throw new WorkspaceQuotaError(
+        `Workspace quota exceeded: this chat already has ${u.files} files (limit ${this.maxFiles}). Delete files in /workspace first.`,
+      );
+    }
+  }
+
+  /** Records a write of this process. */
+  commit(namespace: string, deltaBytes: number, deltaFiles: number): void {
+    const u = this.usage.get(namespace);
+    if (!u) return;
+    u.bytes = Math.max(0, u.bytes + deltaBytes);
+    u.files = Math.max(0, u.files + deltaFiles);
+  }
+
+  /** Drops the cached usage (after deletes and renames). */
+  forget(namespace: string): void {
+    this.usage.delete(namespace);
+  }
+
+  private async measure(store: BlobStore, namespace: string): Promise<QuotaUsage> {
+    let bytes = 0;
+    let files = 0;
+    for (const blob of await store.listDetailed(`${namespace}/f${WORKSPACE_ROOT}/`)) {
+      if (blob.name.endsWith(`/${DIR_MARKER_NAME}`) || typeof blob.metadata?.target !== "string") continue;
+      files += 1;
+      bytes += Number(blob.metadata.size) || 0;
+    }
+    return { bytes, files, at: Date.now() };
+  }
+}
+
+const gq = globalThis as typeof globalThis & { __copilotWorkspaceQuota?: WorkspaceQuota };
+/** 500 MB and 2,000 files per thread unless COPILOT_WORKSPACE_MAX_BYTES / _MAX_FILES say otherwise. */
+export const sharedWorkspaceQuota = (): WorkspaceQuota =>
+  (gq.__copilotWorkspaceQuota ??= new WorkspaceQuota(
+    Number(process.env.COPILOT_WORKSPACE_MAX_BYTES) || 500 * 1024 * 1024,
+    Number(process.env.COPILOT_WORKSPACE_MAX_FILES) || 2000,
+  ));
+
 export class BlobSessionFs implements SessionFsProvider {
   constructor(
     private readonly store: BlobStore,
     private readonly namespace: string,
     private readonly onOp?: SessionFsOpListener,
     private readonly cache: DataBlobCache = sharedDataCache(),
+    private readonly quota: WorkspaceQuota | undefined = sharedWorkspaceQuota(),
   ) {
     if (!namespace || namespace.includes("..") || namespace.startsWith("/")) {
       throw new SessionPathError("Invalid namespace");
@@ -207,6 +302,10 @@ export class BlobSessionFs implements SessionFsProvider {
 
   private async writeBuffer(normalized: string, data: Buffer): Promise<void> {
     const previous = await this.pointer(normalized);
+    const counted = this.quota && isWorkspacePath(normalized);
+    const deltaBytes = data.length - (previous ? Number(previous.props.metadata?.size) || 0 : 0);
+    const deltaFiles = previous ? 0 : 1;
+    if (counted) await this.quota!.check(this.store, this.namespace, deltaBytes, deltaFiles);
     const dataKey = this.newDataKey();
     await this.store.createAppendBlob(dataKey);
     await this.appendChunks(dataKey, data);
@@ -216,6 +315,7 @@ export class BlobSessionFs implements SessionFsProvider {
       target: dataKey,
       size: String(data.length),
     });
+    if (counted) this.quota!.commit(this.namespace, deltaBytes, deltaFiles);
     if (previous && previous.target !== dataKey) {
       await this.store.delete(previous.target).catch(() => false);
     }
@@ -397,6 +497,7 @@ export class BlobSessionFs implements SessionFsProvider {
 
   async rm(path: string, recursive: boolean, force: boolean): Promise<void> {
     const n = this.norm("rm", path, { recursive, force });
+    this.quota?.forget(this.namespace);
     const ptr = await this.pointer(n);
     if (ptr) {
       await this.store.delete(this.fileKey(n));
@@ -424,6 +525,12 @@ export class BlobSessionFs implements SessionFsProvider {
     const s = this.norm("rename", src, { dest });
     const d = normalizeSessionPath(dest);
     if (s === d) return;
+    // A rename into /workspace adds a file to the quota (out of it, removes one).
+    if (this.quota && isWorkspacePath(d) && !isWorkspacePath(s)) {
+      const ptr = await this.pointer(s);
+      if (ptr) await this.quota.check(this.store, this.namespace, Number(ptr.props.metadata?.size) || 0, 1);
+    }
+    this.quota?.forget(this.namespace);
     const ptr = await this.pointer(s);
     if (ptr) {
       await this.renameFile(s, d, ptr);
