@@ -18,12 +18,16 @@ import { runCopilotTurn } from "./copilot-session";
 import { extractTextTool } from "./extract-text";
 import { indexDocumentTool } from "./index-document";
 import { providerTools, type ProviderToolToggles } from "./provider-tools";
+import type { ContainerInputFile } from "./agent-code-interpreter";
 import {
   chatDocumentIndexDeps,
   threadWorkspace,
+  unindexedWorkspaceUploads,
   workspaceExtractDeps,
+  workspaceUploadEntries,
   workspaceUploadsNote,
 } from "./workspace-files";
+import { copilotOffersSearchDocuments, withSearchNextMessageNote, withUploadsSearchHint } from "./search-documents-hint";
 import { THREAD_BUSY_TEXT, ThreadBusyError } from "./thread-lease";
 import { TURN_LIMIT_TEXTS, TurnLimitError } from "./runtime-limits";
 import { canUsePersona, resolveSubAgents } from "./subagent-resolver";
@@ -45,6 +49,8 @@ export interface CopilotChatTurnArgs {
   toolset: Record<string, AiTool>;
   /** Requested built-in toggles: served by our own tools (provider-tools.ts). */
   builtInToggles?: ProviderToolToggles;
+  /** The run_code container's files: the thread's code interpreter files (agent-code-interpreter.ts). */
+  codeInterpreterFiles?: ContainerInputFile[];
   /** Browser-local datetime (get_current_time of persona sub-agents). */
   clientDateTime?: string;
 }
@@ -91,13 +97,40 @@ export async function runCopilotChatTurn(args: CopilotChatTurnArgs): Promise<Res
     // The thread's workspace: extract_text and index_document work on it, and the model is
     // told which uploads it holds (sent again only when the list changes).
     const { fs } = await threadWorkspace(userKey, threadId);
+    const uploadEntries = await workspaceUploadEntries(fs);
+    // search_documents: only with indexed chat documents, agent documents or
+    // uploads to index (copilotOffersSearchDocuments); it names the uploads
+    // that are not indexed when it finds nothing.
+    const { search_documents: searchDocuments, ...appTools } = withoutAiSdkSubAgentTools(args.toolset);
+    const offerSearch =
+      !!searchDocuments &&
+      copilotOffersSearchDocuments({
+        hasIndexedDocuments: (ctx.threadDocumentIds?.length ?? 0) > 0 || (ctx.personaDocumentIds?.length ?? 0) > 0,
+        uploadCount: uploadEntries.length,
+      });
+    const indexDocument = indexDocumentTool(chatDocumentIndexDeps({ fs, threadId, userKey }));
     const toolset: Record<string, AiTool> = {
       // Sub-agents are the runtime's own (`task`) on this path.
-      ...withoutAiSdkSubAgentTools(args.toolset),
+      ...appTools,
+      ...(offerSearch && searchDocuments
+        ? {
+            search_documents: withUploadsSearchHint(searchDocuments, () =>
+              unindexedWorkspaceUploads({ entries: uploadEntries, threadId, userKey }),
+            ),
+          }
+        : {}),
       extract_text: extractTextTool(workspaceExtractDeps({ fs, userKey })),
-      index_document: indexDocumentTool(chatDocumentIndexDeps({ fs, threadId, userKey })),
+      index_document: offerSearch ? indexDocument : withSearchNextMessageNote(indexDocument),
       // generate_image / web_search / run_code when their toggle is on.
-      ...(args.builtInToggles ? providerTools({ fs, threadId, userKey, toggles: args.builtInToggles }) : {}),
+      ...(args.builtInToggles
+        ? providerTools({
+            fs,
+            threadId,
+            userKey,
+            toggles: args.builtInToggles,
+            containerFiles: args.codeInterpreterFiles ?? [],
+          })
+        : {}),
     };
     // Sub-agents: `general` + the chat agent's sub-agents the user may open.
     // The agent's current list (loadThreadContext; stored list only for a
@@ -107,7 +140,7 @@ export async function runCopilotChatTurn(args: CopilotChatTurnArgs): Promise<Res
       parentPersonaId: ctx.thread.personaId,
       ctx: { user: ctx.user.id, threadId, threadDocumentIds: ctx.threadDocumentIds, clientDateTime: args.clientDateTime },
     });
-    const uploads = await workspaceUploadsNote(fs).catch(() => undefined);
+    const uploads = workspaceUploadsNote(uploadEntries);
     const contextNote = [ctx.documentHintText, uploads].filter(Boolean).join(NOTE_SEPARATOR) || undefined;
     handle = await runCopilotTurn({
       threadId,

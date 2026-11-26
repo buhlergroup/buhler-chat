@@ -32,13 +32,15 @@ import { sniffRasterImageType } from "@/features/common/safe-content-type";
 import { ToolUserError } from "../tools/tool-user-error";
 import type { WorkspaceEntry } from "./blob-session-fs";
 import { normalizeSessionPath, WORKSPACE_ROOT } from "./session-path";
-import { sanitizeUploadName, uniqueUploadName } from "./workspace-uploads";
+import { sanitizeUploadName, uniqueUploadName, UPLOADS_DIR } from "./workspace-uploads";
 
 export const IMAGES_DIR = "/workspace/images";
 export const OUTPUTS_DIR = "/workspace/outputs";
 /** stdout the model gets inline; the full text goes to a workspace file. */
 export const RUN_CODE_STDOUT_INLINE_BYTES = 12 * 1024;
 const MAX_INPUT_FILES = 20;
+/** Where load_skill unpacks a skill package in the container. */
+export const SKILLS_DIR_IN_CONTAINER = "/mnt/data/skills/";
 const MAX_INPUT_FILE_BYTES = 50 * 1024 * 1024;
 /** All input files of one run_code call together. */
 const MAX_INPUT_TOTAL_BYTES = 100 * 1024 * 1024;
@@ -113,6 +115,14 @@ export interface ProviderToolDeps {
   threadId: string;
   userKey: string;
   toggles: ProviderToolToggles;
+  /**
+   * The files the run_code container is created with (by OpenAI file id):
+   * the thread's code interpreter files, i.e. the agent's Code files and
+   * skill archives and the user's code interpreter uploads
+   * (agent-code-interpreter.ts). They are at /mnt/data/<file id>-<name>, as
+   * on the AI SDK path.
+   */
+  containerFiles?: ReadonlyArray<{ id: string; name: string; containerPath: string }>;
   /** Tests: fakes. Default: the production clients, loaded on first use. */
   clients?: ProviderClients;
 }
@@ -253,8 +263,13 @@ export interface RunCodeOutput {
   files: string[];
   /** blob:// references of the image outputs: the chat renders them (tool-part-view). */
   images: string[];
-  /** Where the input files were in the container. */
-  inputs: Array<{ workspacePath: string; containerPath: string }>;
+  /**
+   * Where the input files were in the container: workspace files (named and
+   * the chat's uploads) and the files the container was created with (name).
+   */
+  inputs: Array<{ containerPath: string; workspacePath?: string; name?: string }>;
+  /** Uploads left out because they did not fit the input caps. */
+  skipped?: string[];
   /** The model's closing note. */
   summary?: string;
 }
@@ -272,10 +287,18 @@ interface UploadedInput {
   uploadedPath: string;
 }
 
-function runCodeInput(args: { code?: string; task?: string }, inputs: UploadedInput[]): string {
+function runCodeInput(
+  args: { code?: string; task?: string },
+  inputs: UploadedInput[],
+  containerFiles: ReadonlyArray<{ name: string; containerPath: string }> = [],
+): string {
   const moves = inputs.filter((i) => i.uploadedPath !== i.containerPath);
-  const files = inputs.length
-    ? `Input files:${LF}${inputs.map((i) => `- ${i.containerPath} (from ${i.workspacePath})`).join(LF)}${LF}` +
+  const lines = [
+    ...inputs.map((i) => `- ${i.containerPath} (from ${i.workspacePath})`),
+    ...containerFiles.map((f) => `- ${f.containerPath} (${f.name})`),
+  ];
+  const files = lines.length
+    ? `Input files:${LF}${lines.join(LF)}${LF}` +
       (moves.length
         ? `Before anything else, copy the uploaded files to those paths: ${moves.map((i) => `${i.uploadedPath} -> ${i.containerPath}`).join("; ")}.${LF}`
         : "") +
@@ -289,10 +312,13 @@ function runCodeInput(args: { code?: string; task?: string }, inputs: UploadedIn
 
 function runCodeTool(deps: ProviderToolDeps, clients: () => Promise<ProviderClients>) {
   return tool({
+    // Static text (the same on every turn and thread): the paths are in the result.
     description:
-      "Run Python code in a sandbox (code interpreter) for data analysis, charts, file conversion or scripts (also skill scripts in the workspace). " +
+      `Run Python code in a sandbox (code interpreter) for data analysis, charts, file conversion or scripts (also skill scripts). The sandbox does not see ${WORKSPACE_ROOT}. ` +
       "Give `code` to run exactly, or `task` to have the code written for you. " +
-      "List the workspace files the code needs in `files`; they appear in /mnt/data/<name>. " +
+      `All files of this chat and of its agent (uploads in ${UPLOADS_DIR}/, agent files, skills) are attached automatically; ` +
+      "the result lists their paths in /mnt/data under `inputs`. " +
+      "List other workspace files the code needs in `files`; they appear in /mnt/data/<name>. " +
       `Files the code saves in /mnt/data come back to ${OUTPUTS_DIR}/; images among them are shown to the user automatically. ` +
       "Returns stdout and the output paths.",
     inputSchema: z
@@ -314,6 +340,7 @@ function runCodeTool(deps: ProviderToolDeps, clients: () => Promise<ProviderClie
       // Check the inputs first, by their size only (no download): a wrong path
       // or a file that is too big fails before a container is made.
       const wanted: string[] = [];
+      const sizes = new Map<string, number>();
       let totalBytes = 0;
       for (const raw of args.files ?? []) {
         let p: string;
@@ -336,38 +363,98 @@ function runCodeTool(deps: ProviderToolDeps, clients: () => Promise<ProviderClie
         totalBytes += size;
         if (totalBytes > MAX_INPUT_TOTAL_BYTES) throw new ToolUserError("run_code: the input files are too large together (over 100 MB).");
         wanted.push(p);
+        sizes.set(p, size);
+      }
+      // The chat's uploads go in on every run (the sandbox does not see the
+      // workspace), newest first, within the same caps; what does not fit is
+      // named in the result. Sizes come from the listing: nothing is
+      // downloaded before it is known to fit.
+      const skipped: string[] = [];
+      const uploads = await deps.fs.listEntries(UPLOADS_DIR).catch(() => [] as WorkspaceEntry[]);
+      const newestFirst = [...uploads].sort(
+        (a, b) => b.lastModified.getTime() - a.lastModified.getTime() || (a.path < b.path ? -1 : a.path > b.path ? 1 : 0),
+      );
+      const optional = new Set<string>();
+      for (const e of newestFirst) {
+        if (wanted.includes(e.path)) continue;
+        let size = e.size;
+        if (size === undefined) {
+          try {
+            const info = await deps.fs.stat(e.path);
+            if (!info.isFile) continue;
+            size = info.size;
+          } catch {
+            continue;
+          }
+        }
+        if (wanted.length >= MAX_INPUT_FILES || size > MAX_INPUT_FILE_BYTES || totalBytes + size > MAX_INPUT_TOTAL_BYTES) {
+          skipped.push(e.path);
+          continue;
+        }
+        totalBytes += size;
+        wanted.push(e.path);
+        sizes.set(e.path, size);
+        optional.add(e.path);
       }
 
       const containerId = await c.ensureContainer(abortSignal);
+      // A file of an earlier run that is still at its path with the same size
+      // is not uploaded again.
+      const present = new Map(
+        wanted.length > 0 ? (await c.listContainerFiles(containerId)).map((f) => [f.path, f.bytes]) : [],
+      );
       const uploaded: UploadedInput[] = [];
       const usedNames = new Set<string>();
       // One file in memory at a time: read, upload, let go.
       for (const workspacePath of wanted) {
+        const name = uniqueUploadName(sanitizeUploadName(workspacePath), usedNames, false);
+        usedNames.add(name);
+        const containerPath = `/mnt/data/${name}`;
+        if (present.get(containerPath) === sizes.get(workspacePath)) {
+          uploaded.push({ workspacePath, containerPath, uploadedPath: containerPath });
+          continue;
+        }
         let data: Buffer;
         try {
           // At most one byte over the limit, also when the file grew since the check.
           const read = await deps.fs.readFileRange(workspacePath, 0, MAX_INPUT_FILE_BYTES + 1);
           data = Buffer.from(read.content.buffer, read.content.byteOffset, read.content.byteLength);
         } catch {
+          if (optional.has(workspacePath)) continue;
           throw new ToolUserError(`run_code: file not found: ${workspacePath}`);
         }
-        if (data.length > MAX_INPUT_FILE_BYTES) throw new ToolUserError(`run_code: file too large (over 50 MB): ${workspacePath}`);
-        const name = uniqueUploadName(sanitizeUploadName(workspacePath), usedNames, false);
-        usedNames.add(name);
+        if (data.length > MAX_INPUT_FILE_BYTES) {
+          if (optional.has(workspacePath)) {
+            skipped.push(workspacePath);
+            continue;
+          }
+          throw new ToolUserError(`run_code: file too large (over 50 MB): ${workspacePath}`);
+        }
         const up = await c.uploadToContainer(containerId, name, data);
-        uploaded.push({ workspacePath, containerPath: `/mnt/data/${name}`, uploadedPath: up.path });
+        uploaded.push({ workspacePath, containerPath, uploadedPath: up.path });
       }
-      const inputs = uploaded.map(({ workspacePath, containerPath }) => ({ workspacePath, containerPath }));
+      const inputs: RunCodeOutput["inputs"] = [
+        ...uploaded.map(({ workspacePath, containerPath }) => ({ workspacePath, containerPath })),
+        // Created with the container (by file id): the thread's code interpreter files.
+        ...(deps.containerFiles ?? []).map((f) => ({ name: f.name, containerPath: f.containerPath })),
+      ];
       const before = new Set((await c.listContainerFiles(containerId)).map((f) => f.id));
 
-      const run = await c.runCode(containerId, { instructions: RUN_CODE_INSTRUCTIONS, input: runCodeInput(args, uploaded) }, abortSignal);
+      const run = await c.runCode(containerId, { instructions: RUN_CODE_INSTRUCTIONS, input: runCodeInput(args, uploaded, deps.containerFiles) }, abortSignal);
 
       // New files in the container come back to /workspace/outputs/, except
       // the copies of the inputs. "cfile_<id>" files are the interpreter's
       // own copies of displayed plots: kept only when the code saved no image.
       const isPlotCopy = (p: string) => /^cfile_[0-9a-f]+\.[a-z]+$/i.test(p.split("/").pop() ?? "");
       const created = (await c.listContainerFiles(containerId))
-        .filter((f) => !before.has(f.id) && f.path.startsWith("/mnt/data/") && !usedNames.has(f.path.split("/").pop() ?? ""))
+        .filter(
+          (f) =>
+            !before.has(f.id) &&
+            f.path.startsWith("/mnt/data/") &&
+            // An unpacked skill package (load_skill) is not an output.
+            !f.path.startsWith(SKILLS_DIR_IN_CONTAINER) &&
+            !usedNames.has(f.path.split("/").pop() ?? ""),
+        )
         .sort((a, b) => Number(isPlotCopy(a.path)) - Number(isPlotCopy(b.path)))
         .slice(0, MAX_OUTPUT_FILES);
       const files: string[] = [];
@@ -417,6 +504,7 @@ function runCodeTool(deps: ProviderToolDeps, clients: () => Promise<ProviderClie
         files,
         images,
         inputs,
+        ...(skipped.length ? { skipped } : {}),
         ...(run.text.trim() ? { summary: run.text.trim() } : {}),
       };
     },
@@ -426,6 +514,10 @@ function runCodeTool(deps: ProviderToolDeps, clients: () => Promise<ProviderClie
         stdout: output.stdout,
         ...(output.stdoutPath ? { stdoutPath: output.stdoutPath } : {}),
         files: output.files,
+        inputs: output.inputs.map((i) => (i.workspacePath ? `${i.containerPath} (from ${i.workspacePath})` : i.containerPath)),
+        ...(output.skipped?.length
+          ? { skipped: `Not in the sandbox (over the input limit of ${MAX_INPUT_FILES} files or 100 MB): ${output.skipped.join(", ")}. Name the one you need in \`files\`.` }
+          : {}),
         ...(output.images.length ? { note: "Images among the files are shown to the user in the chat. Do not embed them again." } : {}),
         ...(output.summary ? { summary: output.summary } : {}),
       }),
