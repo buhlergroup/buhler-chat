@@ -84,6 +84,13 @@ const PARSED_FUNCTION = {
 };
 
 // ─── tests ───────────────────────────────────────────────────────────────────
+describe("extensionTool – schema", () => {
+  it("sends the author schema without strict decoding, so the model may omit optional fields", () => {
+    const t = extensionTool(makeFunctionDef(), PARSED_FUNCTION, { extension: makeExtension(), headerSecrets: {} });
+    expect((t as { strict?: boolean }).strict).toBe(false);
+  });
+});
+
 describe("extensionTool – execute", () => {
   beforeEach(() => {
     vi.clearAllMocks();
