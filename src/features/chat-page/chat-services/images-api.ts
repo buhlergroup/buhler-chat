@@ -44,7 +44,8 @@ export const ImageAPIEntry = async (request: Request): Promise<Response> => {
   // may not see the thread gets the same 404 as for a missing thread, so the
   // response does not tell whether the thread exists. Who may see a thread:
   // see image-access.ts.
-  const access = await threadImageAccess(threadId, await userSession());
+  const user = await userSession();
+  const access = await threadImageAccess(threadId, user);
   if (access === "unauthenticated") {
     return textResponse("Unauthorized", 401);
   }
@@ -55,6 +56,19 @@ export const ImageAPIEntry = async (request: Request): Promise<Response> => {
   const imageData = await GetImageFromStore(threadId, imgName);
 
   if (imageData.status !== "OK") {
+    // Copilot path: a file run_code / generate_image put into the caller's
+    // own thread workspace, linked in the old /api/images form, goes to the
+    // workspace download route (also repairs links in existing chats).
+    if (imageData.status === "NOT_FOUND" && user) {
+      const { workspaceOutputLocation } = await import("./copilot-runtime/workspace-output-redirect");
+      const location = await workspaceOutputLocation(threadId, imgName, user);
+      if (location) {
+        return new Response(null, {
+          status: 307,
+          headers: { ...SECURITY_HEADERS, location, "cache-control": "private, no-store" },
+        });
+      }
+    }
     return textResponse(imageData.errors[0].message, 404);
   }
 

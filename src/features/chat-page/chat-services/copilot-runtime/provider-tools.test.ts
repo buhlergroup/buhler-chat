@@ -1,7 +1,7 @@
 import { describe, it, expect, vi } from "vitest";
 import { BlobSessionFs } from "./blob-session-fs";
 import { FakeBlobStore } from "./fake-blob-store.test-helper";
-import { runAppTool, type ToolCallRecord, type TurnToolBinding } from "./tool-adapter";
+import { runAppTool, TOOL_RESULTS_DIR, type ToolCallRecord, type TurnToolBinding } from "./tool-adapter";
 import {
   OUTPUTS_DIR,
   RUN_CODE_STDOUT_INLINE_BYTES,
@@ -182,6 +182,36 @@ describe("run_code", () => {
     expect(res.textResultForLlm).toContain(`${OUTPUTS_DIR}/chart.png`);
   });
 
+  // chat-page.unit.provider-tools.run-code-downloads
+  it("returns a download URL of the workspace route for every output file, and says how to link it", async () => {
+    const t = setup();
+    await t.fs.writeFileBytes("/workspace/uploads/data.csv", Buffer.from("x,y\n1,2\n"));
+    const res = await t.call("run_code", { task: "plot it" });
+    const out = t.records[0].output as { downloads: Array<{ name: string; path: string; url: string }> };
+    expect(out.downloads).toEqual([
+      { name: "chart.png", path: `${OUTPUTS_DIR}/chart.png`, url: "/api/workspace/file?t=thread-1&p=outputs%2Fchart.png" },
+      { name: "summary.csv", path: `${OUTPUTS_DIR}/summary.csv`, url: "/api/workspace/file?t=thread-1&p=outputs%2Fsummary.csv" },
+    ]);
+    // The model gets the URLs ...
+    expect(res.textResultForLlm).toContain("/api/workspace/file?t=thread-1&p=outputs%2Fsummary.csv");
+    // ... and a static description that says to use them.
+    const description = String((t.tools.run_code as { description?: string }).description);
+    expect(description).toContain("To give the user a file, link it with the url from downloads, e.g. [name](url).");
+    expect(description).toContain("Never use /api/images or sandbox: links for these files.");
+    expect(description).not.toContain("thread-1");
+  });
+
+  it("encodes the thread id and the file name in the download URL", async () => {
+    const t = setup(ALL, { runCode: vi.fn(async () => ({ logs: "", text: "", code: [], images: [] })) });
+    (t.clients.listContainerFiles as ReturnType<typeof vi.fn>)
+      .mockImplementationOnce(async () => [])
+      .mockImplementationOnce(async () => [{ id: "d1", path: "/mnt/data/Q3 report&notes.docx", bytes: 3 }]);
+    (t.clients.downloadContainerFile as ReturnType<typeof vi.fn>).mockImplementationOnce(async () => Buffer.from("doc"));
+    await t.call("run_code", { task: "write" });
+    const out = t.records[0].output as { downloads: Array<{ url: string }> };
+    expect(out.downloads[0].url).toBe("/api/workspace/file?t=thread-1&p=outputs%2FQ3%20report%26notes.docx");
+  });
+
   it("runs given code as is", async () => {
     const t = setup();
     await t.call("run_code", { code: "print(1)" });
@@ -228,12 +258,14 @@ describe("run_code", () => {
     expect(out.images).toHaveLength(1);
   });
 
-  it("caps stdout and writes the full text to the workspace", async () => {
+  it("caps stdout and writes the full text next to the large tool results, not to the outputs", async () => {
     const long = "x".repeat(RUN_CODE_STDOUT_INLINE_BYTES + 500);
     const t = setup(ALL, { runCode: vi.fn(async () => ({ logs: long, text: "", code: [], images: [] })) });
     await t.call("run_code", { code: "print('x'*99999)" }, "call/7");
-    const out = t.records[0].output as { stdout: string; stdoutPath: string };
-    expect(out.stdoutPath).toBe(`${OUTPUTS_DIR}/stdout-call_7.txt`);
+    const out = t.records[0].output as { stdout: string; stdoutPath: string; downloads: unknown[] };
+    expect(out.stdoutPath).toBe(`${TOOL_RESULTS_DIR}/run_code-stdout-call_7.txt`);
+    expect(out.downloads).toEqual([]);
+    expect(await t.fs.listEntries(OUTPUTS_DIR)).toEqual([]);
     expect(Buffer.from(await t.fs.readFileBytes(out.stdoutPath)).toString()).toBe(long);
     expect(Buffer.byteLength(out.stdout)).toBeLessThan(RUN_CODE_STDOUT_INLINE_BYTES + 200);
   });
@@ -383,6 +415,73 @@ describe("run_code: the thread's code interpreter files and uploads", () => {
     });
     await t.call("run_code", { code: "unpack" });
     expect((t.records[0].output as { files: string[] }).files).toEqual([]);
+  });
+});
+
+describe("run_code: only the files the code created or changed come back", () => {
+  // chat-page.unit.provider-tools.run-code-outputs-only
+  it("a run with a skill archive and inputs returns only the new deck and report", async () => {
+    const skillZip = {
+      id: "assistant-skill1",
+      name: "skill-deck.zip",
+      containerPath: "/mnt/data/assistant-skill1-skill-deck.zip",
+      entries: [
+        { name: "SKILL.md", size: 40 },
+        { name: "build_deck.py", size: 120 },
+        { name: "recipes_process.py", size: 80 },
+        { name: "recipes_relations.py", size: 90 },
+      ],
+    };
+    const codeFile = { id: "assistant-code1", name: "Line Overview.xlsx", containerPath: "/mnt/data/assistant-code1-Line Overview.xlsx" };
+    const bytes = (n: number) => Buffer.alloc(n, 1);
+    const t = setup(ALL, {}, { containerFiles: [skillZip, codeFile] });
+    // The container was created with the archive and the Code file.
+    t.containerFiles.push(
+      { id: "c1", path: skillZip.containerPath, bytes: 500, data: bytes(500) },
+      { id: "c2", path: codeFile.containerPath, bytes: 300, data: bytes(300) },
+    );
+    await t.fs.writeFileBytes("/workspace/uploads/recipes.csv", bytes(64));
+    (t.clients.runCode as ReturnType<typeof vi.fn>).mockImplementation(async () => {
+      const add = (path: string, n: number) => t.containerFiles.push({ id: `n${t.containerFiles.length}`, path, bytes: n, data: bytes(n) });
+      // Unpacked skill (excluded as before), skill scripts copied next to the
+      // outputs, Python caches, copies of the inputs ...
+      add("/mnt/data/skills/deck/scripts/build_deck.py", 120);
+      add("/mnt/data/build_deck.py", 120);
+      add("/mnt/data/recipes_process.py", 80);
+      add("/mnt/data/work/recipes_relations.py", 90);
+      add("/mnt/data/__pycache__/build_deck.cpython-311.pyc", 700);
+      add("/mnt/data/recipes_process.cpython-311.pyc", 600);
+      add("/mnt/data/Line Overview.xlsx", 300);
+      add("/mnt/data/out/recipes.csv", 64);
+      // ... and what the code made.
+      add("/mnt/data/deck.pptx", 2048);
+      add("/mnt/data/recipes_report.docx", 1024);
+      add("/mnt/data/relations_report.xlsx", 512);
+      return { logs: "done\n", text: "", code: [], images: [] };
+    });
+    await t.call("run_code", { task: "build the deck" });
+    const out = t.records[0].output as { files: string[]; downloads: Array<{ name: string }>; stdoutPath?: string };
+    expect(out.files).toEqual([
+      `${OUTPUTS_DIR}/deck.pptx`,
+      `${OUTPUTS_DIR}/recipes_report.docx`,
+      `${OUTPUTS_DIR}/relations_report.xlsx`,
+    ]);
+    expect(out.downloads.map((d) => d.name)).toEqual(["deck.pptx", "recipes_report.docx", "relations_report.xlsx"]);
+    expect((await t.fs.listEntries(OUTPUTS_DIR)).map((e) => e.path).sort()).toEqual(out.files.slice().sort());
+    // stdout was not cut: no stdout file anywhere.
+    expect(out.stdoutPath).toBeUndefined();
+    expect(await t.fs.listEntries(TOOL_RESULTS_DIR)).toEqual([]);
+  });
+
+  it("returns an input the code changed (same name, other size)", async () => {
+    const t = setup();
+    await t.fs.writeFileBytes("/workspace/uploads/recipes.csv", Buffer.alloc(64, 1));
+    (t.clients.runCode as ReturnType<typeof vi.fn>).mockImplementation(async () => {
+      t.containerFiles.push({ id: "chg", path: "/mnt/data/out/recipes.csv", bytes: 70, data: Buffer.alloc(70, 2) });
+      return { logs: "", text: "", code: [], images: [] };
+    });
+    await t.call("run_code", { task: "fix the csv" });
+    expect((t.records[0].output as { files: string[] }).files).toEqual([`${OUTPUTS_DIR}/recipes.csv`]);
   });
 });
 

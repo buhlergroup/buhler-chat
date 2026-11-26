@@ -35,7 +35,7 @@ export interface CopilotCodeInterpreterInput {
   /** The chat runs an agent (thread.personaId). */
   isAgentChat: boolean;
   /** The agent's skills the user may use. */
-  skills: ReadonlyArray<Pick<PersonaSkillModel, "name" | "openAiFileId">>;
+  skills: ReadonlyArray<Pick<PersonaSkillModel, "name" | "openAiFileId"> & Partial<Pick<PersonaSkillModel, "files">>>;
   /** The thread's code interpreter files (attachedFiles without the search-indexed ones). */
   attachedFiles: ReadonlyArray<{ id: string; name: string; source?: string }>;
   /** The request's code interpreter file ids the server can attribute. */
@@ -51,6 +51,8 @@ export interface ContainerInputFile {
   name: string;
   /** Where the code finds it: /mnt/data/<file id>-<name>. */
   containerPath: string;
+  /** A skill archive: its files (base name, size), so run_code does not return copies of them as outputs. */
+  entries?: Array<{ name: string; size: number }>;
 }
 
 export interface CopilotCodeInterpreterPlan {
@@ -83,9 +85,18 @@ export function copilotCodeInterpreterPlan(input: CopilotCodeInterpreterInput): 
 
   const nameById = new Map(input.attachedFiles.map((f) => [f.id, f.name]));
   const skillNameByFileId = new Map(input.skills.flatMap((s) => (s.openAiFileId ? [[s.openAiFileId, skillArchiveFileName(s.name)]] : [])));
-  const files = resolved.fileIds.flatMap((id) => {
+  const entriesByFileId = new Map(
+    input.skills.flatMap((s) =>
+      s.openAiFileId && s.files?.length
+        ? [[s.openAiFileId, s.files.map((f) => ({ name: f.path.split("/").pop() ?? f.path, size: f.size }))] as const]
+        : [],
+    ),
+  );
+  const files = resolved.fileIds.flatMap((id): ContainerInputFile[] => {
     const name = skillNameByFileId.get(id) ?? nameById.get(id);
-    return name ? [{ id, name, containerPath: codeInterpreterPathOf({ id, name }) }] : [];
+    if (!name) return [];
+    const entries = entriesByFileId.get(id);
+    return [{ id, name, containerPath: codeInterpreterPathOf({ id, name }), ...(entries ? { entries } : {}) }];
   });
   return { enabled, files, skillsInCodeInterpreter: resolved.skillsInCodeInterpreter };
 }

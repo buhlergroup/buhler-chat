@@ -13,8 +13,10 @@
  *                   provider's web search tool; answer text plus the source
  *                   URLs (url_citation annotations).
  *   run_code        one Responses call with code_interpreter on a container:
- *                   named workspace files go in, new files come back to
- *                   /workspace/outputs/, stdout is returned (capped).
+ *                   named workspace files go in, the files the code created
+ *                   or changed come back to /workspace/outputs/ (never the
+ *                   inputs, skill files or Python caches), each with its
+ *                   download URL; stdout is returned (capped).
  *
  * Each tool is registered only when its chat toggle (or the agent's default
  * tool) is on. They are AI SDK tools, so tool-adapter.ts gives them schema
@@ -32,6 +34,8 @@ import { sniffRasterImageType } from "@/features/common/safe-content-type";
 import { ToolUserError } from "../tools/tool-user-error";
 import type { WorkspaceEntry } from "./blob-session-fs";
 import { normalizeSessionPath, WORKSPACE_ROOT } from "./session-path";
+import { TOOL_RESULTS_DIR } from "./tool-adapter";
+import { workspaceFileUrl } from "./workspace-file-url";
 import { sanitizeUploadName, uniqueUploadName, UPLOADS_DIR } from "./workspace-uploads";
 
 export const IMAGES_DIR = "/workspace/images";
@@ -102,6 +106,18 @@ export interface ProviderClients {
   persistImage(dataUrl: string): Promise<string>;
 }
 
+/** A file the run_code container is created with. */
+export interface ContainerInput {
+  id: string;
+  name: string;
+  containerPath: string;
+  /**
+   * The files inside it when it is an archive (a skill package): base name
+   * and size. A copy of one of them is an input, not an output.
+   */
+  entries?: ReadonlyArray<{ name: string; size: number }>;
+}
+
 export interface ProviderToolDeps {
   /** The thread's workspace (BlobSessionFs). */
   fs: {
@@ -122,7 +138,7 @@ export interface ProviderToolDeps {
    * (agent-code-interpreter.ts). They are at /mnt/data/<file id>-<name>, as
    * on the AI SDK path.
    */
-  containerFiles?: ReadonlyArray<{ id: string; name: string; containerPath: string }>;
+  containerFiles?: ReadonlyArray<ContainerInput>;
   /** Tests: fakes. Default: the production clients, loaded on first use. */
   clients?: ProviderClients;
 }
@@ -154,6 +170,11 @@ export function resolveResponsesDeployment(
 }
 
 const extOf = (name: string) => name.split(".").pop()?.toLowerCase() ?? "";
+const baseName = (path: string) => path.split("/").pop() ?? "";
+/** Base name + size: what a copy of a file looks like in the container listing. */
+const copyKey = (name: string, size: number) => `${size}:${baseName(name)}`;
+/** Python byte code and its cache folders: never an output. */
+const isPythonCache = (path: string) => path.split("/").includes("__pycache__") || /\.py[co]$/i.test(path);
 
 /** A file name in `dir` that is not taken yet ("a.png", "a (2).png", ...). */
 async function freeName(fs: ProviderToolDeps["fs"], dir: string, raw: string): Promise<string> {
@@ -259,8 +280,10 @@ export interface RunCodeOutput {
   stdout: string;
   /** Set when stdout was longer than the inline cap: the full text is here. */
   stdoutPath?: string;
-  /** New files the code wrote, copied into the workspace. */
+  /** Files the code created or changed, copied into the workspace. */
   files: string[];
+  /** The same files with their download URL (GET /api/workspace/file). */
+  downloads: Array<{ name: string; path: string; url: string }>;
   /** blob:// references of the image outputs: the chat renders them (tool-part-view). */
   images: string[];
   /**
@@ -319,8 +342,10 @@ function runCodeTool(deps: ProviderToolDeps, clients: () => Promise<ProviderClie
       `All files of this chat and of its agent (uploads in ${UPLOADS_DIR}/, agent files, skills) are attached automatically; ` +
       "the result lists their paths in /mnt/data under `inputs`. " +
       "List other workspace files the code needs in `files`; they appear in /mnt/data/<name>. " +
-      `Files the code saves in /mnt/data come back to ${OUTPUTS_DIR}/; images among them are shown to the user automatically. ` +
-      "Returns stdout and the output paths.",
+      `Files the code creates in /mnt/data come back to ${OUTPUTS_DIR}/; images among them are shown to the user automatically. ` +
+      "Returns stdout, the output paths and `downloads`. " +
+      "To give the user a file, link it with the url from downloads, e.g. [name](url). " +
+      "Never use /api/images or sandbox: links for these files.",
     inputSchema: z
       .object({
         code: z.string().max(100_000).optional().describe("Python code to run as given."),
@@ -438,13 +463,33 @@ function runCodeTool(deps: ProviderToolDeps, clients: () => Promise<ProviderClie
         // Created with the container (by file id): the thread's code interpreter files.
         ...(deps.containerFiles ?? []).map((f) => ({ name: f.name, containerPath: f.containerPath })),
       ];
-      const before = new Set((await c.listContainerFiles(containerId)).map((f) => f.id));
+      const beforeList = await c.listContainerFiles(containerId);
+      const before = new Set(beforeList.map((f) => f.id));
+      // What a copy of an input looks like (base name + size): the workspace
+      // inputs, the files the container was created with and the files in
+      // their archives (skill packages), and what is unpacked under
+      // /mnt/data/skills/. A new file that matches one is not an output.
+      const sizeAt = new Map(beforeList.flatMap((f) => (f.bytes === undefined ? [] : [[f.path, f.bytes] as const])));
+      const inputCopies = new Set<string>();
+      for (const i of uploaded) {
+        const size = sizes.get(i.workspacePath);
+        if (size !== undefined) inputCopies.add(copyKey(i.containerPath, size));
+      }
+      for (const f of deps.containerFiles ?? []) {
+        const size = sizeAt.get(f.containerPath);
+        if (size !== undefined) inputCopies.add(copyKey(f.name, size)).add(copyKey(f.containerPath, size));
+        for (const e of f.entries ?? []) inputCopies.add(copyKey(e.name, e.size));
+      }
+      for (const [path, size] of sizeAt) if (path.startsWith(SKILLS_DIR_IN_CONTAINER)) inputCopies.add(copyKey(path, size));
+      const isInputCopy = (path: string, size: number | undefined) => size !== undefined && inputCopies.has(copyKey(path, size));
 
       const run = await c.runCode(containerId, { instructions: RUN_CODE_INSTRUCTIONS, input: runCodeInput(args, uploaded, deps.containerFiles) }, abortSignal);
 
-      // New files in the container come back to /workspace/outputs/, except
-      // the copies of the inputs. "cfile_<id>" files are the interpreter's
-      // own copies of displayed plots: kept only when the code saved no image.
+      // Files the code created or changed come back to /workspace/outputs/,
+      // except the inputs and their copies (same base name and size; also
+      // skill scripts copied out of the skill folder) and Python caches.
+      // "cfile_<id>" files are the interpreter's own copies of displayed
+      // plots: kept only when the code saved no image.
       const isPlotCopy = (p: string) => /^cfile_[0-9a-f]+\.[a-z]+$/i.test(p.split("/").pop() ?? "");
       const created = (await c.listContainerFiles(containerId))
         .filter(
@@ -453,7 +498,8 @@ function runCodeTool(deps: ProviderToolDeps, clients: () => Promise<ProviderClie
             f.path.startsWith("/mnt/data/") &&
             // An unpacked skill package (load_skill) is not an output.
             !f.path.startsWith(SKILLS_DIR_IN_CONTAINER) &&
-            !usedNames.has(f.path.split("/").pop() ?? ""),
+            !isPythonCache(f.path) &&
+            !isInputCopy(f.path, f.bytes),
         )
         .sort((a, b) => Number(isPlotCopy(a.path)) - Number(isPlotCopy(b.path)))
         .slice(0, MAX_OUTPUT_FILES);
@@ -466,6 +512,7 @@ function runCodeTool(deps: ProviderToolDeps, clients: () => Promise<ProviderClie
         if (plotCopy && images.length > 0) continue;
         const data = await c.downloadContainerFile(containerId, f.id);
         if (data.length > MAX_OUTPUT_FILE_BYTES) continue;
+        if (f.bytes === undefined && isInputCopy(f.path, data.length)) continue;
         const name = plotCopy ? `figure-${++figures}.${extOf(f.path)}` : (f.path.split("/").pop() ?? "output");
         const path = `${OUTPUTS_DIR}/${await freeName(deps.fs, OUTPUTS_DIR, name)}`;
         await deps.fs.writeFileBytes(path, data);
@@ -490,18 +537,22 @@ function runCodeTool(deps: ProviderToolDeps, clients: () => Promise<ProviderClie
         }
       }
 
+      // Only a cut stdout is written, next to the other large tool results:
+      // it is the full text, not an output of the code.
       let stdout = run.logs;
       let stdoutPath: string | undefined;
       if (Buffer.byteLength(stdout, "utf8") > RUN_CODE_STDOUT_INLINE_BYTES) {
         const id = String(toolCallId ?? Date.now()).replace(/[^A-Za-z0-9._-]/g, "_").slice(0, 60);
-        stdoutPath = `${OUTPUTS_DIR}/${await freeName(deps.fs, OUTPUTS_DIR, `stdout-${id}.txt`)}`;
+        stdoutPath = `${TOOL_RESULTS_DIR}/${await freeName(deps.fs, TOOL_RESULTS_DIR, `run_code-stdout-${id}.txt`)}`;
         await deps.fs.writeFileBytes(stdoutPath, Buffer.from(stdout, "utf8"));
         stdout = `${utf8Head(stdout, RUN_CODE_STDOUT_INLINE_BYTES)}${LF}[... full output in ${stdoutPath}]`;
       }
+      const downloads = files.map((path) => ({ name: baseName(path), path, url: workspaceFileUrl(deps.threadId, path) }));
       return {
         stdout,
         ...(stdoutPath ? { stdoutPath } : {}),
         files,
+        downloads,
         images,
         inputs,
         ...(skipped.length ? { skipped } : {}),
@@ -514,6 +565,7 @@ function runCodeTool(deps: ProviderToolDeps, clients: () => Promise<ProviderClie
         stdout: output.stdout,
         ...(output.stdoutPath ? { stdoutPath: output.stdoutPath } : {}),
         files: output.files,
+        downloads: output.downloads,
         inputs: output.inputs.map((i) => (i.workspacePath ? `${i.containerPath} (from ${i.workspacePath})` : i.containerPath)),
         ...(output.skipped?.length
           ? { skipped: `Not in the sandbox (over the input limit of ${MAX_INPUT_FILES} files or 100 MB): ${output.skipped.join(", ")}. Name the one you need in \`files\`.` }
