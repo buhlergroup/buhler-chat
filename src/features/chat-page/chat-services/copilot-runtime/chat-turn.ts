@@ -15,9 +15,15 @@ import { computeRequestUsage, type ChatMessageMetadata } from "../chat-api/usage
 import { startPublisher, unregisterPublisher } from "../chat-api/stream-publisher";
 import { UpdateChatTitle } from "../chat-thread-service";
 import { runCopilotTurn } from "./copilot-session";
+import { extractTextTool } from "./extract-text";
 import { indexDocumentTool } from "./index-document";
 import { providerTools, type ProviderToolToggles } from "./provider-tools";
-import { chatDocumentIndexDeps, threadWorkspace, workspaceUploadsNote } from "./workspace-files";
+import {
+  chatDocumentIndexDeps,
+  threadWorkspace,
+  workspaceExtractDeps,
+  workspaceUploadsNote,
+} from "./workspace-files";
 import { ThreadBusyError } from "./thread-lease";
 import { TurnLimitError } from "./runtime-limits";
 import { canUsePersona, resolveSubAgents } from "./subagent-resolver";
@@ -82,12 +88,13 @@ export async function runCopilotChatTurn(args: CopilotChatTurnArgs): Promise<Res
   let handle: Awaited<ReturnType<typeof runCopilotTurn>>;
   try {
     const userKey = await userHashedId();
-    // The thread's workspace: index_document works on it, and the model is
+    // The thread's workspace: extract_text and index_document work on it, and the model is
     // told which uploads it holds (sent again only when the list changes).
     const { fs } = await threadWorkspace(userKey, threadId);
     const toolset: Record<string, AiTool> = {
       // Sub-agents are the runtime's own (`task`) on this path.
       ...withoutAiSdkSubAgentTools(args.toolset),
+      extract_text: extractTextTool(workspaceExtractDeps({ fs, userKey })),
       index_document: indexDocumentTool(chatDocumentIndexDeps({ fs, threadId, userKey })),
       // generate_image / web_search / run_code when their toggle is on.
       ...(args.builtInToggles ? providerTools({ fs, threadId, userKey, toggles: args.builtInToggles }) : {}),

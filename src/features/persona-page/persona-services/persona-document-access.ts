@@ -5,14 +5,16 @@ import "server-only";
 import { SqlQuerySpec } from "@azure/cosmos";
 import { userHashedId } from "@/features/auth-page/helpers";
 import { HistoryContainer } from "@/features/common/services/cosmos";
+import { ServerActionResponse } from "@/features/common/server-action-response";
 import { isValidId } from "@/features/common/odata-filter";
 import {
   PERSONA_ATTRIBUTE,
   PERSONA_CI_DOCUMENT_ATTRIBUTE,
   PERSONA_DOCUMENT_ATTRIBUTE,
+  PersonaCIDocument,
   PersonaModel,
 } from "./models";
-import { FindPersonaByID } from "./persona-service";
+import { findPersonaForCurrentUser } from "./persona-lookup";
 
 type PersonaDocumentType =
   | typeof PERSONA_DOCUMENT_ATTRIBUTE
@@ -48,8 +50,9 @@ const openPersona = (
     return cached;
   }
 
-  // FindPersonaByID applies the rule for who may open an agent.
-  const result = FindPersonaByID(personaId).then((response) =>
+  // findPersonaForCurrentUser applies the rule for who may open an agent and
+  // returns the whole row (the file lists).
+  const result = findPersonaForCurrentUser(personaId).then((response) =>
     response.status === "OK" ? response.response : undefined
   );
 
@@ -149,4 +152,39 @@ export const FindAccessiblePersonaDocument = async <
   }
 
   return undefined;
+};
+
+/**
+ * The Code file rows with these ids that the current user may use
+ * (FindAccessiblePersonaDocument); the others are left out. Whole rows (file
+ * name, drive and item id): for server code only, the chat start downloads
+ * the files with them. Never sent to the browser.
+ */
+export const personaCodeDocumentsByIds = async (
+  ids: ReadonlyArray<string>
+): Promise<ServerActionResponse<PersonaCIDocument[]>> => {
+  if (!Array.isArray(ids) || ids.length === 0) {
+    return { status: "OK", response: [] };
+  }
+  try {
+    const cache: PersonaAccessCache = new Map();
+    const rows = await Promise.all(
+      ids.map((id) =>
+        FindAccessiblePersonaDocument<PersonaCIDocument>(
+          id,
+          PERSONA_CI_DOCUMENT_ATTRIBUTE,
+          cache
+        ).catch(() => undefined)
+      )
+    );
+    return {
+      status: "OK",
+      response: rows.filter((row): row is PersonaCIDocument => row !== undefined),
+    };
+  } catch (error) {
+    return {
+      status: "ERROR",
+      errors: [{ message: `Error fetching CI documents: ${error}` }],
+    };
+  }
 };

@@ -20,7 +20,9 @@ export type CopilotSystemMessageMode = "replace" | "customize";
 export const WORKSPACE_NOTE =
   `\n\n## Files\nThis chat has a private file workspace at ${WORKSPACE_ROOT}. ` +
   "Use the file tools (view, create, edit, glob, grep) to keep notes or work files there. " +
-  "Only paths inside the workspace exist; the files stay with this chat.";
+  "Only paths inside the workspace exist; the files stay with this chat. " +
+  "Uploads are stored as they are: call extract_text to read a PDF or Office file (with pages for a large one); " +
+  "call index_document only when search over a large document helps.";
 
 export function copilotSystemMessageMode(): CopilotSystemMessageMode {
   return process.env.COPILOT_SYSTEM_MESSAGE_MODE === "customize" ? "customize" : "replace";

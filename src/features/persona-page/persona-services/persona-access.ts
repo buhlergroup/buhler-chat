@@ -4,8 +4,8 @@ import "server-only";
  * Who may open an agent (persona): the one server-side rule.
  *
  * Every path that hands a persona to a user, or starts or continues a chat
- * with one, asks `canOpenPersona` (FindPersonaByID, FindAllPersonaForCurrentUser,
- * CreatePersonaChat, call_sub_agent through FindPersonaByID, and /api/chat for
+ * with one, asks `canOpenPersona` (findPersonaForCurrentUser and FindPersonaByID, FindAllPersonaForCurrentUser,
+ * CreatePersonaChat, call_sub_agent through findPersonaForCurrentUser, and /api/chat for
  * threads that were started from an agent).
  *
  * Access model, in order:
@@ -112,6 +112,34 @@ export const canEditPersona = (
   viewer: PersonaViewer,
   persona: Pick<PersonaAccessFields, "userId">
 ): boolean => viewer.isAdmin || persona.userId === viewer.userId;
+
+/**
+ * Fields of a persona row that only its editors (owner, admin) get: the ids
+ * of its Search and Code file rows and of its sub-agents. The server keeps
+ * using them (chat start, sub-agent calls, file access rule); a user who can
+ * only open the agent does not need them, and the ids would tell more about
+ * the agent than its card does.
+ */
+export const PERSONA_EDITOR_ONLY_FIELDS = [
+  "personaDocumentIds",
+  "codeInterpreterDocumentIds",
+  "subAgentIds",
+] as const;
+
+/**
+ * The persona as it may be sent to this viewer: the whole row for an editor
+ * (canEditPersona), else the row without PERSONA_EDITOR_ONLY_FIELDS. Every
+ * server action or route that returns a persona row uses this.
+ */
+export const personaForViewer = <T extends Pick<PersonaModel, "userId">>(
+  viewer: PersonaViewer,
+  persona: T
+): T => {
+  if (canEditPersona(viewer, persona)) return persona;
+  const copy: Record<string, unknown> = { ...persona };
+  for (const field of PERSONA_EDITOR_ONLY_FIELDS) delete copy[field];
+  return copy as T;
+};
 
 export const PERSONA_EDIT_NOT_ALLOWED =
   "You are not allowed to change this agent. Only its owner or an admin can change it.";

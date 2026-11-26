@@ -66,4 +66,5 @@ export const SERVICE_KEYS = {
   aiProvider: "ai-sdk-provider",
   foundryProvider: "ai-sdk-foundry-provider",
   anthropicProvider: "ai-sdk-anthropic-provider",
+  contentBlobs: "content-blob-backend",
 } as const;

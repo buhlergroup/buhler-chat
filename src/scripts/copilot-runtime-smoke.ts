@@ -456,6 +456,9 @@ compactions in thread F: ${JSON.stringify(session.liveSessionCompactions(threadF
   if (section("U")) {
     const files = await import("@/features/chat-page/chat-services/copilot-runtime/workspace-files");
     const { indexDocumentTool } = await import("@/features/chat-page/chat-services/copilot-runtime/index-document");
+    const { extractTextTool, extractWorkspaceText } = await import(
+      "@/features/chat-page/chat-services/copilot-runtime/extract-text"
+    );
     const { DeleteDocumentsOfChatThread } = await import("@/features/chat-page/chat-services/azure-ai-search/azure-ai-search");
     const { HistoryContainer } = await import("@/features/common/services/cosmos");
     const sharp = (await import("sharp")).default;
@@ -477,8 +480,15 @@ compactions in thread F: ${JSON.stringify(session.liveSessionCompactions(threadF
     const upPng = await files.uploadToThreadWorkspace(user, threadU, "shape.png", png);
     console.log(`\n=== U uploads (${Date.now() - t0} ms): ${JSON.stringify([upPdf, upPdf2, upPng])}`);
     const { fs, store: wsStore } = await files.threadWorkspace(user, threadU);
-    console.log(`extracted text: ${JSON.stringify((await fs.readFile(upPdf.markdownPath!)).slice(0, 200))}`);
-    const extra = { index_document: indexDocumentTool(files.chatDocumentIndexDeps({ fs, threadId: threadU, userKey: user })) };
+    const extracted = await extractWorkspaceText(files.workspaceExtractDeps({ fs, userKey: user }), upPdf.path);
+    console.log(`extract_text: ${JSON.stringify(extracted)}`);
+    if (extracted.status === "extracted") {
+      console.log(`extracted text: ${JSON.stringify((await fs.readFile(extracted.path)).slice(0, 200))}`);
+    }
+    const extra = {
+      extract_text: extractTextTool(files.workspaceExtractDeps({ fs, userKey: user })),
+      index_document: indexDocumentTool(files.chatDocumentIndexDeps({ fs, threadId: threadU, userKey: user })),
+    };
     const note = await files.workspaceUploadsNote(fs);
     console.log(`context note: ${note}`);
     await turn("U1 rg in the PDF text + view the image", {

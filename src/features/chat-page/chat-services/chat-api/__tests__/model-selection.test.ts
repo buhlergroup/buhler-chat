@@ -355,11 +355,11 @@ describe("resolveModelAndLimits — intent-based downgrade", () => {
 
 describe("resolveModelAndLimits — cap downgrade respects vision capability", () => {
   // Cheapest hard-cap target first (DeepSeek, text-only) then a vision-capable
-  // one (Kimi). A text turn should take the cheapest; an image turn must skip
+  // one (gpt-5.6-luna). A text turn should take the cheapest; an image turn must skip
   // the text-only model and take the cheapest VISION-capable target instead —
   // otherwise the image turn would be routed to a model that can't see it.
   const VISIONLESS = "DeepSeek-V4-Pro" as const;
-  const VISION_CHEAP = "Kimi-K2.6" as const;
+  const VISION_CHEAP = "gpt-5.6-luna" as const;
   let savedVisionless: string | undefined;
   let savedVision: string | undefined;
 
@@ -396,6 +396,62 @@ describe("resolveModelAndLimits — cap downgrade respects vision capability", (
     );
     expect(result.selectedModel).toBe(VISION_CHEAP);
     expect(result.selectedModel).not.toBe(VISIONLESS);
+  });
+
+  it("does not downgrade an IMAGE-bearing capped turn when no target has vision (Kimi has none)", async () => {
+    const savedKimi = (MODEL_CONFIGS["Kimi-K2.6"] as any).deploymentName;
+    (MODEL_CONFIGS["Kimi-K2.6"] as any).deploymentName = "kimi-test";
+    mockGetDowngradeTargets.mockReturnValue({
+      hardCapSet: [VISIONLESS, "Kimi-K2.6"],
+      intentByClass: {},
+    });
+    try {
+      const thread = makeThread({ selectedModel: "gpt-5.5" });
+      const result = await resolveModelAndLimits(
+        { selectedModel: "gpt-5.5", multimodalImages: ["data:image/png;base64,AAAA"] },
+        thread,
+      );
+      expect(result.fallbackInfo.fellBack).toBe(false);
+      expect(result.selectedModel).toBe("gpt-5.5");
+    } finally {
+      (MODEL_CONFIGS["Kimi-K2.6"] as any).deploymentName = savedKimi;
+    }
+  });
+});
+
+describe("resolveModelAndLimits — intent downgrade respects vision capability", () => {
+  let savedKimi: string | undefined;
+  let savedDefault: string | undefined;
+  beforeEach(() => {
+    savedKimi = (MODEL_CONFIGS["Kimi-K2.6"] as any).deploymentName;
+    savedDefault = (MODEL_CONFIGS[DEFAULT_MODEL] as any).deploymentName;
+    (MODEL_CONFIGS["Kimi-K2.6"] as any).deploymentName = "kimi-test";
+    // The image turn stays on the default model, which then needs a deployment.
+    (MODEL_CONFIGS[DEFAULT_MODEL] as any).deploymentName = "default-test";
+    mockGetDowngradeTargets.mockReturnValue({
+      hardCapSet: [],
+      intentByClass: { translation: "Kimi-K2.6" },
+    });
+  });
+  afterEach(() => {
+    (MODEL_CONFIGS["Kimi-K2.6"] as any).deploymentName = savedKimi;
+    (MODEL_CONFIGS[DEFAULT_MODEL] as any).deploymentName = savedDefault;
+  });
+
+  it("routes a TEXT turn to the intent target without vision", async () => {
+    const thread = makeThread({ selectedModel: DEFAULT_MODEL, intent: "translation" });
+    const result = await resolveModelAndLimits({}, thread);
+    expect(result.selectedModel).toBe("Kimi-K2.6");
+  });
+
+  it("keeps an IMAGE turn on its model when the intent target has no vision", async () => {
+    const thread = makeThread({ selectedModel: DEFAULT_MODEL, intent: "translation" });
+    const result = await resolveModelAndLimits(
+      { multimodalImages: ["data:image/png;base64,AAAA"] },
+      thread,
+    );
+    expect(result.fallbackInfo.fellBack).toBe(false);
+    expect(result.selectedModel).toBe(DEFAULT_MODEL);
   });
 });
 

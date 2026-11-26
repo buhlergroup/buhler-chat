@@ -8,9 +8,16 @@ import { CHAT_DOCUMENT_ATTRIBUTE, type ChatDocumentModel } from "../models";
 import { BlobSessionFs, sharedWorkspaceQuota, type BlobStore } from "./blob-session-fs";
 import { getAgentWorkspaceStore, getExistingAgentWorkspaceStore } from "./azure-blob-store";
 import { buildNamespace, SESSION_STATE_ROOT } from "./session-path";
-import { extractMarkdown, indexDocument } from "./document-pipeline";
+import { extractDocumentText, indexDocument } from "./document-pipeline";
+import { extractWorkspaceText, type ExtractTextDeps } from "./extract-text";
 import type { IndexDocumentDeps } from "./index-document";
-import { storeUpload, UPLOADS_DIR, uploadsNote, type StoredUpload } from "./workspace-uploads";
+import {
+  maxWorkspaceUploadBytes,
+  storeUpload,
+  UPLOADS_DIR,
+  uploadsNote,
+  type StoredUpload,
+} from "./workspace-uploads";
 
 /** True when this deployment can use the Copilot path at all (global or opt-in). */
 export function copilotRuntimeConfigured(env: Record<string, string | undefined> = process.env): boolean {
@@ -26,7 +33,7 @@ export async function threadWorkspace(userKey: string, threadId: string, store?:
   return { store: s, fs: new BlobSessionFs(s, buildNamespace(userKey, threadId)) };
 }
 
-/** Stores one uploaded file in the thread's workspace (see workspace-uploads.ts). */
+/** Stores one uploaded file in the thread's workspace, as it is (see workspace-uploads.ts). */
 export async function uploadToThreadWorkspace(
   userKey: string,
   threadId: string,
@@ -34,7 +41,7 @@ export async function uploadToThreadWorkspace(
   data: Buffer,
 ): Promise<StoredUpload> {
   const { fs } = await threadWorkspace(userKey, threadId);
-  const result = await storeUpload({ fs, extractMarkdown }, fileName, data);
+  const result = await storeUpload({ fs }, fileName, data);
   logInfo("copilot-runtime: upload stored in the workspace", {
     threadId,
     kind: result.kind,
@@ -50,7 +57,7 @@ export async function uploadToThreadWorkspace(
  */
 export const SHAREPOINT_DIR = "/workspace/sharepoint";
 
-/** Stores a fetched SharePoint file under /workspace/sharepoint (same naming and .md rule as uploads). */
+/** Stores a fetched SharePoint file under /workspace/sharepoint, as it is (same naming rule as uploads). */
 export async function storeSharePointFileInWorkspace(
   userKey: string,
   threadId: string,
@@ -58,7 +65,7 @@ export async function storeSharePointFileInWorkspace(
   data: Buffer,
 ): Promise<StoredUpload> {
   const { fs } = await threadWorkspace(userKey, threadId);
-  const result = await storeUpload({ fs, extractMarkdown }, fileName, data, SHAREPOINT_DIR);
+  const result = await storeUpload({ fs }, fileName, data, SHAREPOINT_DIR);
   logInfo("copilot-runtime: SharePoint file stored in the workspace", { threadId, kind: result.kind, bytes: result.bytes });
   return result;
 }
@@ -139,6 +146,16 @@ export async function removeThreadWorkspaceFilesQuietly(
   }
 }
 
+/** extract_text on a thread's workspace: Document Intelligence, cached per user in the content store. */
+export function workspaceExtractDeps(args: { fs: BlobSessionFs; userKey: string }): ExtractTextDeps {
+  const { fs, userKey } = args;
+  return {
+    fs,
+    extract: (data, pages) => extractDocumentText(userKey, data, pages),
+    maxBytes: maxWorkspaceUploadBytes(),
+  };
+}
+
 /** index_document against the app's Cosmos rows and AI Search index, for one thread. */
 export function chatDocumentIndexDeps(args: {
   fs: BlobSessionFs;
@@ -146,8 +163,10 @@ export function chatDocumentIndexDeps(args: {
   userKey: string;
 }): IndexDocumentDeps {
   const { fs, threadId, userKey } = args;
+  const extractDeps = workspaceExtractDeps({ fs, userKey });
   return {
     fs,
+    extractText: (path) => extractWorkspaceText(extractDeps, path),
     async findRow(name) {
       const query: SqlQuerySpec = {
         query:

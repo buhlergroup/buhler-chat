@@ -18,8 +18,8 @@ vi.mock("@/features/auth-page/helpers", () => ({
   })),
 }));
 
-vi.mock("@/features/persona-page/persona-services/persona-documents-service", () => ({
-  AllowedPersonaDocumentIds: vi.fn(async () => []),
+vi.mock("@/features/persona-page/persona-services/persona-document-graph-check", () => ({
+  allowedPersonaDocumentIds: vi.fn(async () => []),
 }));
 
 vi.mock("@/features/persona-page/persona-services/persona-service", () => ({

@@ -18,8 +18,10 @@ import {
   DEFAULT_MODEL,
   DEFAULT_REASONING_EFFORT_LEVELS,
   getPickableReasoningEfforts,
+  imageInputNotSupportedMessage,
   LEGACY_MODEL_ALIASES,
   MODEL_CONFIGS,
+  modelAcceptsImages,
   normalizeChatModelId,
   resolveDefaultModel,
   withNormalizedSelectedModel,
@@ -659,5 +661,27 @@ describe("chat-page.unit.models.legacy-alias — a replaced model id keeps worki
     const none: { id: string; selectedModel?: string } = { id: "t3" };
     expect(withNormalizedSelectedModel(current)).toBe(current);
     expect(withNormalizedSelectedModel(none)).toBe(none);
+  });
+});
+
+describe("chat-page.unit.models.image-input — image input follows the vision capability", () => {
+  it("Kimi K2.6 and DeepSeek V4 Pro do not take images (their deployments reject them)", () => {
+    expect(MODEL_CONFIGS["Kimi-K2.6"].capabilities ?? []).not.toContain("vision");
+    expect(modelAcceptsImages("Kimi-K2.6")).toBe(false);
+    expect(modelAcceptsImages("DeepSeek-V4-Pro")).toBe(false);
+  });
+
+  it("vision models and the default model take images", () => {
+    expect(modelAcceptsImages("gpt-5.6-luna")).toBe(true);
+    expect(modelAcceptsImages(DEFAULT_MODEL)).toBe(
+      MODEL_CONFIGS[DEFAULT_MODEL].capabilities?.includes("vision") ?? false,
+    );
+    // An unknown or empty id resolves to the default model, as in the composer.
+    expect(modelAcceptsImages(undefined)).toBe(modelAcceptsImages(DEFAULT_MODEL));
+    expect(modelAcceptsImages("no-such-model")).toBe(modelAcceptsImages(DEFAULT_MODEL));
+  });
+
+  it("names the model in the message", () => {
+    expect(imageInputNotSupportedMessage("Kimi-K2.6")).toContain("Kimi K2.6");
   });
 });

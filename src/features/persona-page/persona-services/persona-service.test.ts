@@ -56,10 +56,12 @@ vi.mock("@/features/persona-page/persona-services/persona-documents-store", () =
 }));
 
 // ── persona-ci-documents-service / -store mocks ─────────────────────────────
-vi.mock("@/features/persona-page/persona-services/persona-ci-documents-service", () => ({
-  PersonaCIDocumentsByIds: vi.fn(async () => ({ status: "OK", response: [] })),
+vi.mock("@/features/persona-page/persona-services/persona-document-access", () => ({
+  personaCodeDocumentsByIds: vi.fn(async () => ({ status: "OK", response: [] })),
 }));
 vi.mock("@/features/persona-page/persona-services/persona-ci-documents-store", () => ({
+  CODE_FILE_NOT_VISIBLE: "CODE_FILE_NOT_VISIBLE",
+  recordCodeDocumentHash: vi.fn(async () => undefined),
   downloadCodeInterpreterFile: vi.fn(async () => ({
     status: "OK",
     response: { buffer: Buffer.from("data"), name: "file.csv", contentType: "text/csv" },
@@ -71,6 +73,10 @@ vi.mock("@/features/chat-page/chat-services/code-interpreter-service", () => ({
   UploadFileForCodeInterpreter: vi.fn(async () => ({
     status: "OK",
     response: { id: "openai-file-1", name: "file.csv" },
+  })),
+  UploadFileForCodeInterpreterOnce: vi.fn(async () => ({
+    status: "OK",
+    response: { id: "openai-file-1", name: "file.csv", sha256: "a".repeat(64), uploaded: true },
   })),
 }));
 
@@ -115,10 +121,10 @@ import { deleteFileSourcesForPersona } from "./sharepoint-files/sharepoint-file-
 import { etagRetryClock } from "./persona-row";
 import { addSearchDocument } from "./persona-documents-store";
 
-import { PersonaCIDocumentsByIds } from "./persona-ci-documents-service";
+import { personaCodeDocumentsByIds as PersonaCIDocumentsByIds } from "./persona-document-access";
 import { downloadCodeInterpreterFile } from "./persona-ci-documents-store";
 
-import { UploadFileForCodeInterpreter } from "@/features/chat-page/chat-services/code-interpreter-service";
+import { UploadFileForCodeInterpreterOnce } from "@/features/chat-page/chat-services/code-interpreter-service";
 import { createChatThreadWithServerFiles } from "@/features/chat-page/chat-services/code-interpreter-file-access";
 import { AccessGroupById, UserAccessGroups } from "./access-group-service";
 import { agentFilesNeedCodeInterpreter } from "./agent-files/agent-file-requirements";
@@ -169,7 +175,7 @@ beforeEach(() => {
     status: "OK",
     response: { buffer: Buffer.from("data"), name: "file.csv", contentType: "text/csv" },
   });
-  vi.mocked(UploadFileForCodeInterpreter).mockResolvedValue({
+  vi.mocked(UploadFileForCodeInterpreterOnce).mockResolvedValue({
     status: "OK",
     response: { id: "openai-file-1", name: "file.csv" },
   });
@@ -566,7 +572,7 @@ describe("persona-service.ts", () => {
 
     const result = await DeletePersona("p-del");
     expect(result.status).toBe("OK");
-    expect(deleteAgentFileRows).toHaveBeenCalledWith(expect.objectContaining({ id: "p-del" }));
+    expect(deleteAgentFileRows).toHaveBeenCalledWith(expect.objectContaining({ id: "p-del" }), USER_HASH);
     expect(deleteSkillsForPersona).toHaveBeenCalledWith("p-del");
     expect(deleteFileSourcesForPersona).toHaveBeenCalledWith("p-del");
     expect(historyItems.find((i: any) => i.id === "p-del")).toBeUndefined();
@@ -589,6 +595,8 @@ describe("persona-service.ts", () => {
         personaDocumentIds: ["doc-u"],
         codeInterpreterDocumentIds: ["ci-u"],
       }),
+      // The deleting admin's own partition may hold an old row of the agent.
+      hashEmail(adminSession!.user.email),
     );
     expect(historyItems.find((i: any) => i.id === "p-del-u")).toBeUndefined();
   });
@@ -838,8 +846,9 @@ describe("persona-service.ts", () => {
     expect(callArg.attachedFiles![0].id).toBe("openai-file-1");
   });
 
-  // 015b – CreatePersonaChat names the files it could not load (no ids, no URLs)
-  it("015b CreatePersonaChat stores the names of CI docs that could not be loaded on the thread", async () => {
+  // 015b – CreatePersonaChat names only the files SharePoint showed to the
+  // user; files SharePoint denies (or no answer) are counted, never named.
+  it("015b CreatePersonaChat stores names only of CI docs the user could see, a count for the others", async () => {
     seedPersona({ id: "p-chat-ci-names", codeInterpreterDocumentIds: ["d1", "d2", "d3", "d4"] });
     const ciDoc = (id: string, fileName: string) => ({
       id,
@@ -859,7 +868,10 @@ describe("persona-service.ts", () => {
       ],
     });
     vi.mocked(downloadCodeInterpreterFile)
-      .mockResolvedValueOnce({ status: "ERROR", errors: [{ message: "Graph returned 403." }] })
+      .mockResolvedValueOnce({
+        status: "ERROR",
+        errors: [{ message: "The file is not available.", code: "CODE_FILE_NOT_VISIBLE" }],
+      })
       .mockResolvedValueOnce({
         status: "OK",
         response: { buffer: Buffer.from("data"), name: "ok.csv", contentType: "text/csv" },
@@ -869,7 +881,7 @@ describe("persona-service.ts", () => {
         response: { buffer: Buffer.from("data"), name: "upload-fails.csv", contentType: "text/csv" },
       })
       .mockRejectedValueOnce(new Error("boom"));
-    vi.mocked(UploadFileForCodeInterpreter)
+    vi.mocked(UploadFileForCodeInterpreterOnce)
       .mockResolvedValueOnce({ status: "OK", response: { id: "openai-file-1", name: "ok.csv" } })
       .mockResolvedValueOnce({ status: "ERROR", errors: [{ message: "upload failed" }] });
 
@@ -878,11 +890,9 @@ describe("persona-service.ts", () => {
 
     const callArg = vi.mocked(createChatThreadWithServerFiles).mock.calls[0][0] as any;
     expect(callArg.attachedFiles).toHaveLength(1);
-    expect(callArg.unavailableAgentFiles).toEqual([
-      "no-access.xlsx",
-      "upload-fails.csv",
-      "throws.csv",
-    ]);
+    expect(callArg.unavailableAgentFiles).toEqual(["upload-fails.csv"]);
+    expect(callArg.notAvailableAgentFileCount).toBe(2);
+    expect(JSON.stringify(callArg)).not.toMatch(/no-access|throws/);
     expect(JSON.stringify(callArg.unavailableAgentFiles)).not.toMatch(/sp-d|drive-1|d1|http/);
   });
 
@@ -990,5 +1000,65 @@ describe("persona-service.ts", () => {
 
     const result = await CreatePersonaChat("p-chat-err");
     expect(result.status).toBe("ERROR");
+  });
+});
+
+// ── Editor-only fields (subAgentIds, file id lists) ─────────────────────────
+describe("persona payloads for users who cannot edit the agent", () => {
+  const withIds = {
+    personaDocumentIds: ["doc-1"],
+    codeInterpreterDocumentIds: ["ci-1"],
+    subAgentIds: ["sub-1"],
+  };
+  const hasNoIds = (p: Record<string, unknown>) => {
+    expect(p).not.toHaveProperty("personaDocumentIds");
+    expect(p).not.toHaveProperty("codeInterpreterDocumentIds");
+    expect(p).not.toHaveProperty("subAgentIds");
+  };
+
+  it("FindPersonaByID: a viewer of a published agent gets no file or sub-agent ids", async () => {
+    await setSession(defaultSession);
+    seedPersona({ id: "p-pub", userId: "other-hash", isPublished: true, ...withIds });
+    const result = await FindPersonaByID("p-pub");
+    expect(result.status).toBe("OK");
+    if (result.status === "OK") {
+      expect(result.response.name).toBe("Seed Persona");
+      hasNoIds(result.response as any);
+    }
+  });
+
+  it("FindPersonaByID: the owner and an admin get the ids", async () => {
+    await setSession(defaultSession);
+    seedPersona({ id: "p-own", ...withIds });
+    const own = await FindPersonaByID("p-own");
+    expect(own.status === "OK" && own.response.subAgentIds).toEqual(["sub-1"]);
+
+    seedPersona({ id: "p-other", userId: "other-hash", ...withIds });
+    await setSession(adminSession);
+    const admin = await FindPersonaByID("p-other");
+    expect(admin.status === "OK" && admin.response.personaDocumentIds).toEqual(["doc-1"]);
+    expect(admin.status === "OK" && admin.response.codeInterpreterDocumentIds).toEqual(["ci-1"]);
+  });
+
+  it("FindAllPersonaForCurrentUser: ids only on the caller's own agents", async () => {
+    await setSession(defaultSession);
+    seedPersona({ id: "p-mine", ...withIds });
+    seedPersona({ id: "p-theirs", userId: "other-hash", isPublished: true, ...withIds });
+    const result = await FindAllPersonaForCurrentUser();
+    expect(result.status).toBe("OK");
+    if (result.status !== "OK") return;
+    const byId = Object.fromEntries(result.response.map((p) => [p.id, p as any]));
+    expect(byId["p-mine"].subAgentIds).toEqual(["sub-1"]);
+    hasNoIds(byId["p-theirs"]);
+  });
+
+  it("CreatePersonaChat still builds the thread from the whole row for a viewer", async () => {
+    await setSession(defaultSession);
+    seedPersona({ id: "p-pub-chat", userId: "other-hash", isPublished: true, ...withIds });
+    const result = await CreatePersonaChat("p-pub-chat");
+    expect(result.status).toBe("OK");
+    const callArg = vi.mocked(createChatThreadWithServerFiles).mock.calls[0][0] as any;
+    expect(callArg.personaDocumentIds).toEqual(["doc-1"]);
+    expect(callArg.subAgentIds).toEqual(["sub-1"]);
   });
 });

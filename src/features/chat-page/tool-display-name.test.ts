@@ -1,5 +1,14 @@
 import { describe, it, expect } from "vitest";
-import { stripExtensionKeyPrefix } from "./tool-display-name";
+import { appToolLabel, stripExtensionKeyPrefix } from "./tool-display-name";
+
+describe("chat-page.unit.tool-display-name — appToolLabel", () => {
+  it("labels extract_text and leaves other names alone", () => {
+    expect(appToolLabel("extract_text")).toBe("Extract text");
+    expect(stripExtensionKeyPrefix("extract_text")).toBe("extract_text");
+    expect(appToolLabel("search_documents")).toBeUndefined();
+    expect(appToolLabel("toString")).toBeUndefined();
+  });
+});
 
 describe("chat-page.unit.tool-display-name — stripExtensionKeyPrefix", () => {
   it("strips an 8-char alphanumeric extension-id prefix and underscore", () => {

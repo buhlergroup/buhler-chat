@@ -29,6 +29,7 @@ import {
   OpenAIV1ImageInstance as createFakeV1Image,
 } from "./openai";
 import { createFakeAzureProvider } from "./azure-provider";
+import { createMemoryContentBlobBackend } from "../../features/common/services/content-store/memory-backend";
 
 register(SERVICE_KEYS.cosmos, createFakeCosmos);
 register(SERVICE_KEYS.openaiChat, createFakeChat);
@@ -40,5 +41,6 @@ register(SERVICE_KEYS.openaiReasoning, createFakeReasoning);
 register(SERVICE_KEYS.openaiV1Reasoning, createFakeV1Reasoning);
 register(SERVICE_KEYS.openaiV1Image, createFakeV1Image);
 register(SERVICE_KEYS.aiProvider, createFakeAzureProvider);
+register(SERVICE_KEYS.contentBlobs, createMemoryContentBlobBackend);
 
 console.log("[e2e-fakes] in-memory service bindings registered");

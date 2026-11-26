@@ -611,7 +611,9 @@ export const MODEL_CONFIGS: Record<ChatModel, ModelConfig> = {
     contextWindow: 262144,
     maxOutputTokens: 8000,
     hardCapEligible: true,
-    capabilities: ["vision", "imageGen", "code"],
+    // No "vision": the Foundry deployment rejects image input, although the
+    // catalog lists the model as multimodal.
+    capabilities: ["imageGen", "code"],
   },
   "grok-4.3": {
     id: "grok-4.3",
@@ -933,12 +935,59 @@ export function resolveDefaultModel(
 
 export const DEFAULT_MODEL: ChatModel = resolveDefaultModel();
 
+/**
+ * Whether a model accepts image input ("vision" capability). An unknown id
+ * counts as the default model, the same way the composer resolves it.
+ */
+export function modelAcceptsImages(id: string | null | undefined): boolean {
+  const config = (id && MODEL_CONFIGS[id as ChatModel]) || MODEL_CONFIGS[DEFAULT_MODEL];
+  return config?.capabilities?.includes("vision") ?? false;
+}
+
+/** Message shown when the user attaches an image for a model without vision. */
+export function imageInputNotSupportedMessage(id: string | null | undefined): string {
+  const config = (id && MODEL_CONFIGS[id as ChatModel]) || MODEL_CONFIGS[DEFAULT_MODEL];
+  return `${config?.name ?? "This model"} accepts text only. Select a model with image input, or remove the image.`;
+}
+
 /** Models the user can't currently select (e.g. over budget), with the reason. */
 export type DisabledModels = Partial<Record<ChatModel, { reason: string }>>;
 
 export interface ModelAvailability {
   availableModels: Record<ChatModel, ModelConfig>;
   disabledModels: DisabledModels;
+}
+
+interface ModelsApiResult {
+  ok: boolean;
+  data: any;
+}
+
+let modelsApiInFlight: Promise<ModelsApiResult> | null = null;
+
+/**
+ * One GET /api/models for all callers that ask at the same time.
+ *
+ * A chat page mounts several pickers at once (composer and header), and each
+ * asked the route on its own. Every request runs a budget check on the server
+ * (one Cosmos read and one query), so concurrent calls now share one request.
+ * The shared promise is dropped as soon as it settles: a later call (e.g. a
+ * refresh after a budget downgrade) fetches fresh data. Browser only; on the
+ * server every call fetches on its own.
+ */
+function fetchModelsApi(): Promise<ModelsApiResult> {
+  const load = async (): Promise<ModelsApiResult> => {
+    const response = await fetch('/api/models');
+    if (!response.ok) return { ok: false, data: undefined };
+    return { ok: true, data: await response.json() };
+  };
+  if (typeof window === 'undefined') return load();
+  if (!modelsApiInFlight) {
+    modelsApiInFlight = load().finally(() => {
+      modelsApiInFlight = null;
+    });
+  }
+  return modelsApiInFlight;
 }
 
 /**
@@ -948,11 +997,11 @@ export interface ModelAvailability {
  */
 export async function getModelAvailability(): Promise<ModelAvailability> {
   try {
-    const response = await fetch('/api/models');
+    const response = await fetchModelsApi();
     if (!response.ok) {
       throw new Error('Failed to fetch model availability');
     }
-    const data = await response.json();
+    const data = response.data;
     return {
       availableModels: data.availableModels,
       disabledModels: data.disabledModels ?? {},
@@ -971,11 +1020,11 @@ export async function getModelAvailability(): Promise<ModelAvailability> {
  */
 export async function getAvailableModels(): Promise<Record<ChatModel, ModelConfig>> {
   try {
-    const response = await fetch('/api/models');
+    const response = await fetchModelsApi();
     if (!response.ok) {
       throw new Error('Failed to fetch available models');
     }
-    const data = await response.json();
+    const data = response.data;
     return data.availableModels;
   } catch (error) {
     logError("Error fetching available models", {
@@ -991,11 +1040,11 @@ export async function getAvailableModels(): Promise<Record<ChatModel, ModelConfi
  */
 export async function getAvailableModelIds(): Promise<ChatModel[]> {
   try {
-    const response = await fetch('/api/models');
+    const response = await fetchModelsApi();
     if (!response.ok) {
       throw new Error('Failed to fetch available models');
     }
-    const data = await response.json();
+    const data = response.data;
     return data.availableModelIds;
   } catch (error) {
     logError("Error fetching available model IDs", {
@@ -1011,11 +1060,11 @@ export async function getAvailableModelIds(): Promise<ChatModel[]> {
  */
 export async function getDefaultModel(): Promise<ChatModel> {
   try {
-    const response = await fetch('/api/models');
+    const response = await fetchModelsApi();
     if (!response.ok) {
       throw new Error('Failed to fetch default model');
     }
-    const data = await response.json();
+    const data = response.data;
     return data.defaultModel;
   } catch (error) {
     logError("Error fetching default model", {
@@ -1124,6 +1173,8 @@ export interface AttachedFileModel {
   type: AttachedFileType;
   uploadedAt?: Date;
   source?: AttachedFileSource;
+  /** SHA-256 of the uploaded bytes (content store); absent on older entries. */
+  sha256?: string;
 }
 
 export interface ThreadUsage {
@@ -1211,7 +1262,8 @@ export interface ChatThreadModel {
   personaId?: string;
   /**
    * Names (no ids, no URLs) of the agent's code interpreter files that could
-   * not be loaded when the chat started. Set by the server only; the chat
+   * not be loaded when the chat started, although SharePoint showed them to
+   * the user (too large, upload failed). Set by the server only; the chat
    * route tells the model about them (unavailable-agent-files.ts).
    */
   unavailableAgentFiles?: string[];
@@ -1221,6 +1273,13 @@ export interface ChatThreadModel {
    * only; the chat route tells the model the number.
    */
   notFoundAgentFileCount?: number;
+  /**
+   * Number of the agent's code interpreter files SharePoint did not show to
+   * the user when the chat started (no access, moved, deleted). A number
+   * only: the names of files the user may not open are never stored. Set by
+   * the server only; the chat route tells the model the number.
+   */
+  notAvailableAgentFileCount?: number;
 }
 
 export interface UserPrompt {
@@ -1335,6 +1394,12 @@ export interface ChatDocumentModel {
   workspacePath?: string;
   /** Copilot path: chunks the file has in AI Search. */
   chunkCount?: number;
+  /**
+   * SHA-256 of the file content in the content store. Absent on rows written
+   * before the content store: they keep working, nothing is deduplicated
+   * against them.
+   */
+  sha256?: string;
 }
 
 export interface ToolsInterface {

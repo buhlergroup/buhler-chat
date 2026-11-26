@@ -1,7 +1,7 @@
 import { userSession } from "@/features/auth-page/helpers";
 import { ChatPage } from "@/features/chat-page/chat-page";
 import { DEFAULT_MODEL } from "@/features/chat-page/chat-services/models";
-import { FindAllChatDocuments } from "@/features/chat-page/chat-services/chat-document-service";
+import { FindAllChatDocuments } from "@/features/chat-page/chat-services/chat-document-store";
 import { FindAllChatMessagesForCurrentUser } from "@/features/chat-page/chat-services/chat-message-service";
 import { FindChatThreadForCurrentUser } from "@/features/chat-page/chat-services/chat-thread-service";
 import { FindChatHistorySummary } from "@/features/chat-page/chat-services/chat-api/history-summary-service";

@@ -1,28 +1,34 @@
 "use server";
 import "server-only";
 
-// Server actions for Search files of an agent: reads and the access check of
-// a chat. Adding and removing a file, also when the agent is deleted, is
-// server code only (persona-documents-store.ts, persona-file-rows.ts).
+// Server action for Search files of an agent: the details for the agent
+// panel of a chat. The access checks of a chat (persona-document-graph-check.ts)
+// and adding and removing a file, also when the agent is deleted, are server
+// code only (persona-documents-store.ts, persona-file-rows.ts).
+//
+// Rules for this file: every export is an async function and is callable
+// from the browser. Helpers that only server code uses do not belong here.
 
 import { ServerActionResponse } from "@/features/common/server-action-response";
 import { getGraphClient } from "../../common/services/microsoft-graph-client";
-import {
-  GraphBatchRequest,
-  postGraphBatches,
-} from "@/features/common/services/microsoft-graph-batch";
+import { postGraphBatches } from "@/features/common/services/microsoft-graph-batch";
 import { getCurrentUser } from "@/features/auth-page/helpers";
 import {
   DocumentMetadata,
   PERSONA_DOCUMENT_ATTRIBUTE,
   PersonaDocument,
   SharePointFile,
+  SharePointFileSchema,
   convertPersonaDocumentToSharePointDocument,
 } from "./models";
 import {
   FindAccessiblePersonaDocument,
   PersonaAccessCache,
 } from "./persona-document-access";
+import {
+  documentDetailRequests,
+  maxPersonaDocuments,
+} from "./persona-document-graph-check";
 
 const positiveInt = (value: string | undefined, fallback: number) => {
   const n = Number(value);
@@ -31,13 +37,15 @@ const positiveInt = (value: string | undefined, fallback: number) => {
 
 /**
  * SharePoint details of the Search files of an agent, for the agent panel of
- * a chat. Only files the caller may use are looked up: each `id` must be a
- * Search file row the caller can open (FindAccessiblePersonaDocument), and
- * the drive and item come from that row, not from the client. Any other
- * file counts as unsuccessful.
+ * a chat. The client sends the Search file row ids (`id`) only. Only files
+ * the caller may use are looked up: each `id` must be a Search file row the
+ * caller can open (FindAccessiblePersonaDocument), and the drive and item
+ * come from that row, not from the client; a row whose drive or item id is
+ * not a Graph id gets no request. Any other file counts as unsuccessful. At
+ * most the per-agent Search file limit of ids per call.
  */
 export async function DocumentDetails(
-  documents: SharePointFile[]
+  documents: Array<Pick<SharePointFile, "id"> & Partial<SharePointFile>>
 ): Promise<
   ServerActionResponse<{
     successful: DocumentMetadata[];
@@ -45,7 +53,7 @@ export async function DocumentDetails(
     unsuccessful: { documentId: string }[];
   }>
 > {
-  const maxCount = positiveInt(process.env.MAX_PERSONA_DOCUMENT_LIMIT, 25);
+  const maxCount = maxPersonaDocuments();
   const maxSize = positiveInt(process.env.MAX_PERSONA_DOCUMENT_SIZE, 10485760);
 
   try {
@@ -86,8 +94,13 @@ export async function DocumentDetails(
     const allowed: SharePointFile[] = [];
     const denied: { documentId: string }[] = [];
     rows.forEach((row, i) => {
-      if (row) allowed.push(convertPersonaDocumentToSharePointDocument(row));
-      else denied.push({ documentId: String(documents[i]?.documentId ?? "") });
+      // The stored drive and item id must be Graph ids (SharePointFileSchema)
+      // before they go into a URL.
+      if (row && SharePointFileSchema.safeParse(row.externalFile).success) {
+        allowed.push(convertPersonaDocumentToSharePointDocument(row));
+      } else {
+        denied.push({ documentId: String(documents[i]?.documentId ?? "") });
+      }
     });
     if (allowed.length === 0) {
       return {
@@ -98,7 +111,7 @@ export async function DocumentDetails(
 
     const { token } = await getCurrentUser();
     const client = getGraphClient(token);
-    const requests = CreateDocumentDetailRequests(allowed, [
+    const requests = documentDetailRequests(allowed, [
       "id",
       "name",
       "createdBy",
@@ -182,120 +195,3 @@ export async function DocumentDetails(
     };
   }
 }
-
-export const PersonaDocumentById = async (
-  id: string
-): Promise<ServerActionResponse<PersonaDocument>> => {
-  return FindPersonaDocumentForCurrentUser(id);
-};
-
-const FindPersonaDocumentForCurrentUser = async (
-  id: string,
-  cache?: PersonaAccessCache
-): Promise<ServerActionResponse<PersonaDocument>> => {
-  try {
-    const document = await FindAccessiblePersonaDocument<PersonaDocument>(
-      id,
-      PERSONA_DOCUMENT_ATTRIBUTE,
-      cache
-    );
-
-    if (!document) {
-      return {
-        status: "NOT_FOUND",
-        errors: [
-          {
-            message: "Persona Document not found",
-          },
-        ],
-      };
-    }
-
-    return {
-      status: "OK",
-      response: document,
-    };
-  } catch (error) {
-    return {
-      status: "ERROR",
-      errors: [
-        {
-          message: `Error creating persona: ${error}`,
-        },
-      ],
-    };
-  }
-};
-
-export const AuthorizedDocuments = async (
-  documents: SharePointFile[]
-): Promise<string[]> => {
-  try {
-    const { token } = await getCurrentUser();
-    const client = getGraphClient(token);
-    // Graph takes at most 20 requests per batch: sent in chunks. Only a 200
-    // answer allows a document; a document of a failed chunk is not allowed,
-    // the documents of the other chunks still are.
-    const batch = await postGraphBatches(
-      client,
-      CreateDocumentDetailRequests(documents, ["id"])
-    );
-
-    let allowed: string[] = [];
-    batch.responses.forEach((responseItem) => {
-      if (responseItem.status === 200) {
-        allowed.push(
-          documents.find((doc) => doc.documentId === responseItem.id)?.id || ""
-        );
-      }
-    });
-
-    return allowed;
-  } catch (error) {
-    return [];
-  }
-};
-
-// Compute persona document IDs that the current user can access
-export const AllowedPersonaDocumentIds = async (
-  personaDocumentIds: string[]
-): Promise<string[]> => {
-  try {
-    if (!personaDocumentIds || personaDocumentIds.length === 0) return [];
-
-    const cache: PersonaAccessCache = new Map();
-    const personaDocumentsResponses = await Promise.all(
-      personaDocumentIds.map(async (id) => {
-        try {
-          return await FindPersonaDocumentForCurrentUser(id, cache);
-        } catch {
-          return null;
-        }
-      })
-    );
-
-    const okPersonaDocs = personaDocumentsResponses.filter(
-      (response) => response !== null && (response as any).status === "OK"
-    ) as Array<{ status: "OK"; response: PersonaDocument }>;
-
-    const allowed = await AuthorizedDocuments(
-      okPersonaDocs.map((e) => convertPersonaDocumentToSharePointDocument(e.response))
-    );
-
-    return allowed || [];
-  } catch {
-    return [];
-  }
-};
-
-const CreateDocumentDetailRequests = (
-  documents: SharePointFile[],
-  filters: string[]
-): GraphBatchRequest[] =>
-  documents.map((document) => ({
-    id: document.documentId,
-    method: "GET",
-    url: `/drives/${document.parentReference.driveId}/items/${
-      document.documentId
-    }?$select=${filters.join(",")}`,
-  }));

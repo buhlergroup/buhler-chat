@@ -1,4 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
+import { File as NodeFile } from "node:buffer";
 import { buildZip, SKILL_MD } from "./zip-fixture";
 
 vi.mock("@/features/common/services/logger", () => ({
@@ -10,13 +11,14 @@ vi.mock("@/features/common/services/logger", () => ({
 
 const upsert = vi.fn(async (doc: unknown) => ({ resource: doc }));
 const replace = vi.fn(async (doc: unknown) => ({ resource: doc }));
+const itemDelete = vi.fn(async (_id: string) => ({}));
 vi.mock("@/features/common/services/cosmos", () => ({
   HistoryContainer: () => ({
     items: { upsert },
-    item: vi.fn(() => ({
+    item: vi.fn((id: string) => ({
       replace: (doc: unknown) => replace(doc),
       read: async () => ({ resource: undefined }),
-      delete: vi.fn(),
+      delete: () => itemDelete(id),
     })),
   }),
 }));
@@ -73,7 +75,11 @@ vi.stubGlobal("fetch", fetchMock);
 
 import {
   CheckPersonaSkillNow,
+  DeletePersonaSkill,
+  UploadPersonaSkill,
 } from "../persona-skill-service";
+import { querySkillsByPersonaId } from "../persona-skill-store";
+import { SKILL_LIMITS } from "../skill-models";
 import { linkSharePointSkill } from "../link-sharepoint-skill";
 import { clearDriveItemChecks } from "@/features/common/services/sharepoint/drive-item-check-cache";
 
@@ -259,5 +265,69 @@ describe("CheckPersonaSkillNow", () => {
     const res = await CheckPersonaSkillNow("p1", "s1");
     expect(res.status).toBe("ERROR");
     expect(res.status === "ERROR" && res.errors[0].message).toMatch(/SharePoint did not answer/);
+  });
+});
+
+describe("skill limit with adds of several requests at the same time", () => {
+  it("never keeps more than the limit when two links run at the same time", async () => {
+    // The agent has one skill less than the limit. Both requests count
+    // before either inserts (the barrier), so both see room.
+    const max = SKILL_LIMITS.maxSkillsPerAgent;
+    DeleteBlob.mockClear();
+    let rows: Array<Record<string, unknown>> = Array.from({ length: max - 1 }, (_, i) => ({
+      ...linkedRow(),
+      id: `old-${i}`,
+      name: `old-${i}`,
+      source: undefined,
+    }));
+    let release!: () => void;
+    const barrier = new Promise<void>((resolve) => (release = resolve));
+    let counts = 0;
+    vi.mocked(querySkillsByPersonaId).mockImplementation(async () => {
+      counts++;
+      if (counts === 2) release();
+      if (counts <= 2) await barrier;
+      return [...rows] as never;
+    });
+    upsert.mockImplementation(async (doc: any) => {
+      rows.push(doc);
+      return { resource: doc };
+    });
+    itemDelete.mockImplementation(async (id: string) => {
+      rows = rows.filter((r) => r.id !== id);
+      return {};
+    });
+
+    const results = await Promise.all([
+      link({ itemId: "01ITEMAAA" }),
+      link({ itemId: "01ITEMBBB" }),
+    ]);
+
+    expect(rows.length).toBeLessThanOrEqual(max);
+    const ok = results.filter((r) => r.status === "OK");
+    expect(ok.length).toBe(rows.length - (max - 1));
+    for (const r of results.filter((r) => r.status !== "OK")) {
+      expect(r.status === "ERROR" && r.errors[0].message).toMatch(/up to \d+ skills/);
+    }
+    // The undone add leaves no blob behind.
+    expect(DeleteBlob.mock.calls.length).toBe(results.length - ok.length);
+
+    vi.mocked(querySkillsByPersonaId).mockImplementation(async () => existing as never);
+    upsert.mockImplementation(async (doc: unknown) => ({ resource: doc }));
+    itemDelete.mockImplementation(async () => ({}));
+  });
+});
+
+describe("skill actions: NOT_FOUND for a user who cannot open the agent", () => {
+  it("Upload, Check now and Delete answer like an unknown agent, before the edit check", async () => {
+    access = { canUse: false, canEdit: false };
+    fetchMock.mockClear();
+    const file = new NodeFile([new Uint8Array(goodZip())], "demo-skill.zip", { type: "application/zip" });
+    const form = { get: (k: string) => (k === "personaId" ? "p1" : k === "file" ? file : null) } as unknown as FormData;
+    expect((await UploadPersonaSkill(form)).status).toBe("NOT_FOUND");
+    expect((await CheckPersonaSkillNow("p1", "s1")).status).toBe("NOT_FOUND");
+    expect((await DeletePersonaSkill("p1", "s1")).status).toBe("NOT_FOUND");
+    expect((await link()).status).toBe("NOT_FOUND");
+    expect(fetchMock).not.toHaveBeenCalled();
   });
 });

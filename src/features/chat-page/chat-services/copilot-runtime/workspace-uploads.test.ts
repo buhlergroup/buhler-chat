@@ -1,12 +1,13 @@
 import { describe, it, expect, vi } from "vitest";
 
 vi.mock("@/features/common/services/cosmos", () => ({ HistoryContainer: vi.fn() }));
-vi.mock("./document-pipeline", () => ({ extractMarkdown: vi.fn(), indexDocument: vi.fn() }));
+vi.mock("./document-pipeline", () => ({ extractDocumentText: vi.fn(), indexDocument: vi.fn() }));
 vi.mock("./azure-blob-store", () => ({ getAgentWorkspaceStore: vi.fn(), getExistingAgentWorkspaceStore: vi.fn() }));
 
 import { BlobSessionFs, DataBlobCache } from "./blob-session-fs";
 import { FakeBlobStore } from "./fake-blob-store.test-helper";
 import {
+  maxWorkspaceUploadBytes,
   sanitizeUploadName,
   storeUpload,
   uniqueUploadName,
@@ -14,18 +15,18 @@ import {
   uploadsNote,
   UPLOADS_DIR,
 } from "./workspace-uploads";
-import { removeThreadWorkspaceFiles } from "./workspace-files";
+import { removeThreadWorkspaceFiles, storeSharePointFileInWorkspace, uploadToThreadWorkspace } from "./workspace-files";
+import { extractDocumentText } from "./document-pipeline";
+import { getAgentWorkspaceStore } from "./azure-blob-store";
 
 const USER_A = "a".repeat(64);
 const USER_B = "b".repeat(64);
 
 function setup(store = new FakeBlobStore()) {
-  const extract = vi.fn(async (data: Buffer) => `# text of ${data.length} bytes\n`);
   const workspace = (user: string, thread: string) => ({
     fs: new BlobSessionFs(store, `${user}/${thread}`, undefined, new DataBlobCache(1 << 20)),
-    extractMarkdown: extract,
   });
-  return { store, extract, workspace };
+  return { store, workspace };
 }
 
 describe("upload names", () => {
@@ -60,28 +61,39 @@ describe("upload names", () => {
 });
 
 describe("storeUpload", () => {
-  it("stores the original and, for documents, the extracted Markdown next to it", async () => {
-    const { workspace, extract } = setup();
+  it("stores a document as it is: no extraction, no .md next to it", async () => {
+    const { workspace } = setup();
     const ws = workspace(USER_A, "t1");
-    const res = await storeUpload(ws, "Report.pdf", Buffer.from("%PDF-1.4 fake"));
-    expect(res).toMatchObject({
-      path: `${UPLOADS_DIR}/Report.pdf`,
-      markdownPath: `${UPLOADS_DIR}/Report.pdf.md`,
-      kind: "document",
-    });
-    expect(await ws.fs.readFile(`${UPLOADS_DIR}/Report.pdf.md`)).toBe("# text of 13 bytes\n");
-    expect(extract).toHaveBeenCalledTimes(1);
+    const pdf = Buffer.from("%PDF-1.4 fake");
+    const res = await storeUpload(ws, "Report.pdf", pdf);
+    expect(res).toEqual({ path: `${UPLOADS_DIR}/Report.pdf`, kind: "document", bytes: 13 });
+    expect(Buffer.from(await ws.fs.readFileBytes(`${UPLOADS_DIR}/Report.pdf`))).toEqual(pdf);
+    expect(await ws.fs.exists(`${UPLOADS_DIR}/Report.pdf.md`)).toBe(false);
+    expect((await ws.fs.listEntries(UPLOADS_DIR)).map((e) => e.path)).toEqual([`${UPLOADS_DIR}/Report.pdf`]);
   });
 
-  it("stores an image as exact bytes, without extraction", async () => {
-    const { workspace, extract } = setup();
+  it("a large document is stored without extraction too", async () => {
+    const { workspace } = setup();
+    const ws = workspace(USER_A, "t1");
+    const big = Buffer.alloc(3 * 1024 * 1024, 0x41);
+    const res = await storeUpload(ws, "big.pdf", big);
+    expect(res).toEqual({ path: `${UPLOADS_DIR}/big.pdf`, kind: "document", bytes: big.length });
+    expect(await ws.fs.exists(`${UPLOADS_DIR}/big.pdf.md`)).toBe(false);
+  });
+
+  it("stores an image as exact bytes", async () => {
+    const { workspace } = setup();
     const ws = workspace(USER_A, "t1");
     const png = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0, 1, 2, 255]);
     const res = await storeUpload(ws, "photo.png", png);
     expect(res).toMatchObject({ path: `${UPLOADS_DIR}/photo.png`, kind: "image" });
-    expect(res.markdownPath).toBeUndefined();
     expect(Buffer.from(await ws.fs.readFileBytes(`${UPLOADS_DIR}/photo.png`))).toEqual(png);
-    expect(extract).not.toHaveBeenCalled();
+  });
+
+  it("the upload limit is MAX_UPLOAD_DOCUMENT_SIZE, else 10 MB", () => {
+    expect(maxWorkspaceUploadBytes({})).toBe(10 * 1024 * 1024);
+    expect(maxWorkspaceUploadBytes({ MAX_UPLOAD_DOCUMENT_SIZE: "2048" })).toBe(2048);
+    expect(maxWorkspaceUploadBytes({ MAX_UPLOAD_DOCUMENT_SIZE: "nope" })).toBe(10 * 1024 * 1024);
   });
 
   it("different bytes under the same name get a unique name", async () => {
@@ -90,15 +102,30 @@ describe("storeUpload", () => {
     await storeUpload(ws, "a.pdf", Buffer.from("one"));
     const second = await storeUpload(ws, "a.pdf", Buffer.from("two"));
     expect(second.path).toBe(`${UPLOADS_DIR}/a (2).pdf`);
-    expect(second.markdownPath).toBe(`${UPLOADS_DIR}/a (2).pdf.md`);
   });
 
   it("names the uploads for the model", async () => {
     const { workspace } = setup();
     const ws = workspace(USER_A, "t1");
     await storeUpload(ws, "a.pdf", Buffer.from("x"));
-    expect(uploadsNote(await ws.fs.listEntries(UPLOADS_DIR))).toContain("/workspace/uploads/a.pdf, /workspace/uploads/a.pdf.md");
+    const note = uploadsNote(await ws.fs.listEntries(UPLOADS_DIR));
+    expect(note).toContain(": /workspace/uploads/a.pdf");
+    expect(note).toMatch(/extract_text/);
     expect(uploadsNote([])).toBeUndefined();
+  });
+});
+
+describe("uploadToThreadWorkspace", () => {
+  it("stores uploads and SharePoint files without calling Document Intelligence", async () => {
+    const store = new FakeBlobStore();
+    vi.mocked(getAgentWorkspaceStore).mockResolvedValue(store as never);
+    const up = await uploadToThreadWorkspace(USER_A, "t9", "Report.pdf", Buffer.from("%PDF-1.4 fake"));
+    const sp = await storeSharePointFileInWorkspace(USER_A, "t9", "Spec.docx", Buffer.from("PK fake"));
+    expect(up).toEqual({ path: `${UPLOADS_DIR}/Report.pdf`, kind: "document", bytes: 13 });
+    expect(sp.path).toBe("/workspace/sharepoint/Spec.docx");
+    expect(extractDocumentText).not.toHaveBeenCalled();
+    const ws = setup(store).workspace(USER_A, "t9");
+    expect(await ws.fs.exists(`${UPLOADS_DIR}/Report.pdf.md`)).toBe(false);
   });
 });
 
@@ -113,7 +140,7 @@ describe("removeThreadWorkspaceFiles", () => {
     await storeUpload(t2, "a.pdf", Buffer.from("x"));
 
     const removed = await removeThreadWorkspaceFiles(USER_A, "t1", "uploads", store);
-    expect(removed).toBe(4); // a.pdf + a.pdf.md: 2 pointers + 2 data blobs
+    expect(removed).toBe(2); // a.pdf: pointer + data blob
     expect(await t1.fs.exists(`${UPLOADS_DIR}/a.pdf`)).toBe(false);
     expect(await t1.fs.readFile("/workspace/notes.txt")).toBe("keep");
     expect(await t2.fs.exists(`${UPLOADS_DIR}/a.pdf`)).toBe(true);

@@ -33,7 +33,7 @@ import {
   isImageReference,
   resolveBlobReferenceToPath,
 } from "./chat-services/chat-image-persistence-utils";
-import { stripExtensionKeyPrefix } from "./tool-display-name";
+import { appToolLabel, stripExtensionKeyPrefix } from "./tool-display-name";
 
 // ---------------------------------------------------------------------------
 // Typed view over UIMessage parts
@@ -331,7 +331,7 @@ export function renderToolOutput(output: unknown, toolName?: string): ReactNode 
 export function toolPartLabel(toolName: string, input: unknown): string | undefined {
   // The Copilot path image tool reads as on the AI SDK path (image_generation).
   if (toolName === "generate_image") return "Image generation";
-  if (toolName !== "sub_agent") return undefined;
+  if (toolName !== "sub_agent") return appToolLabel(toolName);
   const agent = (input as { agent?: unknown } | null | undefined)?.agent;
   return typeof agent === "string" && agent.length > 0 ? `Sub-agent ${agent}` : "Sub-agent";
 }

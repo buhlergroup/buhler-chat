@@ -255,5 +255,6 @@ describe("sub-agent tool part label (Copilot path)", () => {
     expect(toolPartLabel("sub_agent", { agent: "Research" })).toBe("Sub-agent Research");
     expect(toolPartLabel("sub_agent", {})).toBe("Sub-agent");
     expect(toolPartLabel("search_documents", { agent: "x" })).toBeUndefined();
+    expect(toolPartLabel("extract_text", { path: "/workspace/uploads/a.pdf" })).toBe("Extract text");
   });
 });

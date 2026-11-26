@@ -2,7 +2,7 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 
 vi.mock("@/features/common/services/logger", () => ({ logInfo: vi.fn(), logWarn: vi.fn(), logError: vi.fn() }));
 vi.mock("@/features/common/services/cosmos", () => ({ HistoryContainer: vi.fn() }));
-vi.mock("./document-pipeline", () => ({ extractMarkdown: vi.fn(), indexDocument: vi.fn() }));
+vi.mock("./document-pipeline", () => ({ extractDocumentText: vi.fn(), indexDocument: vi.fn() }));
 vi.mock("./azure-blob-store", () => ({ getAgentWorkspaceStore: vi.fn(), getExistingAgentWorkspaceStore: vi.fn() }));
 const invalidate = vi.fn(async (_u: string, _t: string) => undefined);
 vi.mock("./copilot-session", () => ({ invalidateThreadSessions: (u: string, t: string) => invalidate(u, t) }));

@@ -16,6 +16,7 @@ export const FindTopChatMessagesForCurrentUser = async (
   top: number = 30
 ): Promise<ServerActionResponse<Array<ChatMessageModel>>> => {
   try {
+    const userId = await userHashedId();
     const querySpec: SqlQuerySpec = {
       query:
         "SELECT TOP @top * FROM root r WHERE r.type=@type AND r.threadId = @threadId AND r.userId=@userId AND r.isDeleted=@isDeleted ORDER BY r.createdAt DESC",
@@ -30,7 +31,7 @@ export const FindTopChatMessagesForCurrentUser = async (
         },
         {
           name: "@userId",
-          value: await userHashedId(),
+          value: userId,
         },
         {
           name: "@isDeleted",
@@ -43,8 +44,10 @@ export const FindTopChatMessagesForCurrentUser = async (
       ],
     };
 
+    // The partition key runs the query in the user's own partition instead
+    // of fanning it out to every partition.
     const { resources } = await HistoryContainer()
-      .items.query<ChatMessageModel>(querySpec)
+      .items.query<ChatMessageModel>(querySpec, { partitionKey: userId })
       .fetchAll();
 
     return {
@@ -67,6 +70,7 @@ export const FindAllChatMessagesForCurrentUser = async (
   chatThreadID: string
 ): Promise<ServerActionResponse<Array<ChatMessageModel>>> => {
   try {
+    const userId = await userHashedId();
     const querySpec: SqlQuerySpec = {
       query:
         "SELECT * FROM root r WHERE r.type=@type AND r.threadId = @threadId AND r.userId=@userId AND  r.isDeleted=@isDeleted ORDER BY r.createdAt ASC",
@@ -81,7 +85,7 @@ export const FindAllChatMessagesForCurrentUser = async (
         },
         {
           name: "@userId",
-          value: await userHashedId(),
+          value: userId,
         },
         {
           name: "@isDeleted",
@@ -90,8 +94,10 @@ export const FindAllChatMessagesForCurrentUser = async (
       ],
     };
 
+    // Single-partition query (the user's own partition) instead of a
+    // fan-out to every partition.
     const { resources } = await HistoryContainer()
-      .items.query<ChatMessageModel>(querySpec)
+      .items.query<ChatMessageModel>(querySpec, { partitionKey: userId })
       .fetchAll();
 
     // `ORDER BY r.createdAt ASC` alone is not a total order. createdAt has
@@ -249,47 +255,37 @@ export const UpdateChatMessage = async (
   updates: Partial<ChatMessageModel>
 ): Promise<ServerActionResponse<ChatMessageModel>> => {
   try {
-    // First, find the existing message
-    const querySpec: SqlQuerySpec = {
-      query:
-        "SELECT * FROM root r WHERE r.type=@type AND r.id=@id AND r.userId=@userId AND r.isDeleted=@isDeleted",
-      parameters: [
-        {
-          name: "@type",
-          value: MESSAGE_ATTRIBUTE,
-        },
-        {
-          name: "@id",
-          value: messageId,
-        },
-        {
-          name: "@userId",
-          value: await userHashedId(),
-        },
-        {
-          name: "@isDeleted",
-          value: false,
-        },
-      ],
-    };
+    // First, read the existing message: a point read in the caller's own
+    // partition (1 RU) instead of a cross-partition query.
+    const userId = await userHashedId();
+    if (!messageId) {
+      return {
+        status: "NOT_FOUND",
+        errors: [{ message: `Chat message not found` }],
+      };
+    }
+    const { resource: existingMessage } = await HistoryContainer()
+      .item(messageId, userId)
+      .read<ChatMessageModel>();
 
-    const { resources } = await HistoryContainer()
-      .items.query<ChatMessageModel>(querySpec)
-      .fetchAll();
-
-    if (resources.length === 0) {
+    if (
+      !existingMessage ||
+      existingMessage.type !== MESSAGE_ATTRIBUTE ||
+      existingMessage.userId !== userId ||
+      existingMessage.isDeleted !== false
+    ) {
       return {
         status: "NOT_FOUND",
         errors: [{ message: `Chat message not found` }],
       };
     }
 
-    const existingMessage = resources[0];
     const updatedMessage: ChatMessageModel = {
       ...existingMessage,
       ...updates,
       id: existingMessage.id, // Preserve original ID
       createdAt: existingMessage.createdAt, // Preserve original creation time
+      userId, // The row stays in the caller's own partition
       type: MESSAGE_ATTRIBUTE,
       isDeleted: false,
     };

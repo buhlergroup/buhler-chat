@@ -8,13 +8,12 @@ import { logError } from "@/features/common/services/logger";
 import { FindChatThreadForCurrentUser } from "../chat-thread-service";
 import { resolveAgentRuntimeForCurrentUser } from "./runtime-selection";
 import { uploadToThreadWorkspace } from "./workspace-files";
-
-const DEFAULT_MAX_UPLOAD_BYTES = 10 * 1024 * 1024;
+import { maxWorkspaceUploadBytes } from "./workspace-uploads";
 
 /**
  * Chat upload on the Copilot path: the file goes to /workspace/uploads/ of
- * the thread (documents also get their extracted text as <name>.md). No AI
- * Search indexing here; the agent indexes on request with index_document.
+ * the thread, as it is. No text extraction and no AI Search indexing here;
+ * the agent calls extract_text and index_document on request.
  *
  * Returns { handled: false } when the user is not on the Copilot path; the
  * client then runs the existing upload flow unchanged.
@@ -23,7 +22,7 @@ const DEFAULT_MAX_UPLOAD_BYTES = 10 * 1024 * 1024;
  */
 export async function UploadFileToAgentWorkspace(
   formData: FormData,
-): Promise<ServerActionResponse<{ handled: boolean; path?: string; markdownPath?: string }>> {
+): Promise<ServerActionResponse<{ handled: boolean; path?: string }>> {
   try {
     // Every export here is a Server Action: check the session here too, not
     // only in the proxy.
@@ -42,8 +41,7 @@ export async function UploadFileToAgentWorkspace(
     if (thread.status !== "OK") return { status: "ERROR", errors: [{ message: "Chat thread not found" }] };
 
     // Same size limit as the chat document upload today.
-    const configured = Number(process.env.MAX_UPLOAD_DOCUMENT_SIZE);
-    const maxBytes = Number.isFinite(configured) && configured > 0 ? configured : DEFAULT_MAX_UPLOAD_BYTES;
+    const maxBytes = maxWorkspaceUploadBytes();
     if (file.size >= maxBytes) {
       return {
         status: "ERROR",
@@ -55,11 +53,7 @@ export async function UploadFileToAgentWorkspace(
     const stored = await uploadToThreadWorkspace(await userHashedId(), threadId, file.name, data);
     return {
       status: "OK",
-      response: {
-        handled: true,
-        path: stored.path,
-        ...(stored.markdownPath ? { markdownPath: stored.markdownPath } : {}),
-      },
+      response: { handled: true, path: stored.path },
     };
   } catch (e) {
     logError("UploadFileToAgentWorkspace failed", { error: e instanceof Error ? e.message : String(e) });

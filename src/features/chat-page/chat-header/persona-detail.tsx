@@ -16,15 +16,8 @@ import { personaStore } from "@/features/persona-page/persona-store";
 import { useRouter } from "next/navigation";
 import { FindChatThreadForCurrentUser } from "../chat-services/chat-thread-service";
 import { showError } from "@/features/globals/global-message-store";
-import {
-  convertPersonaDocumentToSharePointDocument,
-  DocumentMetadata,
-  SharePointFile,
-} from "@/features/persona-page/persona-services/models";
-import {
-  DocumentDetails,
-  PersonaDocumentById,
-} from "@/features/persona-page/persona-services/persona-documents-service";
+import { DocumentMetadata } from "@/features/persona-page/persona-services/models";
+import { DocumentDetails } from "@/features/persona-page/persona-services/persona-documents-service";
 import { toast } from "@/features/ui/use-toast";
 import {
   Tooltip,
@@ -50,62 +43,30 @@ export const PersonaDetail: FC<Props> = ({ chatThread }) => {
   const router = useRouter();
 
   useEffect(() => {
-    const initializeDocuments = async () => {
-      const personaDocuments = await fetchPersonaDocuments(personaDocumentIds);
-      fetchDocumentMetadata(personaDocuments);
-    };
-    initializeDocuments();
+    fetchDocumentMetadata(personaDocumentIds);
   }, [personaDocumentIds]);
 
-  const fetchPersonaDocuments = async (
-    documentIds: string[]
-  ): Promise<SharePointFile[]> => {
-    if (!documentIds || documentIds.length === 0) return [];
-
-    try {
-      const responses = await Promise.all(
-        documentIds.map((id) => PersonaDocumentById(id))
-      );
-
-      const notAvailableDocuments = responses.filter(
-        (response) => response.status === "NOT_FOUND"
-      );
-
-      setNoAccessDocuments(
-        notAvailableDocuments.map((response) => ({
-          documentId: "notAvailable",
-        }))
-      );
-
-      const availableDocuments = responses.filter(
-        (response) => response.status === "OK"
-      );
-
-      return availableDocuments.map((response, index) => {
-        return convertPersonaDocumentToSharePointDocument(response.response);
-      });
-    } catch {
-      displayToastError("An unexpected error occurred. Please try again.");
-      return [];
-    }
-  };
-
+  // The thread lists the Search file row ids of the agent. DocumentDetails
+  // looks up each row with the access rule and reads the details from
+  // SharePoint with the user's token; files the user cannot use come back
+  // as "unsuccessful" (counted, no name).
   const fetchDocumentMetadata = async (
-    files: SharePointFile[]
+    documentIds: string[] | undefined
   ): Promise<void> => {
-    if (!files || files.length === 0) return;
+    if (!documentIds || documentIds.length === 0) return;
 
     try {
-      const response = await DocumentDetails(files);
+      const response = await DocumentDetails(documentIds.map((id) => ({ id })));
 
       if (response.status === "OK") {
-        processDocumentMetadata(
-          {
-            successful: response.response.successful,
-            unsuccessful: response.response.unsuccessful,
-          },
-          files
-        );
+        setDocuments(response.response.successful);
+        setNoAccessDocuments(response.response.unsuccessful || []);
+        if (response.response.unsuccessful.length > 0) {
+          displayToastWarning(
+            "Some documents are not accessible",
+            "Your agent chat experience may suffer from the lack of documents."
+          );
+        }
       } else {
         displayError(
           response.errors,
@@ -114,33 +75,6 @@ export const PersonaDetail: FC<Props> = ({ chatThread }) => {
       }
     } catch {
       displayToastError("An unexpected error occurred. Please try again.");
-    }
-  };
-
-  const processDocumentMetadata = (
-    response: {
-      successful: DocumentMetadata[];
-      unsuccessful: { documentId: string }[];
-    },
-    files: SharePointFile[]
-  ) => {
-    const updatedFiles = files
-      .map((file) => {
-        const match = response.successful.find(
-          (doc) => doc.documentId === file.documentId
-        );
-        return match ? { ...match, id: file.id } : null;
-      })
-      .filter(Boolean) as DocumentMetadata[];
-
-    setDocuments(updatedFiles);
-    setNoAccessDocuments(response.unsuccessful || []);
-
-    if (response.unsuccessful.length > 0) {
-      displayToastWarning(
-        "Some documents are not accessible",
-        "Your agent chat experience may suffer from the lack of documents."
-      );
     }
   };
 

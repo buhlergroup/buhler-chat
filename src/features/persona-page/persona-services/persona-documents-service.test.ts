@@ -29,6 +29,7 @@ vi.mock("@/features/auth-page/auth-api", () => ({ options: {}, authOptions: {} }
 
 vi.mock("@/features/common/services/logger", () => ({
   logInfo: vi.fn(),
+  logWarn: vi.fn(),
   logError: vi.fn(),
   logDebug: vi.fn(),
 }));
@@ -43,13 +44,12 @@ vi.mock("@/features/common/services/document-intelligence", () => ({
   DocumentIntelligenceInstance: vi.fn(),
 }));
 
-vi.mock("@/features/chat-page/chat-services/chat-document-service", () => ({
-  ChunkDocumentWithOverlap: vi.fn(),
-}));
 
 // The access rule of a chat: a Search file row the caller may use. The row
 // holds the SharePoint ids (here: item id = row id, drive "drive-1").
 const denied = new Set<string>();
+// Rows whose stored drive id is not a Graph id (e.g. written before the check).
+const badDrive = new Set<string>();
 const FindAccessiblePersonaDocument = vi.fn(async (id: string) =>
   denied.has(id)
     ? undefined
@@ -58,14 +58,22 @@ const FindAccessiblePersonaDocument = vi.fn(async (id: string) =>
         userId: "owner-hash",
         type: "PERSONA_DOCUMENT",
         source: "SHAREPOINT",
-        externalFile: { documentId: id, parentReference: { driveId: "drive-1" } },
+        externalFile: {
+          documentId: id,
+          parentReference: { driveId: badDrive.has(id) ? "../../sites/x" : "drive-1" },
+        },
       }
 );
 vi.mock("./persona-document-access", () => ({
   FindAccessiblePersonaDocument: (id: string) => FindAccessiblePersonaDocument(id),
 }));
 
-import { AuthorizedDocuments, DocumentDetails } from "./persona-documents-service";
+import { DocumentDetails } from "./persona-documents-service";
+import * as documentsActions from "./persona-documents-service";
+import {
+  allowedPersonaDocumentIds,
+  authorizedDocuments as AuthorizedDocuments,
+} from "./persona-document-graph-check";
 import {
   GRAPH_BATCH_MAX_REQUESTS,
   chunkItems,
@@ -96,6 +104,7 @@ beforeEach(() => {
   setSession(defaultSession);
   nextBatchResponses = [];
   denied.clear();
+  badDrive.clear();
   process.env.MAX_PERSONA_DOCUMENT_LIMIT = "10";
   process.env.MAX_PERSONA_DOCUMENT_SIZE = "10485760"; // 10MB
 });
@@ -181,6 +190,10 @@ describe("Graph $batch in chunks of at most 20 requests", () => {
     }) as any);
 
   describe("AuthorizedDocuments", () => {
+    beforeEach(() => {
+      process.env.MAX_PERSONA_DOCUMENT_LIMIT = "25";
+    });
+
     it.each([
       [0, []],
       [1, [1]],
@@ -266,5 +279,83 @@ describe("chunkItems", () => {
       20, 20,
     ]);
     expect(GRAPH_BATCH_MAX_REQUESTS).toBe(20);
+  });
+});
+
+// ── Server action surface and input limits (security review) ────────────────
+describe("only DocumentDetails is a server action", () => {
+  it("the Graph check helpers are not exported from the use-server module", () => {
+    expect(Object.keys(documentsActions).sort()).toEqual(["DocumentDetails"]);
+  });
+});
+
+describe("Graph checks: at most the agent limit, only Graph ids in URLs", () => {
+  type BatchBody = { requests: Array<{ id: string; url: string }> };
+  const sentRequests = () =>
+    (postSpy.mock.calls as unknown as Array<[BatchBody]>).flatMap((c) => c[0].requests);
+  const answerAll = () =>
+    postSpy.mockImplementation((async (body: BatchBody) => ({
+      responses: body.requests.map((r) => okBatch(r.id, 100)),
+    })) as any);
+
+  it("authorizedDocuments checks at most MAX_PERSONA_DOCUMENT_LIMIT documents", async () => {
+    process.env.MAX_PERSONA_DOCUMENT_LIMIT = "25";
+    answerAll();
+    const docs = Array.from({ length: 500 }, (_, i) => sharepointDoc(`d${i}`));
+    const allowed = await AuthorizedDocuments(docs);
+    expect(sentRequests()).toHaveLength(25);
+    expect(postSpy).toHaveBeenCalledTimes(2);
+    expect(allowed).toHaveLength(25);
+  });
+
+  it("authorizedDocuments drops a drive or item id that is not a Graph id before a URL is built", async () => {
+    answerAll();
+    const allowed = await AuthorizedDocuments([
+      { id: "a", documentId: "ITEM1", parentReference: { driveId: "../../sites/root" } },
+      { id: "b", documentId: "items/x?$expand=children", parentReference: { driveId: "b!drive_1" } },
+      { id: "c", documentId: "ITEM3", parentReference: { driveId: "b!drive_1" } },
+    ]);
+    expect(sentRequests().map((r) => r.url)).toEqual(["/drives/b!drive_1/items/ITEM3?$select=id"]);
+    expect(allowed).toEqual(["c"]);
+  });
+
+  it("allowedPersonaDocumentIds looks up at most MAX_PERSONA_DOCUMENT_LIMIT ids", async () => {
+    process.env.MAX_PERSONA_DOCUMENT_LIMIT = "3";
+    answerAll();
+    const allowed = await allowedPersonaDocumentIds(["d0", "d1", "d2", "d3", "d4"]);
+    expect(FindAccessiblePersonaDocument).toHaveBeenCalledTimes(3);
+    expect(sentRequests()).toHaveLength(3);
+    expect(allowed).toEqual(["d0", "d1", "d2"]);
+  });
+
+  it("DocumentDetails: a stored row with a drive id that is not a Graph id gets no request", async () => {
+    badDrive.add("bad");
+    answerAll();
+    const result = await DocumentDetails([sharepointDoc("good"), sharepointDoc("bad")]);
+    expect(sentRequests().map((r) => r.id)).toEqual(["good"]);
+    expect(result.status === "OK" && result.response.unsuccessful).toEqual([{ documentId: "bad" }]);
+  });
+
+  it("DocumentDetails takes row ids only (the agent panel sends no SharePoint ids)", async () => {
+    answerAll();
+    const result = await DocumentDetails([{ id: "doc-1" }]);
+    expect(result.status === "OK" && result.response.successful.map((d) => d.id)).toEqual(["doc-1"]);
+  });
+});
+
+describe("SharePointFileSchema accepts Graph ids only", () => {
+  it("refuses path, query and encoded characters in the drive or item id", async () => {
+    const { SharePointFileSchema } = await import("./models");
+    const ok = { documentId: "01ABCDEF", parentReference: { driveId: "b!AbC-12_x" } };
+    expect(SharePointFileSchema.safeParse(ok).success).toBe(true);
+    for (const bad of [
+      { ...ok, documentId: "a/b" },
+      { ...ok, documentId: "x?$select=*" },
+      { ...ok, documentId: "%2e%2e" },
+      { ...ok, parentReference: { driveId: "../me" } },
+      { ...ok, parentReference: { driveId: "" } },
+    ]) {
+      expect(SharePointFileSchema.safeParse(bad).success).toBe(false);
+    }
   });
 });

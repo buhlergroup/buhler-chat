@@ -2,7 +2,7 @@ import "server-only";
 
 // Server code only. Not a "use server" module: the functions here take raw
 // filters and ids, so none of them may be a Server Action. The client indexes
-// chat documents through IndexChatDocuments in chat-document-service.
+// chat documents through UploadChatDocument in chat-document-service.
 
 import { userHashedId } from "@/features/auth-page/helpers";
 import { ServerActionResponse } from "@/features/common/server-action-response";
@@ -467,6 +467,37 @@ export const DeleteDocumentsOfChatThread = async (
         ],
       },
     ];
+  }
+};
+
+/**
+ * Ids of the chunks of the chat document `fileName` in a thread of `userId`.
+ * `metadata` (the file name) is not filterable in the index: the thread and
+ * user filter selects, the name is compared here.
+ */
+export const FindChatDocumentChunkIds = async (
+  chatThreadId: string,
+  userId: string,
+  fileName: string
+): Promise<string[]> => {
+  const instance = AzureAISearchInstance<AzureSearchDocumentIndex>();
+  const filter = `${odataEq("chatThreadId", chatThreadId)} and ${odataEq("user", userId)}`;
+  const ids: string[] = [];
+  const found = await instance.search("*", { filter, select: ["id", "metadata"], top: 1000 });
+  for await (const result of found.results) {
+    if (result.document.metadata === fileName) ids.push(result.document.id);
+  }
+  return ids;
+};
+
+/** Deletes index chunks by id. */
+export const DeleteChunksByIds = async (ids: string[]): Promise<void> => {
+  if (ids.length === 0) return;
+  const instance = AzureAISearchInstance<AzureSearchDocumentIndex>();
+  const deleted = await instance.deleteDocuments("id", ids);
+  const failed = deleted.results.filter((r) => !r.succeeded);
+  if (failed.length > 0) {
+    throw new Error(failed.map((r) => r.errorMessage || "Unknown error").join("; "));
   }
 };
 

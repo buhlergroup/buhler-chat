@@ -71,6 +71,7 @@ import {
   resolveSkillCodeInterpreterFiles,
 } from "@/features/persona-page/persona-services/skills/skill-models";
 import { buildUnavailableAgentFilesPrompt } from "@/features/chat-page/chat-services/chat-api/unavailable-agent-files";
+import { buildCodeInterpreterFilesPrompt } from "@/features/chat-page/chat-services/chat-api/code-interpreter-files-prompt";
 import { loadUsableFileSources } from "@/features/persona-page/persona-services/sharepoint-files/sharepoint-file-store";
 import { type UserPrompt } from "@/features/chat-page/chat-services/models";
 import { copilotProviderFor } from "@/features/chat-page/chat-services/copilot-runtime/runtime-flag";
@@ -380,7 +381,13 @@ export async function POST(req: Request) {
         buildUnavailableAgentFilesPrompt(
           ctx.thread.unavailableAgentFiles,
           ctx.thread.notFoundAgentFileCount,
-        ),
+          ctx.thread.notAvailableAgentFileCount,
+        ) +
+        // Exact /mnt/data paths of the attached files (agent Code files and
+        // uploads): a file attached by id has a prefixed name there.
+        (effectiveToolsSafe.codeInterpreter
+          ? buildCodeInterpreterFilesPrompt(ciAttachedFiles, skillFiles.fileIds)
+          : ""),
       // The Copilot session keeps one system message; it sends the hint per turn.
       documentHint: useCopilotRuntime ? undefined : ctx.documentHint,
       trailingStaticBlock:

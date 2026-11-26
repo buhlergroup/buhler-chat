@@ -1,17 +1,17 @@
 "use client";
 
-import { ServerActionResponse } from "@/features/common/server-action-response";
 import {
   showError,
   showSuccess,
 } from "@/features/globals/global-message-store";
 import { proxy, useSnapshot } from "valtio";
+import { UploadChatDocument } from "../../chat-services/chat-document-service";
 import {
-  CrackDocument,
-  CreateChatDocument,
-  IndexChatDocuments,
-} from "../../chat-services/chat-document-service";
-import { SupportedFileExtensionsInputImages, AttachedFileModel } from "../../chat-services/models";
+  SupportedFileExtensionsInputImages,
+  AttachedFileModel,
+  imageInputNotSupportedMessage,
+  modelAcceptsImages,
+} from "../../chat-services/models";
 import { UploadFileToAgentWorkspace } from "../../chat-services/copilot-runtime/workspace-upload-actions";
 import {
   getCodeInterpreterFileLimit,
@@ -87,6 +87,13 @@ class FileStore {
         (!!z?.codeInterpreterEnabled &&
           isCodeInterpreterSupported &&
           !isInputImage);
+
+      // An image for a model without vision is refused before it is stored.
+      if (isInputImage && !modelAcceptsImages(z?.selectedModel)) {
+        showError(imageInputNotSupportedMessage(z?.selectedModel));
+        this.loading = "idle";
+        return;
+      }
 
       // Copilot path: the file goes to the chat's file workspace
       // (/workspace/uploads/). The server answers handled:false for users on
@@ -188,69 +195,18 @@ class FileStore {
         return;
       }
 
-      // For text documents, proceed with Azure Search indexing
+      // Documents: the server stores the file once (by its content hash),
+      // extracts the text once and indexes it once per thread.
       this.uploadButtonLabel = "Processing document";
-      const crackingResponse = await CrackDocument(formData);
-      if (crackingResponse.status === "OK") {
-        let index = 0;
-
-        const documentIndexResponses: Array<ServerActionResponse<boolean>> = [];
-
-        for (const doc of crackingResponse.response) {
-          this.uploadButtonLabel = `Indexing document ${index + 1}/${
-            crackingResponse.response.length
-          }`;
-
-          // index one document at a time
-          const indexResponses = await IndexChatDocuments(
-            [doc],
-            file.name,
-            chatThreadId
-          );
-
-          documentIndexResponses.push(...indexResponses);
-          index++;
-        }
-
-        if (documentIndexResponses.length === 0) {
-          showError(`${file.name}: Document contains no text that can be indexed.`);
-          return;
-        }
-
-        const allDocumentsIndexed = documentIndexResponses.every(
-          (r) => r.status === "OK"
-        );
-
-        if (allDocumentsIndexed) {
-          // Update state
-          this.uploadButtonLabel = file.name + " loaded";
-          // Update history DB with doc on chat thread
-          const response = await CreateChatDocument(file.name, chatThreadId);
-
-          if (response.status === "OK") {
-            showSuccess({
-              title: "File upload",
-              description: `${file.name} uploaded successfully.`,
-            });
-          } else {
-            showError(response.errors.map((e) => e).join("\n"));
-          }
-        } else {
-          const errors: Array<string> = [];
-
-          documentIndexResponses.forEach((r) => {
-            if (r.status === "ERROR") {
-              errors.push(...r.errors.map((e) => e.message));
-            }
-          });
-
-          showError(
-            "Looks like not all documents were indexed" +
-              errors.map((e) => e).join("\n")
-          );
-        }
+      const response = await UploadChatDocument(formData);
+      if (response.status === "OK") {
+        this.uploadButtonLabel = file.name + " loaded";
+        showSuccess({
+          title: "File upload",
+          description: `${file.name} uploaded successfully.`,
+        });
       } else {
-        showError(crackingResponse.errors.map((e) => e.message).join("\n"));
+        showError(response.errors.map((e) => e.message).join("\n"));
       }
     } catch (error) {
       showError("" + error);

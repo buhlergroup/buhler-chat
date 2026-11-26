@@ -2,20 +2,28 @@
  * Chat uploads into the agent workspace (Copilot path).
  *
  * An uploaded file lands at /workspace/uploads/<name> in the thread's Blob
- * namespace, through BlobSessionFs (same path jail as the runtime). For
- * PDF/Office documents the extracted text is stored next to it as
- * <name>.md, so `rg` and `view` work on it. A name that is taken gets a
- * " (2)" suffix. No AI Search indexing here: the agent indexes on request
- * with index_document.
+ * namespace, through BlobSessionFs (same path jail as the runtime). The
+ * upload only stores the file: no text extraction (the agent calls
+ * extract_text) and no AI Search indexing (index_document). A name that is
+ * taken gets a " (2)" suffix; for PDF/Office documents the name of the text
+ * file extract_text writes (<name>.md) is kept free too.
  *
- * Pure orchestration; Blob access and text extraction come in as deps
- * (document-pipeline.ts in production).
+ * Pure orchestration; Blob access comes in as a dep.
  */
 import type { WorkspaceEntry } from "./blob-session-fs";
 import { DIR_MARKER_NAME } from "./session-path";
 
 export const UPLOADS_DIR = "/workspace/uploads";
-const LF = String.fromCharCode(10);
+const DEFAULT_MAX_UPLOAD_BYTES = 10 * 1024 * 1024;
+
+/**
+ * Largest workspace upload in bytes (MAX_UPLOAD_DOCUMENT_SIZE, default 10 MB;
+ * a file must be smaller). extract_text uses the same limit.
+ */
+export function maxWorkspaceUploadBytes(env: Record<string, string | undefined> = process.env): number {
+  const configured = Number(env.MAX_UPLOAD_DOCUMENT_SIZE);
+  return Number.isFinite(configured) && configured > 0 ? configured : DEFAULT_MAX_UPLOAD_BYTES;
+}
 
 /** Extensions Document Intelligence extracts text from (images go as images). */
 const DOCUMENT_EXTENSIONS = new Set(["pdf", "docx", "xlsx", "pptx"]);
@@ -78,21 +86,13 @@ export interface UploadDeps {
     listEntries(dir: string, literalPrefix?: string): Promise<WorkspaceEntry[]>;
     writeFileBytes(path: string, content: Uint8Array): Promise<void>;
   };
-  /** Text of a document as Markdown (document-pipeline.ts). */
-  extractMarkdown(data: Buffer, name: string): Promise<string>;
 }
 
 export interface StoredUpload {
   path: string;
-  /** The extracted text, for documents. */
-  markdownPath?: string;
   kind: UploadKind;
   bytes: number;
 }
-
-/** Paragraphs from Document Intelligence as Markdown text. */
-export const paragraphsToMarkdown = (paragraphs: string[]): string =>
-  paragraphs.map((p) => p.trim()).filter((p) => p.length > 0).join(LF + LF) + LF;
 
 export async function storeUpload(
   deps: UploadDeps,
@@ -107,12 +107,7 @@ export async function storeUpload(
   const finalName = uniqueUploadName(name, taken, kind === "document");
   const path = `${dir}/${finalName}`;
   await deps.fs.writeFileBytes(path, data);
-  if (kind !== "document") return { path, kind, bytes: data.length };
-
-  const markdownPath = `${path}.md`;
-  const markdown = await deps.extractMarkdown(data, finalName);
-  await deps.fs.writeFileBytes(markdownPath, Buffer.from(markdown, "utf8"));
-  return { path, markdownPath, kind, bytes: data.length };
+  return { path, kind, bytes: data.length };
 }
 
 /** One line for the model: which files are in the uploads folder. */
@@ -121,5 +116,8 @@ export function uploadsNote(entries: WorkspaceEntry[], max = 50): string | undef
   if (paths.length === 0) return undefined;
   const shown = paths.slice(0, max);
   const more = paths.length > shown.length ? ` (+${paths.length - shown.length} more)` : "";
-  return `Files the user uploaded to this chat (read them with view or rg; a .md next to a document is its extracted text): ${shown.join(", ")}${more}`;
+  return (
+    "Files the user uploaded to this chat (stored as they are: read text files with view or rg; " +
+    `for PDF and Office files call extract_text first): ${shown.join(", ")}${more}`
+  );
 }

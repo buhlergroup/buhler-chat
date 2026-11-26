@@ -1,8 +1,13 @@
 /**
  * Code interpreter files of an agent that could not be loaded when the chat
- * started (no access for the user, file moved or deleted, too large, or a
- * download error). The thread keeps their names; the system prompt gets a
- * short note, so the model does not claim the files are there.
+ * started. The system prompt gets a short note, so the model does not claim
+ * the files are there.
+ *
+ * - SharePoint showed the file to the user, but it could not be loaded (too
+ *   large, upload failed): the thread keeps its name.
+ * - SharePoint did not show the file to the user (no access, moved,
+ *   deleted): the thread keeps only the number. The names of files the user
+ *   may not open never reach the thread, the client or the model.
  *
  * Names only: no file ids, no URLs. A name comes from SharePoint, so it is
  * cleaned (one line, limited length) before it goes into the prompt.
@@ -44,24 +49,30 @@ const notFoundCount = (value: unknown): number =>
 /**
  * The note for the system prompt; "" when every file was loaded. `names` are
  * the files that could not be loaded; `notFound` counts the files whose
- * stored entry was not found (no name, no id). Sorted, so the text is the
- * same on every turn (prompt cache).
+ * stored entry was not found (no name, no id); `notAvailable` counts the
+ * files SharePoint did not show to the user (no name). Sorted, so the text
+ * is the same on every turn (prompt cache).
  */
 export function buildUnavailableAgentFilesPrompt(
   names: ReadonlyArray<string> | undefined,
   notFound?: number,
+  notAvailable?: number,
 ): string {
   const list = unavailableAgentFileNames(names ?? []).sort();
   const missing = notFoundCount(notFound);
-  if (list.length === 0 && missing === 0) return "";
+  const denied = notFoundCount(notAvailable);
+  if (list.length === 0 && missing === 0 && denied === 0) return "";
   const lines: string[] = [];
   if (list.length > 0) {
     lines.push(
-      "These code interpreter files of the agent could not be loaded for this chat, " +
-        "maybe because the user has no access to them, or they were moved or deleted: " +
+      "These code interpreter files of the agent could not be loaded for this chat " +
+        "(for example too large): " +
         list.map((n) => JSON.stringify(n)).join(", ") +
         ".",
     );
+  }
+  if (denied > 0) {
+    lines.push(`${denied} file(s) of this agent are not available to the user.`);
   }
   if (missing > 0) {
     lines.push(

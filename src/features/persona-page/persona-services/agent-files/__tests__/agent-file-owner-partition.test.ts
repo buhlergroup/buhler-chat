@@ -112,9 +112,6 @@ vi.mock("@/features/chat-page/chat-services/azure-ai-search/azure-ai-search", ()
   DeleteSearchDocumentByPersonaDocumentId: (id: string, owner?: string) =>
     DeleteSearchDocumentByPersonaDocumentId(id, owner),
 }));
-vi.mock("@/features/chat-page/chat-services/chat-document-service", () => ({
-  ChunkDocumentWithOverlap: vi.fn(async (text: string) => [text]),
-}));
 vi.mock("@/features/common/services/document-intelligence", () => ({ DocumentIntelligenceInstance: vi.fn() }));
 
 // The text download of a Search file (Graph client).
@@ -143,8 +140,8 @@ vi.mock("../../skills/persona-skill-store", () => ({
   }),
   querySkillsByPersonaId: vi.fn(async () => []),
 }));
-vi.mock("../../persona-service", () => ({
-  FindPersonaByID: vi.fn(async (id: string) => {
+vi.mock("../../persona-lookup", () => ({
+  findPersonaForCurrentUser: vi.fn(async (id: string) => {
     const row = personaRow(id);
     const canOpen = row && (me === row.userId || me === ADMIN || viewerCanOpen);
     return canOpen ? { status: "OK", response: { ...row } } : { status: "NOT_FOUND", errors: [{ message: "x" }] };
@@ -158,8 +155,16 @@ vi.mock("../../skills/link-sharepoint-skill", () => ({ linkSharePointSkill: vi.f
 vi.mock("../../skills/persona-skill-service", () => ({ DeletePersonaSkill: vi.fn() }));
 
 import { AddAgentFiles, ChangeAgentFileUse, RemoveAgentFile } from "../agent-file-service";
-import { PersonaDocumentById } from "../../persona-documents-service";
-import { PersonaCIDocumentsByIds } from "../../persona-ci-documents-service";
+import {
+  FindAccessiblePersonaDocument,
+  personaCodeDocumentsByIds as PersonaCIDocumentsByIds,
+} from "../../persona-document-access";
+
+// The chat-time access rule of a Search file row (server code only).
+const PersonaDocumentById = async (id: string) =>
+  (await FindAccessiblePersonaDocument(id, "PERSONA_DOCUMENT"))
+    ? { status: "OK" as const }
+    : { status: "NOT_FOUND" as const };
 import { logError } from "@/features/common/services/logger";
 
 const DRIVE = "b!driveA_123";
@@ -181,6 +186,8 @@ beforeEach(async () => {
   chunks = [];
   viewerCanOpen = true;
   delete process.env.MAX_PERSONA_DOCUMENT_LIMIT;
+  // The admin of these tests is an admin by ADMIN_EMAIL_ADDRESS.
+  vi.stubEnv("ADMIN_EMAIL_ADDRESS", adminSession!.user.email);
   const graph = new FakeGraph()
     .add(DRIVE, { id: "ROOT", name: "root", folder: true })
     .add(DRIVE, { id: "TXT1", name: "Hours.txt", parent: "ROOT", size: 25 })
@@ -298,6 +305,22 @@ describe("removal deletes each row in its own partition", () => {
     const res = await RemoveAgentFile("p1", { kind: "ci-document", id: "ci-legacy" });
     expect(res).toEqual({ status: "OK", response: {} });
     expect(rowsOfType("PERSONA_CI_DOCUMENT")).toEqual([]);
+  });
+
+  it("never deletes a row with the same id in the partition of a user who is not an admin", async () => {
+    seedSearchRow("doc-own", OWNER);
+    store.push({
+      id: "doc-own",
+      type: "PERSONA_DOCUMENT",
+      userId: VIEWER,
+      source: "SHAREPOINT",
+      externalFile: { documentId: "TXT1", parentReference: { driveId: DRIVE } },
+    });
+    chunks.push({ personaDocumentId: "doc-own", user: VIEWER });
+    const res = await RemoveAgentFile("p1", { kind: "document", id: "doc-own" });
+    expect(res).toEqual({ status: "OK", response: {} });
+    expect(rowsOfType("PERSONA_DOCUMENT")).toEqual([expect.objectContaining({ id: "doc-own", userId: VIEWER })]);
+    expect(chunks).toEqual([{ personaDocumentId: "doc-own", user: VIEWER }]);
   });
 
   it("keeps a row that another agent still lists", async () => {

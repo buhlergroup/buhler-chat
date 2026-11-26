@@ -1,6 +1,8 @@
 import { describe, it, expect } from "vitest";
 import {
+  contentBlobPath,
   isSafeBlobFileName,
+  parseContentBlobPath,
   isSafeBlobPath,
   threadBlobPath,
   toSafeBlobFileName,
@@ -69,5 +71,24 @@ describe("common.unit.blob-path", () => {
     for (const n of ["../../x", "..", "a/b", "\u0007", `${"y".repeat(500)}`]) {
       expect(isSafeBlobFileName(toSafeBlobFileName(n))).toBe(true);
     }
+  });
+});
+
+describe("common.unit.blob-path.content", () => {
+  const scope = "a".repeat(64);
+  const hash = "0".repeat(64);
+
+  it("builds and parses the Markdown of a page range", () => {
+    const key = contentBlobPath(scope, hash, ".p1,3,5-7.md");
+    expect(key).toBe(`content/${scope}/sha256/${hash}.p1,3,5-7.md`);
+    expect(parseContentBlobPath(key)).toEqual({ scope, sha256: hash, suffix: ".p1,3,5-7.md" });
+    expect(parseContentBlobPath(`content/${scope}/sha256/${hash}.md`)?.suffix).toBe(".md");
+  });
+
+  it("refuses a page suffix that is not a page range", () => {
+    for (const bad of [".p.md", ".p1-.md", ".p1/../x.md", ".pa-b.md", ".p1 .md", `.p${"1,".repeat(80)}1.md`]) {
+      expect(() => contentBlobPath(scope, hash, bad as `.p${string}.md`)).toThrow();
+    }
+    expect(parseContentBlobPath(`content/${scope}/sha256/${hash}.p1-.md`)).toBeUndefined();
   });
 });

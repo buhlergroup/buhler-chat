@@ -9,6 +9,7 @@ import { getGraphClient } from "@/features/common/services/microsoft-graph-clien
 import { RevalidateCache } from "@/features/common/navigation-helpers";
 import { SqlQuerySpec } from "@azure/cosmos";
 import { PERSONA_ATTRIBUTE, PersonaModel, TrustLevel } from "./models";
+import { currentPersonaViewer, personaForViewer } from "./persona-access";
 
 /**
  * Whether the current user may classify marketplace agents (verify/downgrade/
@@ -99,7 +100,9 @@ export const SetAgentTrustLevel = async (
       ]);
 
     revalidateAgentPages();
-    return { status: "OK", response: resource! };
+    // A verifier who cannot edit the agent gets it without the editor-only
+    // fields (personaForViewer).
+    return { status: "OK", response: personaForViewer(await currentPersonaViewer(), resource!) };
   } catch (error) {
     return {
       status: "ERROR",
@@ -136,7 +139,9 @@ export const UnpublishAgent = async (
       ]);
 
     revalidateAgentPages();
-    return { status: "OK", response: resource! };
+    // A verifier who cannot edit the agent gets it without the editor-only
+    // fields (personaForViewer).
+    return { status: "OK", response: personaForViewer(await currentPersonaViewer(), resource!) };
   } catch (error) {
     return {
       status: "ERROR",

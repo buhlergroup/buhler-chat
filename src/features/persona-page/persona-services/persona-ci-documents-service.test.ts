@@ -48,13 +48,15 @@ vi.mock("@/features/common/services/microsoft-graph-client", () => ({
   })),
 }));
 
-import { PersonaCIDocumentsByIds } from "./persona-ci-documents-service";
+// The read with the access rule is server code only now (it returns whole
+// rows: file name, drive and item id).
+import { personaCodeDocumentsByIds as PersonaCIDocumentsByIds } from "./persona-document-access";
 import {
+  CODE_FILE_NOT_VISIBLE,
   addCodeDocument,
   deleteCodeDocument,
   downloadCodeInterpreterFile,
 } from "./persona-ci-documents-store";
-import * as ciActions from "./persona-ci-documents-service";
 
 const makeCIDoc = (id: string) => ({
   id,
@@ -179,17 +181,10 @@ describe("persona-ci-documents-service.ts", () => {
     expect(row.userId).not.toBe(USER_HASH);
   });
 
-  it("008 the add, the deletes and the download are no Server Actions", () => {
-    const exported = ciActions as Record<string, unknown>;
-    for (const name of [
-      "UpdateOrAddPersonaCIDocuments",
-      "DeletePersonaCIDocumentById",
-      "DownloadSharePointFile",
-      "DownloadCIDocumentsFromSharePoint",
-      "DeletePersonaCIDocumentsByPersonaId",
-    ]) {
-      expect(exported[name]).toBeUndefined();
-    }
+  it("008 no Code file row is readable through a Server Action (the use-server module is gone)", async () => {
+    const { existsSync } = await import("fs");
+    const { join } = await import("path");
+    expect(existsSync(join(__dirname, "persona-ci-documents-service.ts"))).toBe(false);
   });
 });
 
@@ -296,8 +291,16 @@ describe("downloadCodeInterpreterFile bounds the download", () => {
     expect(res.status).toBe("ERROR");
   });
 
-  it.each([403, 404, 500])("fails on Graph %i", async (status) => {
+  it.each([401, 403, 404, 500])("fails on Graph %i as 'not visible to the user' (no name may be told)", async (status) => {
     meta.status = status;
-    expect((await downloadCodeInterpreterFile("b!drive_1", "01ITEM")).status).toBe("ERROR");
+    const res = await downloadCodeInterpreterFile("b!drive_1", "01ITEM");
+    expect(res.status).toBe("ERROR");
+    expect(res.status === "ERROR" && res.errors[0].code).toBe(CODE_FILE_NOT_VISIBLE);
+  });
+
+  it("a file the user can see but that is too large is not 'not visible'", async () => {
+    meta.size = 512 * MB + 1;
+    const res = await downloadCodeInterpreterFile("b!drive_1", "01ITEM");
+    expect(res.status === "ERROR" && res.errors[0].code).toBeUndefined();
   });
 });

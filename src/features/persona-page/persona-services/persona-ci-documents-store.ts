@@ -7,7 +7,7 @@ import "server-only";
  * Not a "use server" module: nothing here is callable from the browser. The
  * callers check the permission first (agent-files/agent-file-store.ts: edit
  * permission; persona-service.ts CreatePersonaChat: the rows come from
- * PersonaCIDocumentsByIds, which applies the access rule).
+ * personaCodeDocumentsByIds, which applies the access rule).
  *
  * Partition rule: a row is written in the agent OWNER's partition, also when
  * an admin adds the file, and deleted in its own partition (row.userId).
@@ -85,10 +85,39 @@ export async function deleteCodeDocument(
 }
 
 /**
+ * Stores the content hash of the file version a chat loaded on the row (in
+ * its own partition), so the content store entry has a reference and the
+ * cleanup keeps it. Rows written before the content store get their hash
+ * here, on the first chat that loads the file. Best effort: a failure is
+ * logged, the chat goes on.
+ */
+export async function recordCodeDocumentHash(
+  row: Pick<PersonaCIDocument, "id" | "userId">,
+  sha256: string
+): Promise<void> {
+  try {
+    await HistoryContainer()
+      .item(row.id, row.userId)
+      .patch([{ op: "set", path: "/sha256", value: sha256 }]);
+  } catch (error) {
+    if (isNotFound(error)) return;
+    logError("Code file hash could not be stored", { documentId: row.id, error: errorText(error) });
+  }
+}
+
+/**
+ * Error code of downloadCodeInterpreterFile when SharePoint did not show the
+ * file to the user (no access, moved, deleted, or no answer). The caller
+ * must not tell the user the file's name then.
+ */
+export const CODE_FILE_NOT_VISIBLE = "CODE_FILE_NOT_VISIBLE";
+
+/**
  * Downloads a Code file from SharePoint with the current user's token.
  * Metadata first (5 s): the size is checked against the same limit as the
  * editor (readCodeInterpreterMaxFileBytes), then the download (60 s, at most
- * that many bytes).
+ * that many bytes). When the metadata read fails, the error has the code
+ * CODE_FILE_NOT_VISIBLE.
  */
 export async function downloadCodeInterpreterFile(
   driveId: string,
@@ -97,7 +126,20 @@ export async function downloadCodeInterpreterFile(
   try {
     const { token } = await getCurrentUser();
 
-    const metadata = await getDriveItemVersion(token, driveId, itemId);
+    let metadata: Awaited<ReturnType<typeof getDriveItemVersion>>;
+    try {
+      metadata = await getDriveItemVersion(token, driveId, itemId);
+    } catch (error) {
+      logError("SharePoint file metadata could not be read", {
+        error: errorText(error),
+        driveId,
+        itemId,
+      });
+      return {
+        status: "ERROR",
+        errors: [{ message: "The file is not available.", code: CODE_FILE_NOT_VISIBLE }],
+      };
+    }
     const maxBytes = readCodeInterpreterMaxFileBytes();
     if (metadata.size > maxBytes) {
       logError("SharePoint file is larger than the code interpreter limit", {

@@ -1,5 +1,9 @@
 import { refineFromEmpty } from "@/features/common/schema-validation";
 import { z } from "zod";
+import {
+  GRAPH_DRIVE_ID_PATTERN,
+  GRAPH_ITEM_ID_PATTERN,
+} from "@/features/common/services/sharepoint/graph-ids";
 
 export const EXTERNAL_SOURCE = "SHAREPOINT";
 export const PERSONA_DOCUMENT_ATTRIBUTE = "PERSONA_DOCUMENT";
@@ -26,10 +30,12 @@ export type SharePointFileContent = DocumentMetadata &{
   chunks?: string[];
 }
 
+// The drive and item id go into Graph URLs (/drives/{drive}/items/{item}):
+// only Graph id characters are accepted (graph-ids.ts).
 export const SharePointFileSchema = z.object({
-  documentId: z.string(), // SharePoint document ID
+  documentId: z.string().regex(GRAPH_ITEM_ID_PATTERN, "Invalid SharePoint item id"), // SharePoint document ID
   parentReference: z.object({
-    driveId: z.string(),
+    driveId: z.string().regex(GRAPH_DRIVE_ID_PATTERN, "Invalid SharePoint drive id"),
   }),
 });
 
@@ -37,6 +43,10 @@ export const PersonaDocumentSchema = z.object({
   id: z.string(),
   externalFile: SharePointFileSchema,
   userId: z.string(),
+  // SHA-256 of the file content in the content store (scope: agent owner).
+  // Absent on rows written before the content store; filled when the file
+  // is processed again.
+  sha256: z.string().regex(/^[0-9a-f]{64}$/).optional(),
   source: z.literal(EXTERNAL_SOURCE),
   type: z.literal(PERSONA_DOCUMENT_ATTRIBUTE),
 });
@@ -47,6 +57,10 @@ export const PersonaCIDocumentSchema = z.object({
   externalFile: SharePointFileSchema,
   fileName: z.string(), // Original file name from SharePoint
   userId: z.string(),
+  // SHA-256 of the file content in the content store (scope: agent owner).
+  // Absent on rows written before the content store; filled when the file
+  // is processed again.
+  sha256: z.string().regex(/^[0-9a-f]{64}$/).optional(),
   source: z.literal(EXTERNAL_SOURCE),
   type: z.literal(PERSONA_CI_DOCUMENT_ATTRIBUTE),
 });

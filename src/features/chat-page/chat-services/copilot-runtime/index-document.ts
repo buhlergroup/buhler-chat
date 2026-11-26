@@ -5,13 +5,15 @@
  * row the upload flow writes, so search_documents, the document list and
  * deletion keep working.
  *
- * Input text: the Markdown next to a document (<file>.md, written at upload,
- * so Document Intelligence never runs twice), else the file itself when it is
- * text. Indexing the same file again replaces its chunks and updates the row.
+ * Input text: the Markdown next to a document (<file>.md, written by
+ * extract_text; when it is missing, the extraction runs first through the
+ * same code), else the file itself when it is text. Indexing the same file
+ * again replaces its chunks and updates the row.
  */
 import { tool } from "ai";
 import { z } from "zod";
 import type { WorkspaceEntry } from "./blob-session-fs";
+import { isExtractable, type ExtractTextResult } from "./extract-text";
 import { normalizeSessionPath, WORKSPACE_ROOT } from "./session-path";
 
 export interface IndexedRow {
@@ -28,6 +30,8 @@ export interface IndexDocumentDeps {
   saveRow(row: { id?: string; name: string; workspacePath: string; chunkCount: number }): Promise<void>;
   /** Chunks + indexes `text` as document `name` of the thread, replacing earlier chunks. Returns the chunk count. */
   index(name: string, text: string): Promise<number>;
+  /** extract_text for a PDF/Office file whose <file>.md is missing (extract-text.ts). */
+  extractText?(path: string): Promise<ExtractTextResult>;
 }
 
 export interface IndexResult {
@@ -60,14 +64,19 @@ export async function indexWorkspaceDocument(deps: IndexDocumentDeps, rawPath: s
   if (path.endsWith(".md") && (await findEntry(deps, path.slice(0, -3)))) docPath = path.slice(0, -3);
   const entry = await findEntry(deps, docPath);
   if (!entry) return { path, status: "error", error: "File not found." };
-  const companion = await findEntry(deps, `${docPath}.md`);
+  let companion = await findEntry(deps, `${docPath}.md`);
+  if (!companion && deps.extractText && isExtractable(docPath)) {
+    const extracted = await deps.extractText(docPath);
+    if (extracted.status === "error") return { path, status: "error", error: extracted.error };
+    companion = await findEntry(deps, `${docPath}.md`);
+  }
   const data = await deps.fs.readEntry(companion ?? entry);
   if (!isText(data)) {
     return {
       path,
       status: "error",
       error:
-        "This file has no text to index. Documents uploaded to the chat get a .md with their text; index that, or write the text to a file first.",
+        "This file has no text to index. Run extract_text on a PDF or Office file first, or write the text to a file.",
     };
   }
   const name = docPath.slice(WORKSPACE_ROOT.length + 1);
@@ -85,8 +94,8 @@ export const INDEX_DOCUMENT_DESCRIPTION =
   "Call it when the user asks to index or search a document (also again, when asked again), " +
   "when a document is long (more than about 20 pages or 50,000 characters), " +
   "or when you need meaning-based search across several documents. " +
-  "Otherwise read files directly with view or rg. " +
-  "Uploaded documents are indexed from their extracted text (<file>.md). Indexing a file again replaces its earlier index entries. " +
+  "Otherwise read files directly with view or rg (extract_text for PDF and Office files). " +
+  "A PDF or Office file is indexed from its extracted text (<file>.md), extracted first when missing. Indexing a file again replaces its earlier index entries. " +
   "Returns the file name and the number of chunks.";
 
 export function indexDocumentTool(deps: IndexDocumentDeps) {

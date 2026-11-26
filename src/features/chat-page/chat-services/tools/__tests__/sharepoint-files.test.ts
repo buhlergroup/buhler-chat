@@ -16,12 +16,12 @@ vi.mock("@/features/persona-page/persona-services/skills/persona-skill-store", (
   readSkillFile: vi.fn(),
 }));
 
-const uploadToContainer = vi.fn(async (_c: string, name: string, _d: Buffer) => ({
+const uploadToContainer = vi.fn(async (_c: string, name: string, _d: Buffer, _scope?: string) => ({
   path: `/mnt/data/${name}`,
 }));
 vi.mock("@/features/chat-page/chat-services/code-interpreter-container", () => ({
-  uploadFileToCodeInterpreterContainer: (c: string, n: string, d: Buffer) =>
-    uploadToContainer(c, n, d),
+  putFileIntoCodeInterpreterContainer: (c: string, n: string, d: Buffer, scope?: string) =>
+    uploadToContainer(c, n, d, scope),
 }));
 
 import { buildToolset } from "../registry";
@@ -140,9 +140,31 @@ describe("SharePoint file tools in buildToolset", () => {
     expect(found.files).toEqual([expect.objectContaining({ id: "TXT1", path: "notes.txt" })]);
     const fetched = await exec(tools.fetch_sharepoint_file, { name: "notes.txt" });
     expect(fetched).toMatchObject({ path: "/mnt/data/notes.txt", name: "notes.txt" });
-    expect(uploadToContainer).toHaveBeenCalledWith("cntr_1", "notes.txt", expect.any(Buffer));
+    expect(uploadToContainer).toHaveBeenCalledWith(
+      "cntr_1",
+      "notes.txt",
+      expect.any(Buffer),
+      // the agent owner: the content store scope of agent files
+      expect.any(String),
+    );
     const calls = vi.mocked(fetch).mock.calls.map((c) => String(c[0]));
     expect(calls.filter((u) => u.includes("/children"))).toHaveLength(1);
+  });
+
+  it("tells the model the exact path when the container prefixed the name", async () => {
+    // A file attached by OpenAI file id (content store) is /mnt/data/<file id>-<name>.
+    uploadToContainer.mockResolvedValueOnce({ path: "/mnt/data/assistant-abc-notes.txt" });
+    const tools = await buildToolset(baseCtx());
+    const fetched = await exec(tools.fetch_sharepoint_file, { name: "notes.txt" });
+    expect(fetched.path).toBe("/mnt/data/assistant-abc-notes.txt");
+    expect(fetched.pathNote).toContain("/mnt/data/assistant-abc-notes.txt");
+    expect(fetched.pathNote).toContain("/mnt/data/notes.txt does not exist");
+  });
+
+  it("adds no path note when the path is /mnt/data/<name>", async () => {
+    const tools = await buildToolset(baseCtx());
+    const fetched = await exec(tools.fetch_sharepoint_file, { name: "notes.txt" });
+    expect(fetched.pathNote).toBeUndefined();
   });
 });
 

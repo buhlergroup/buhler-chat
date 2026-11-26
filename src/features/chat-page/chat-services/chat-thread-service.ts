@@ -16,7 +16,7 @@ import {
 import { SqlQuerySpec } from "@azure/cosmos";
 import { HistoryContainer } from "../../common/services/cosmos";
 import { DeleteDocumentsOfChatThread } from "./azure-ai-search/azure-ai-search";
-import { FindAllChatDocuments } from "./chat-document-service";
+import { FindAllChatDocuments } from "./chat-document-store";
 import { FindAllChatMessagesForCurrentUser } from "./chat-message-service";
 import { SoftDeleteChatHistorySummary } from "./chat-api/history-summary-service";
 import {
