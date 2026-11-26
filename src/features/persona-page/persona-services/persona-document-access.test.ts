@@ -79,9 +79,6 @@ vi.mock("@/features/common/services/document-intelligence", () => ({
   DocumentIntelligenceInstance: vi.fn(),
 }));
 
-vi.mock("@/features/chat-page/chat-services/chat-document-service", () => ({
-  ChunkDocumentWithOverlap: vi.fn(),
-}));
 
 // The access rule opens the agent with the server-only lookup (whole row).
 vi.mock("./persona-lookup", () => ({

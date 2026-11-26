@@ -61,7 +61,7 @@ const SANDBOX_COMPLETE_PATTERN = /sandbox:\/mnt\/data\/([^\s)\]"'>]+)/g;
 
 /**
  * Returns the index in `buffer` at which an URL must start being held back,
- * or -1 if the buffer can be emitted in full. Two cases trigger a hold:
+ * or -1 if the buffer can be emitted in full. Three cases trigger a hold:
  *
  *   1. A trailing literal prefix that might extend into a sandbox: or
  *      data:image/ URL on the next delta (e.g. "san", "data:ima").
@@ -72,38 +72,51 @@ const SANDBOX_COMPLETE_PATTERN = /sandbox:\/mnt\/data\/([^\s)\]"'>]+)/g;
  *      arrive at `text-end` (after this text-delta) per Azure's
  *      Responses-API behaviour, so we keep waiting until we have a
  *      substitution to apply.
+ *
+ * The cases overlap, so the hold starts at the EARLIEST position any of
+ * them asks for. Returning the first match instead released a URL that was
+ * still in flight: Azure splits `sandbox:/mnt/data/sales3.csv` into deltas
+ * such as `/data`, `/s`, `ales`, so the buffer ends in "s" — a case-1
+ * prefix — while the case-2 URL starts much earlier. Holding only the "s"
+ * sent `sandbox:/mnt/data/` to the client on its own; no later buffer then
+ * held the whole URL, so it reached Streamdown unrewritten and rendered as
+ * "[blocked]" until a reload read the persisted (rewritten) text.
  */
 function findHoldBackStart(
   buffer: string,
   fileMap: Map<string, string>,
 ): number {
-  for (const p of SANDBOX_PREFIXES) {
-    if (buffer.endsWith(p)) return buffer.length - p.length;
-  }
-  for (const p of DATA_PREFIXES) {
-    if (buffer.endsWith(p)) return buffer.length - p.length;
-  }
+  let holdFrom = -1;
+  const holdAt = (index: number) => {
+    if (index !== -1 && (holdFrom === -1 || index < holdFrom)) holdFrom = index;
+  };
+
+  // Case 1. The prefix lists run longest first, so the first match is the
+  // earliest start for that list.
+  const sandboxPrefix = SANDBOX_PREFIXES.find((p) => buffer.endsWith(p));
+  if (sandboxPrefix) holdAt(buffer.length - sandboxPrefix.length);
+  const dataPrefix = DATA_PREFIXES.find((p) => buffer.endsWith(p));
+  if (dataPrefix) holdAt(buffer.length - dataPrefix.length);
+
+  // Case 2.
   const sandboxIdx = buffer.lastIndexOf("sandbox:");
   if (sandboxIdx !== -1 && !URL_TERMINATOR.test(buffer.slice(sandboxIdx))) {
-    return sandboxIdx;
+    holdAt(sandboxIdx);
   }
   const dataIdx = buffer.lastIndexOf("data:image/");
   if (dataIdx !== -1 && !URL_TERMINATOR.test(buffer.slice(dataIdx))) {
-    return dataIdx;
+    holdAt(dataIdx);
   }
-  // Already-terminated sandbox URL still waiting on a filename → URL pair
-  // from a citation annotation that hasn't arrived yet. Hold from that
+
+  // Case 3. Already-terminated sandbox URL still waiting on a filename → URL
+  // pair from a citation annotation that hasn't arrived yet. Hold from that
   // URL's start so it can be retried once fileMap is populated.
   SANDBOX_COMPLETE_PATTERN.lastIndex = 0;
-  let earliest = -1;
   let m: RegExpExecArray | null;
   while ((m = SANDBOX_COMPLETE_PATTERN.exec(buffer)) !== null) {
-    const filename = m[1];
-    if (!fileMap.has(filename)) {
-      if (earliest === -1 || m.index < earliest) earliest = m.index;
-    }
+    if (!fileMap.has(m[1])) holdAt(m.index);
   }
-  return earliest;
+  return holdFrom;
 }
 
 /** Reads container_file_citation annotations off a text-end chunk's providerMetadata. */

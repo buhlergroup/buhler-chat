@@ -21,11 +21,13 @@ import "server-only";
 import { userHashedId } from "@/features/auth-page/helpers";
 import { HistoryContainer } from "@/features/common/services/cosmos";
 import { logWarn } from "@/features/common/services/logger";
+import { contentStore } from "@/features/common/services/content-store";
 import {
   CHAT_THREAD_ATTRIBUTE,
   type AttachedFileModel,
   type ChatThreadModel,
 } from "./models";
+import { PERSONA_CI_DOCUMENT_ATTRIBUTE } from "@/features/persona-page/persona-services/models";
 
 const isCodeInterpreterEntry = (f: Pick<AttachedFileModel, "type">) =>
   f.type !== "search-indexed";
@@ -113,13 +115,72 @@ export async function findCodeInterpreterFileOfCurrentUser(
 }
 
 /**
+ * True when `fileId` is the OpenAI file the content store keeps for an agent
+ * file of the caller's content (OpenAiFileUse "agent"): chats of other users
+ * with the agent use it. On a storage error the answer is true (keep the
+ * file).
+ */
+async function isAgentFileOfCaller(userId: string, fileId: string, sha256?: string) {
+  if (!sha256) return false;
+  try {
+    return await contentStore().isAgentOpenAiFile(userId, sha256, fileId);
+  } catch (error) {
+    logWarn("code interpreter file: agent file check failed, the file is kept", {
+      error: error instanceof Error ? error.message : String(error),
+    });
+    return true;
+  }
+}
+
+/**
+ * How many places of the caller use an OpenAI file: the caller's (not
+ * deleted) threads that list the id, plus the caller's agent Code files with
+ * the same content (`sha256` of the attached entry), plus one when the id is
+ * the agent file of that content. It is deleted from OpenAI only when the
+ * thread that asks is its last user (count 1).
+ *
+ * The content store gives the same bytes of one owner one OpenAI file per
+ * use: uploads share one, agent files have their own (cached under separate
+ * metadata keys), so a new upload never gets an agent file id. Content
+ * cached before that has one id for both; the Code rows with the same hash
+ * still keep such an id from being deleted while the owner's agent has the
+ * file.
+ */
+export async function countUsesOfCodeInterpreterFile(
+  fileId: string,
+  sha256?: string,
+): Promise<number> {
+  if (!fileId) return 0;
+  const userId = await userHashedId();
+  const agentUse = (await isAgentFileOfCaller(userId, fileId, sha256)) ? 1 : 0;
+  const { resources } = await HistoryContainer()
+    .items.query<number>(
+      {
+        query:
+          "SELECT VALUE COUNT(1) FROM root r WHERE r.userId = @userId AND ((r.type = @threadType AND r.isDeleted = false AND ARRAY_CONTAINS(r.attachedFiles, { \"id\": @fileId }, true)) OR (r.type = @codeFileType AND r.sha256 = @sha256))",
+        parameters: [
+          { name: "@userId", value: userId },
+          { name: "@threadType", value: CHAT_THREAD_ATTRIBUTE },
+          { name: "@codeFileType", value: PERSONA_CI_DOCUMENT_ATTRIBUTE },
+          { name: "@fileId", value: fileId },
+          // No hash (an entry from before the content store): no agent match.
+          { name: "@sha256", value: sha256 || "-" },
+        ],
+      },
+      { partitionKey: userId },
+    )
+    .fetchAll();
+  return (resources?.[0] ?? 0) + agentUse;
+}
+
+/**
  * Records an uploaded code interpreter file on the caller's thread
  * (source "upload"). Returns false when the thread is not the caller's or
  * the write failed. Retries on a concurrent write (etag).
  */
 export async function recordCodeInterpreterUpload(
   threadId: string,
-  file: { id: string; name: string },
+  file: { id: string; name: string; sha256?: string },
 ): Promise<boolean> {
   const userId = await userHashedId();
   for (let attempt = 0; attempt < 3; attempt++) {
@@ -142,6 +203,7 @@ export async function recordCodeInterpreterUpload(
       type: "code-interpreter",
       uploadedAt: new Date(),
       source: "upload",
+      ...(file.sha256 ? { sha256: file.sha256 } : {}),
     };
     try {
       await HistoryContainer().items.upsert<ChatThreadModel>(

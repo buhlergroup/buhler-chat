@@ -4,8 +4,12 @@ import { createSandboxUrlTransform } from "../sandbox-url-transform";
 const SANDBOX = "sandbox:/mnt/data/red.png";
 const STORED = "https://blob.example.com/red.png";
 
-async function pipe(chunks: any[], threadId?: string): Promise<any[]> {
-  const transform = createSandboxUrlTransform(threadId)();
+async function pipe(
+  chunks: any[],
+  threadId?: string,
+  dataUrlToBlobRef?: Map<string, string>,
+): Promise<any[]> {
+  const transform = createSandboxUrlTransform(threadId, dataUrlToBlobRef)();
   const out: any[] = [];
   const writer = transform.writable.getWriter();
   const reader = transform.readable.getReader();
@@ -160,5 +164,31 @@ describe("sandbox-url-transform", () => {
       .map((c) => c.text)
       .join("");
     expect(reassembled).toContain(SANDBOX);
+  });
+
+  it("keeps holding an in-flight URL when the delta also ends in a prefix of the next URL", async () => {
+    // A delta that ends in "s" (a prefix of "sandbox") while a URL is still
+    // in flight: the hold must start at the URL, not at the "s".
+    const dataUrl = "data:image/png;base64,AAAs";
+    const blobRef = "blob://thread-xyz/abc.png";
+    const out = await pipe(
+      [
+        { type: "text-delta", id: "1", text: "![x](data:image/png;base64,AAA" },
+        { type: "text-delta", id: "1", text: "s" },
+        { type: "text-delta", id: "1", text: ") and [y](sandbox:/mnt/data" },
+        { type: "text-delta", id: "1", text: "/s" },
+        { type: "text-delta", id: "1", text: "ales.csv)" },
+        { type: "text-end", id: "1" },
+      ],
+      "thread-xyz",
+      new Map([[dataUrl, blobRef]]),
+    );
+    const reassembled = out
+      .filter((c) => c.type === "text-delta")
+      .map((c) => c.text)
+      .join("");
+    expect(reassembled).toBe(
+      `![x](${blobRef}) and [y](/api/images?t=thread-xyz&img=sales.csv)`,
+    );
   });
 });

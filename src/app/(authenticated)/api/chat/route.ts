@@ -34,9 +34,7 @@ import {
 import { persistAssistantFromFinishEvent } from "@/features/chat-page/chat-services/chat-api/persist-assistant";
 import { consumeRateLimitToken } from "@/features/chat-page/chat-services/chat-api/rate-limit";
 import { resolveRateLimitSubject } from "@/features/chat-page/chat-services/chat-api/rate-limit-subject";
-import { createSandboxUrlTransform } from "@/features/chat-page/chat-services/chat-api/sandbox-url-transform";
-import { createImageGenerationStreamRewriter } from "@/features/chat-page/chat-services/chat-api/image-generation-stream-rewriter";
-import { createCodeInterpreterStreamRewriter } from "@/features/chat-page/chat-services/chat-api/code-interpreter-stream-rewriter";
+import { createChatStreamTransforms } from "@/features/chat-page/chat-services/chat-api/chat-stream-transforms";
 import { resolveProvider, getFileIdsSignature } from "@/features/chat-page/chat-services/models/provider-seam";
 import { resolveMaxOutputTokens } from "@/features/chat-page/chat-services/models/max-output-tokens";
 import { ensureCodeInterpreterContainer } from "@/features/chat-page/chat-services/code-interpreter-container";
@@ -71,8 +69,11 @@ import {
   resolveSkillCodeInterpreterFiles,
 } from "@/features/persona-page/persona-services/skills/skill-models";
 import { buildUnavailableAgentFilesPrompt } from "@/features/chat-page/chat-services/chat-api/unavailable-agent-files";
+import { buildCodeInterpreterFilesPrompt } from "@/features/chat-page/chat-services/chat-api/code-interpreter-files-prompt";
 import { loadUsableFileSources } from "@/features/persona-page/persona-services/sharepoint-files/sharepoint-file-store";
 import { type UserPrompt } from "@/features/chat-page/chat-services/models";
+import { copilotProviderFor } from "@/features/chat-page/chat-services/copilot-runtime/runtime-flag";
+import { resolveAgentRuntimeForCurrentUser } from "@/features/chat-page/chat-services/copilot-runtime/runtime-selection";
 
 // Allow streaming responses to run for up to 10 minutes (600 seconds)
 export const maxDuration = 600;
@@ -229,6 +230,13 @@ export async function POST(req: Request) {
   // is the one placement the Azure /anthropic surface may reject outright.
   // Idempotent, and a no-op when the two already agree.
   ctx = applyDocumentHintPlacement(ctx, modelConfig.provider);
+
+  // The Copilot runtime (copilot-runtime/) serves this turn when AGENT_RUNTIME
+  // is "copilot" or the user is opted in (runtime-selection.ts). Models it
+  // cannot serve stay on the AI SDK path.
+  const useCopilotRuntime =
+    copilotProviderFor(modelConfig) !== undefined &&
+    (await resolveAgentRuntimeForCurrentUser()) === "copilot";
   if (ctx.documentHintPlacement !== "none") {
     logInfo("/api/chat document hint placement", {
       threadId: ctx.thread.id,
@@ -263,7 +271,10 @@ export async function POST(req: Request) {
   //     needs the separate Anthropic Files API — deferred).
   //   - foundry (Chat Completions): no server tools; the seam ignores toggles.
   // Custom registry tools (RAG, sub-agents, extensions) are unaffected.
-  const effectiveToolsSafe = modelConfig.supportsResponsesAPI
+  const effectiveToolsSafe = useCopilotRuntime
+    ? // Provider-hosted built-ins are not available on the Copilot path.
+      { codeInterpreter: false, imageGeneration: false, webSearch: false }
+    : modelConfig.supportsResponsesAPI
     ? effectiveTools
     : modelConfig.provider === "anthropic"
       ? { codeInterpreter: false, imageGeneration: false, webSearch: effectiveTools.webSearch }
@@ -332,11 +343,27 @@ export async function POST(req: Request) {
 
   // SharePoint files for the model (personas only): the folders/files the
   // agent links. Only loaded when the code interpreter runs in this turn,
-  // because fetched files go into its container. What the user may read in
+  // because fetched files go into its container — or on the Copilot path,
+  // where they go into the chat's file workspace. What the user may read in
   // them is decided by SharePoint at fetch time, with the user's token.
-  const fileSources = effectiveToolsSafe.codeInterpreter
-    ? await loadUsableFileSources(ctx.thread.personaId)
-    : undefined;
+  const fileSources =
+    effectiveToolsSafe.codeInterpreter || useCopilotRuntime
+      ? await loadUsableFileSources(ctx.thread.personaId)
+      : undefined;
+  const uploadToWorkspace =
+    fileSources && useCopilotRuntime
+      ? await (async () => {
+          const [{ storeSharePointFileInWorkspace }, { userHashedId }] = await Promise.all([
+            import("@/features/chat-page/chat-services/copilot-runtime/workspace-files"),
+            import("@/features/auth-page/helpers"),
+          ]);
+          const userKey = await userHashedId();
+          return async (fileName: string, data: Buffer) => ({
+            // Under /workspace/sharepoint: not part of the chat's uploads.
+            path: (await storeSharePointFileInWorkspace(userKey, ctx.thread.id, fileName, data)).path,
+          });
+        })()
+      : undefined;
 
   // ── prompt prefix assembly (cache-stability critical) ──────────────────
   // The generative-UI block is process-constant, so it is handed to
@@ -353,8 +380,14 @@ export async function POST(req: Request) {
           ctx.thread.unavailableAgentFiles,
           ctx.thread.notFoundAgentFileCount,
           ctx.thread.notAvailableAgentFileCount,
-        ),
-      documentHint: ctx.documentHint,
+        ) +
+        // Exact /mnt/data paths of the attached files (agent Code files and
+        // uploads): a file attached by id has a prefixed name there.
+        (effectiveToolsSafe.codeInterpreter
+          ? buildCodeInterpreterFilesPrompt(ciAttachedFiles, skillFiles.fileIds)
+          : ""),
+      // The Copilot session keeps one system message; it sends the hint per turn.
+      documentHint: useCopilotRuntime ? undefined : ctx.documentHint,
       trailingStaticBlock:
         // Generative UI: GPT-5.5 reliably declines a UI *tool* under tool_choice
         // auto (it prefers to emit markdown), but it WILL emit a fenced code block.
@@ -390,6 +423,10 @@ export async function POST(req: Request) {
     extensions: resolvedExtensions,
     // The agent's current sub-agents (loadThreadContext), not a thread copy.
     subAgentIds: ctx.subAgentIds,
+    // Copilot path: no MCP output cap; large results become workspace files.
+    ...(useCopilotRuntime
+      ? { mcpOutputLimit: Number.POSITIVE_INFINITY, searchDocumentsAlways: true }
+      : {}),
     // Browser-local datetime for the get_current_time tool (server UTC fallback).
     clientDateTime: req.headers.get("x-client-datetime") ?? undefined,
     depth: 0,
@@ -403,9 +440,29 @@ export async function POST(req: Request) {
         // Read when the model calls the tool: the container is created
         // (or replaced) further down, after the toolset.
         getContainerId: () => ctx.thread.codeInterpreterContainerId,
+        ...(uploadToWorkspace ? { uploadToWorkspace } : {}),
       },
     }),
   });
+
+  if (useCopilotRuntime) {
+    const { runCopilotChatTurn } = await import(
+      "@/features/chat-page/chat-services/copilot-runtime/chat-turn"
+    );
+    return runCopilotChatTurn({
+      ctx,
+      payload,
+      modelConfig,
+      effectiveModel,
+      reasoningEffort: effectiveReasoningEffort,
+      fallbackInfo: fallbackInfo.fellBack ? fallbackInfo : undefined,
+      systemMessage: system,
+      toolset: tools,
+      // The provider-hosted built-ins become our own tools on this path.
+      builtInToggles: effectiveTools,
+      clientDateTime: req.headers.get("x-client-datetime") ?? undefined,
+    });
+  }
 
   // Code-interpreter file IDs the user attached this turn. The chat-store
   // sends them as `codeInterpreterFileIds` (OpenAI file IDs from
@@ -693,18 +750,7 @@ export async function POST(req: Request) {
     // instead of letting NoSuchToolError kill the turn.
     repairToolCall: repairExtensionToolCall,
     abortSignal: abortController.signal,
-    experimental_transform: (() => {
-      // Shared map populated by the code-interpreter rewriter when it
-      // persists a data: URL → blob ref; the sandbox text-delta transform
-      // consumes it to substitute matching data: URLs the model echoes
-      // in its prose.
-      const dataUrlToBlobRef = new Map<string, string>();
-      return [
-        createImageGenerationStreamRewriter(ctx.thread.id),
-        createCodeInterpreterStreamRewriter(ctx.thread.id, dataUrlToBlobRef),
-        createSandboxUrlTransform(ctx.thread.id, dataUrlToBlobRef),
-      ];
-    })(),
+    experimental_transform: createChatStreamTransforms(ctx.thread.id),
     providerOptions: resolved.providerOptions,
     onError: ({ error }) => {
       // `Error` objects have non-enumerable `.message` and `.stack`, so

@@ -52,7 +52,10 @@ const truncate = (text: string, limit: number) =>
  * joined, plus structuredContent when the server sends it. Images, audio and
  * binary resources are named, not forwarded. Output is capped.
  */
-export function mapMcpCallResult(result: McpCallResult): { text: string; structuredContent?: unknown } {
+export function mapMcpCallResult(
+  result: McpCallResult,
+  maxChars: number = MAX_MCP_TOOL_OUTPUT_CHARS,
+): { text: string; structuredContent?: unknown } {
   const parts: string[] = [];
   for (const item of result.content ?? []) {
     const part = item as {
@@ -82,11 +85,11 @@ export function mapMcpCallResult(result: McpCallResult): { text: string; structu
     }
   }
 
-  const text = truncate(parts.join("\n"), MAX_MCP_TOOL_OUTPUT_CHARS);
+  const text = truncate(parts.join("\n"), maxChars);
   if (result.structuredContent === undefined) return { text };
 
   const structuredJson = JSON.stringify(result.structuredContent);
-  if (structuredJson === undefined || structuredJson.length > MAX_MCP_TOOL_OUTPUT_CHARS) {
+  if (structuredJson === undefined || structuredJson.length > maxChars) {
     return { text };
   }
   return { text, structuredContent: result.structuredContent };
@@ -119,7 +122,9 @@ export function mcpTool(
   info: McpToolInfo,
   connection: McpConnectionOptions,
   openSession: McpSessionFactory = openMcpSession,
-  personaId?: string
+  personaId?: string,
+  /** Output cap; the Copilot path passes Infinity (large results go to a workspace file). */
+  maxOutputChars: number = MAX_MCP_TOOL_OUTPUT_CHARS
 ): Tool {
   return tool({
     description: truncate(info.description ?? `Tool ${info.name} of ${extension.name}`, MAX_DESCRIPTION_CHARS),
@@ -159,7 +164,7 @@ export function mcpTool(
         throw new ToolUserError(`${extension.name} / ${info.name}: ${describeMcpError(error)}`);
       }
 
-      const mapped = mapMcpCallResult(result);
+      const mapped = mapMcpCallResult(result, maxOutputChars);
       if (result.isError) {
         // The server reports a tool-level error; the model gets its text.
         throw new ToolUserError(
@@ -185,7 +190,8 @@ export async function mcpExtensionTools(
   extension: ExtensionModel,
   connection: McpConnectionOptions,
   openSession: McpSessionFactory = openMcpSession,
-  personaId?: string
+  personaId?: string,
+  maxOutputChars: number = MAX_MCP_TOOL_OUTPUT_CHARS
 ): Promise<Array<[string, Tool]>> {
   const config = extension.mcp;
   if (!config) return [];
@@ -210,6 +216,6 @@ export async function mcpExtensionTools(
 
   return filterMcpTools(tools, config.toolAllowList).map((info) => [
     buildExtensionToolKey(extension.id, info.name),
-    mcpTool(extension, info, connection, openSession, personaId),
+    mcpTool(extension, info, connection, openSession, personaId, maxOutputChars),
   ]);
 }

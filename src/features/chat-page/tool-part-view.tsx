@@ -33,7 +33,7 @@ import {
   isImageReference,
   resolveBlobReferenceToPath,
 } from "./chat-services/chat-image-persistence-utils";
-import { stripExtensionKeyPrefix } from "./tool-display-name";
+import { appToolLabel, stripExtensionKeyPrefix } from "./tool-display-name";
 
 // ---------------------------------------------------------------------------
 // Typed view over UIMessage parts
@@ -220,6 +220,14 @@ function extractImageGenSrc(output: unknown): string | null {
   return null;
 }
 
+/** Same-origin image URLs from an output's `images` array of blob:// refs. */
+function extractImageRefs(output: unknown): string[] {
+  if (!isPlainObject(output) || !Array.isArray(output.images)) return [];
+  return output.images.flatMap((ref) =>
+    typeof ref === "string" && isImageReference(ref) ? [resolveBlobReferenceToPath(ref)].filter((u): u is string => !!u) : [],
+  );
+}
+
 /**
  * Renders a tool's output body. The five cases cover the common shapes
  * tool results take in this codebase:
@@ -273,7 +281,8 @@ export function renderToolOutput(output: unknown, toolName?: string): ReactNode 
       </div>
     );
   }
-  if (toolName === "image_generation") {
+  // generate_image: the Copilot path's own image tool, same output shape.
+  if (toolName === "image_generation" || toolName === "generate_image") {
     const src = extractImageGenSrc(output);
     if (src) {
       return (
@@ -285,6 +294,20 @@ export function renderToolOutput(output: unknown, toolName?: string): ReactNode 
         />
       );
     }
+  }
+  // run_code (Copilot path): image outputs as blob refs in `images`.
+  const codeImages = toolName === "run_code" ? extractImageRefs(output) : [];
+  if (codeImages.length > 0) {
+    const rest = Object.fromEntries(Object.entries(output as Record<string, unknown>).filter(([k]) => k !== "images"));
+    return (
+      <div className="flex flex-col gap-2">
+        {codeImages.map((src) => (
+          // eslint-disable-next-line @next/next/no-img-element
+          <img key={src} src={src} alt="Code output" className="max-w-full rounded-md border border-border/40" />
+        ))}
+        <pre className="whitespace-pre-wrap break-words text-xs">{JSON.stringify(rest, null, 2)}</pre>
+      </div>
+    );
   }
   if (isPrimitive(output)) return String(output);
   if (isObjectOfPrimitives(output)) return <KeyValueTable data={output} />;
@@ -300,8 +323,22 @@ export function renderToolOutput(output: unknown, toolName?: string): ReactNode 
 // Public component
 // ---------------------------------------------------------------------------
 
+/**
+ * Header label of a tool part, when it is not the tool name: a sub-agent run
+ * on the Copilot path (`sub_agent`, input.agent = its display name) reads
+ * "Sub-agent <name>".
+ */
+export function toolPartLabel(toolName: string, input: unknown): string | undefined {
+  // The Copilot path image tool reads as on the AI SDK path (image_generation).
+  if (toolName === "generate_image") return "Image generation";
+  if (toolName !== "sub_agent") return appToolLabel(toolName);
+  const agent = (input as { agent?: unknown } | null | undefined)?.agent;
+  return typeof agent === "string" && agent.length > 0 ? `Sub-agent ${agent}` : "Sub-agent";
+}
+
 export function ToolPartView({ part, index }: { part: UIMessagePart; index: number }) {
   const normalized = normalizeToolPart(part, index);
+  const label = toolPartLabel(normalized.toolName, normalized.input);
   return (
     // Failed calls open expanded so the error message is visible without a
     // click; successful calls stay collapsed as before.
@@ -309,6 +346,7 @@ export function ToolPartView({ part, index }: { part: UIMessagePart; index: numb
       <ToolHeader
         type={`tool-${normalized.toolName}` as `tool-${string}`}
         state={normalized.state}
+        {...(label ? { label } : {})}
       />
       <ToolContent>
         <ToolInput input={normalized.input} />

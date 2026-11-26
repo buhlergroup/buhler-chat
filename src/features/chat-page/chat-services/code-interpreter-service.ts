@@ -9,6 +9,13 @@ import { ServerActionResponse } from "@/features/common/server-action-response";
 import { logInfo, logError, logDebug } from "@/features/common/services/logger";
 import { CODE_INTERPRETER_SUPPORTED_EXTENSIONS } from "./code-interpreter-constants";
 import { storableContentType } from "@/features/common/safe-content-type";
+import {
+  contentStore,
+  contentStoreTakesBuffer,
+  openAiContentFiles,
+  storedFileName,
+  type OpenAiFileUse,
+} from "@/features/common/services/content-store";
 
 /**
  * Upload a file to OpenAI for use with Code Interpreter
@@ -61,6 +68,117 @@ export async function UploadFileForCodeInterpreter(
     return {
       status: "ERROR",
       errors: [{ message: `Failed to upload file: ${error instanceof Error ? error.message : String(error)}` }]
+    };
+  }
+}
+
+/**
+ * Puts a file into OpenAI for the code interpreter once per content and
+ * owner: the bytes go into the content store (scope = owner, hash computed
+ * here), and the OpenAI file id cached there is reused while OpenAI still
+ * has the file. `uploaded` is false when an existing OpenAI file was reused;
+ * such a file may be referenced elsewhere and must not be deleted as an
+ * orphan.
+ *
+ * `blob` (an upload) is streamed, never copied into one buffer. `bytes`
+ * larger than CONTENT_STORE_MAX_BUFFERED_BYTES skip the content store and
+ * are uploaded as before (no `sha256` then).
+ *
+ * `use` "agent" is for the files of an agent (scope = the agent owner): they
+ * get their own OpenAI file, never the one of the owner's upload of the
+ * same bytes. The name is capped (storedFileName) on every path.
+ */
+export async function UploadFileForCodeInterpreterOnce(
+  scope: string,
+  input: { name: string; contentType?: string; bytes?: Buffer; blob?: Blob; use?: OpenAiFileUse }
+): Promise<
+  ServerActionResponse<{ id: string; name: string; sha256?: string; uploaded: boolean }>
+> {
+  const file = { ...input, name: storedFileName(input.name) };
+  try {
+    const fileExtension = file.name.split(".").pop()?.toUpperCase();
+    if (!fileExtension || !CODE_INTERPRETER_SUPPORTED_EXTENSIONS.includes(fileExtension)) {
+      return {
+        status: "ERROR",
+        errors: [{ message: `File type .${fileExtension} is not supported for Code Interpreter` }],
+      };
+    }
+    if (!file.blob && (!file.bytes || !contentStoreTakesBuffer(file.bytes.length))) {
+      if (!file.bytes) throw new Error("No file content");
+      const id = await openAiContentFiles().upload(
+        file.bytes,
+        file.name,
+        file.contentType || "application/octet-stream"
+      );
+      logInfo("Code Interpreter file uploaded without the content store (large buffer)", {
+        fileId: id,
+        fileName: file.name,
+        size: file.bytes.length,
+      });
+      return { status: "OK", response: { id, name: file.name, uploaded: true } };
+    }
+    let fileId: string;
+    let uploaded: boolean;
+    let sha256: string | undefined;
+    try {
+      const store = contentStore();
+      const stored = file.blob
+        ? await store.putBlob(scope, file.blob, { contentType: file.contentType })
+        : await store.put(scope, file.bytes!, { contentType: file.contentType });
+      const opened = await store.openAiFile(scope, stored.sha256, {
+        name: file.name,
+        contentType: file.contentType,
+        use: file.use,
+        ...(file.blob ? { blob: file.blob } : { bytes: file.bytes }),
+      });
+      // Uploaded, but the id could not be recorded in the store (metadata
+      // write failed): the file is used as it is. The fallback below runs
+      // only when nothing was uploaded, so no orphan is left behind.
+      if (!opened.recorded) {
+        logInfo("Code Interpreter: file id not recorded in the content store", {
+          fileId: opened.fileId,
+        });
+      }
+      fileId = opened.fileId;
+      uploaded = opened.uploaded;
+      sha256 = stored.sha256;
+    } catch (storeError) {
+      // A storage problem (container, permission, network) must not stop
+      // Code Interpreter: upload directly, as before the content store.
+      logInfo("Code Interpreter: content store failed, uploading directly", {
+        error: storeError instanceof Error ? storeError.message : String(storeError),
+        fileName: file.name,
+      });
+      fileId = await openAiContentFiles().upload(
+        (file.blob ?? file.bytes)!,
+        file.name,
+        file.contentType || "application/octet-stream"
+      );
+      uploaded = true;
+      sha256 = undefined;
+    }
+    logInfo("Code Interpreter file ready", {
+      fileId,
+      fileName: file.name,
+      sha256,
+      uploaded,
+    });
+    return {
+      status: "OK",
+      response: { id: fileId, name: file.name, ...(sha256 ? { sha256 } : {}), uploaded },
+    };
+  } catch (error) {
+    logError("Failed to upload file for Code Interpreter", {
+      error: error instanceof Error ? error.message : String(error),
+      fileName: file.name,
+    });
+    return {
+      status: "ERROR",
+      errors: [
+        {
+          message: `Failed to upload file: ${error instanceof Error ? error.message : String(error)}`,
+        },
+      ],
     };
   }
 }

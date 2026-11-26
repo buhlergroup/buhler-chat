@@ -1,0 +1,28 @@
+{
+  "capturedFrom": "runtime 1.0.116, session.rpc.tools.getCurrentMetadata()",
+  "name": "view",
+  "description": "View files, images, or directories.\n* Images return base64 data and MIME type.\n* Text files return their content.\n* Directories list non-hidden entries up to 2 levels deep.\n* `path` must be absolute.\n* Files over 20KB are truncated; use `view_range` for sections.",
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "path": {
+        "type": "string",
+        "description": "Existing file or directory's absolute path."
+      },
+      "view_range": {
+        "type": "array",
+        "items": {
+          "type": "integer"
+        },
+        "description": "Optional 1-based inclusive line range. [start,-1] reads through EOF. Prefer for files over 20KB, which are otherwise truncated."
+      },
+      "forceReadLargeFiles": {
+        "type": "boolean",
+        "description": "Read an entire large file despite the size limit; default false. Use only when full content justifies the context cost."
+      }
+    },
+    "required": [
+      "path"
+    ]
+  }
+}

@@ -1,22 +1,18 @@
 "use client";
 
-import { ServerActionResponse } from "@/features/common/server-action-response";
 import {
   showError,
   showSuccess,
 } from "@/features/globals/global-message-store";
 import { proxy, useSnapshot } from "valtio";
-import {
-  CrackDocument,
-  CreateChatDocument,
-  IndexChatDocuments,
-} from "../../chat-services/chat-document-service";
+import { UploadChatDocument } from "../../chat-services/chat-document-service";
 import {
   SupportedFileExtensionsInputImages,
   AttachedFileModel,
   imageInputNotSupportedMessage,
   modelAcceptsImages,
 } from "../../chat-services/models";
+import { UploadFileToAgentWorkspace } from "../../chat-services/copilot-runtime/workspace-upload-actions";
 import {
   getCodeInterpreterFileLimit,
   isCodeInterpreterSupportedFile,
@@ -92,12 +88,32 @@ class FileStore {
           isCodeInterpreterSupported &&
           !isInputImage);
 
+      // An image for a model without vision is refused before it is stored.
+      if (isInputImage && !modelAcceptsImages(z?.selectedModel)) {
+        showError(imageInputNotSupportedMessage(z?.selectedModel));
+        this.loading = "idle";
+        return;
+      }
+
+      // Copilot path: the file goes to the chat's file workspace
+      // (/workspace/uploads/). The server answers handled:false for users on
+      // the AI SDK path, and the flow below runs unchanged.
+      this.uploadButtonLabel = "Uploading";
+      const workspace = await UploadFileToAgentWorkspace(formData);
+      if (workspace.status !== "OK") {
+        showError(workspace.errors.map((e) => e.message).join(", "));
+        return;
+      }
+      if (workspace.response.handled && !isInputImage) {
+        showSuccess({
+          title: "File upload",
+          description: `${file.name} is ready (${workspace.response.path}).`,
+        });
+        return;
+      }
+      // An image is also attached to the message, as before.
+
       if (isInputImage) {
-        if (!modelAcceptsImages(z?.selectedModel)) {
-          showError(imageInputNotSupportedMessage(z?.selectedModel));
-          this.loading = "idle";
-          return;
-        }
         const reader = new FileReader();
         reader.readAsDataURL(file);
         reader.onload = () => {
@@ -179,69 +195,18 @@ class FileStore {
         return;
       }
 
-      // For text documents, proceed with Azure Search indexing
+      // Documents: the server stores the file once (by its content hash),
+      // extracts the text once and indexes it once per thread.
       this.uploadButtonLabel = "Processing document";
-      const crackingResponse = await CrackDocument(formData);
-      if (crackingResponse.status === "OK") {
-        let index = 0;
-
-        const documentIndexResponses: Array<ServerActionResponse<boolean>> = [];
-
-        for (const doc of crackingResponse.response) {
-          this.uploadButtonLabel = `Indexing document ${index + 1}/${
-            crackingResponse.response.length
-          }`;
-
-          // index one document at a time
-          const indexResponses = await IndexChatDocuments(
-            [doc],
-            file.name,
-            chatThreadId
-          );
-
-          documentIndexResponses.push(...indexResponses);
-          index++;
-        }
-
-        if (documentIndexResponses.length === 0) {
-          showError(`${file.name}: Document contains no text that can be indexed.`);
-          return;
-        }
-
-        const allDocumentsIndexed = documentIndexResponses.every(
-          (r) => r.status === "OK"
-        );
-
-        if (allDocumentsIndexed) {
-          // Update state
-          this.uploadButtonLabel = file.name + " loaded";
-          // Update history DB with doc on chat thread
-          const response = await CreateChatDocument(file.name, chatThreadId);
-
-          if (response.status === "OK") {
-            showSuccess({
-              title: "File upload",
-              description: `${file.name} uploaded successfully.`,
-            });
-          } else {
-            showError(response.errors.map((e) => e).join("\n"));
-          }
-        } else {
-          const errors: Array<string> = [];
-
-          documentIndexResponses.forEach((r) => {
-            if (r.status === "ERROR") {
-              errors.push(...r.errors.map((e) => e.message));
-            }
-          });
-
-          showError(
-            "Looks like not all documents were indexed" +
-              errors.map((e) => e).join("\n")
-          );
-        }
+      const response = await UploadChatDocument(formData);
+      if (response.status === "OK") {
+        this.uploadButtonLabel = file.name + " loaded";
+        showSuccess({
+          title: "File upload",
+          description: `${file.name} uploaded successfully.`,
+        });
       } else {
-        showError(crackingResponse.errors.map((e) => e.message).join("\n"));
+        showError(response.errors.map((e) => e.message).join("\n"));
       }
     } catch (error) {
       showError("" + error);

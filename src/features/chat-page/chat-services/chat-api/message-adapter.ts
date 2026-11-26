@@ -24,6 +24,7 @@
 
 import type { UIMessage } from "ai";
 import { MESSAGE_ATTRIBUTE, type ChatMessageModel } from "../models";
+import { COMPACTION_DATA_PART_TYPE, COMPACTION_PART_ID } from "./compaction-part";
 
 // ---------------------------------------------------------------------------
 // Internal helpers
@@ -233,6 +234,15 @@ export function uiMessagesFromChatMessages(rows: ChatMessageModel[]): UIMessage[
 
     if (row.role === "assistant") {
       const parts: UIMessage["parts"] = [];
+
+      // A stored compaction notice (Copilot path) goes before the reply, as live.
+      if (row.compaction) {
+        parts.push({
+          type: COMPACTION_DATA_PART_TYPE,
+          id: COMPACTION_PART_ID,
+          data: row.compaction,
+        } as unknown as UIMessage["parts"][number]);
+      }
 
       // Reasoning part first, then text — matches rendering order.
       if (row.reasoningContent) {
@@ -471,6 +481,10 @@ export function chatMessagesFromUIMessages(
       const reasoningState = meta.reasoningState;
       const reasoningDurationMs =
         typeof meta.reasoningDurationMs === "number" ? meta.reasoningDurationMs : undefined;
+      const compaction =
+        meta.compaction && typeof meta.compaction === "object"
+          ? (meta.compaction as ChatMessageModel["compaction"])
+          : undefined;
       // Step boundaries: derived from the parts when they carry `step-start`
       // markers (the live path and any rehydrated row that had a layout),
       // otherwise carried over from metadata so a re-persist doesn't drop it.
@@ -487,6 +501,7 @@ export function chatMessagesFromUIMessages(
         ...(reasoningState !== undefined && { reasoningState }),
         ...(reasoningDurationMs !== undefined && { reasoningDurationMs }),
         ...(stepLayout !== undefined && { stepLayout }),
+        ...(compaction !== undefined && { compaction }),
       });
 
       // Each DynamicToolUIPart → one tool row.

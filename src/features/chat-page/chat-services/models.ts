@@ -1137,6 +1137,8 @@ export interface ChatMessageModel {
    * message-adapter so the UI's "Thought for Ns" label survives a reload.
    */
   reasoningDurationMs?: number;
+  /** A context compaction that ran in this turn (Copilot path), for the notice after a reload. */
+  compaction?: Record<string, string | number>;
   toolCallHistory?: Array<{ name: string; arguments: string; result?: string; timestamp: Date }>;
   /**
    * Ordered layout of the assistant turn's UIMessage parts, including the
@@ -1199,6 +1201,8 @@ export interface AttachedFileModel {
   type: AttachedFileType;
   uploadedAt?: Date;
   source?: AttachedFileSource;
+  /** SHA-256 of the uploaded bytes (content store); absent on older entries. */
+  sha256?: string;
 }
 
 export interface ThreadUsage {
@@ -1415,6 +1419,16 @@ export interface ChatDocumentModel {
   isDeleted: boolean;
   createdAt: Date;
   type: typeof CHAT_DOCUMENT_ATTRIBUTE;
+  /** Copilot path (index_document): workspace path of the indexed file. */
+  workspacePath?: string;
+  /** Copilot path: chunks the file has in AI Search. */
+  chunkCount?: number;
+  /**
+   * SHA-256 of the file content in the content store. Absent on rows written
+   * before the content store: they keep working, nothing is deduplicated
+   * against them.
+   */
+  sha256?: string;
 }
 
 export interface ToolsInterface {

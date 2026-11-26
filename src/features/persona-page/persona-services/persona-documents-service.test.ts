@@ -44,9 +44,6 @@ vi.mock("@/features/common/services/document-intelligence", () => ({
   DocumentIntelligenceInstance: vi.fn(),
 }));
 
-vi.mock("@/features/chat-page/chat-services/chat-document-service", () => ({
-  ChunkDocumentWithOverlap: vi.fn(),
-}));
 
 // The access rule of a chat: a Search file row the caller may use. The row
 // holds the SharePoint ids (here: item id = row id, drive "drive-1").

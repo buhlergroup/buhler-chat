@@ -36,6 +36,7 @@ param searchServiceIndexName string = 'azure-chat'
 param storageServiceSku object
 param storageServiceImageContainerName string
 param storageServiceSkillContainerName string
+param storageServiceContentContainerName string
 
 param location string = resourceGroup().location
 
@@ -241,6 +242,10 @@ resource webApp 'Microsoft.Web/sites@2020-06-01' = {
         {
           name: 'AZURE_STORAGE_SKILL_CONTAINER_NAME'
           value: storageServiceSkillContainerName
+        }
+        {
+          name: 'AZURE_STORAGE_CONTENT_CONTAINER_NAME'
+          value: storageServiceContentContainerName
         }
       ]
     }
@@ -582,6 +587,13 @@ resource storage 'Microsoft.Storage/storageAccounts@2022-05-01' = {
     // Agent skill packages (.zip). Private: read only by the app.
     resource skillContainer 'containers' = {
       name: toLower(storageServiceSkillContainerName)
+      properties: {
+        publicAccess: 'None'
+      }
+    }
+    // Content store: uploaded file content by hash, extracted text. Private.
+    resource contentContainer 'containers' = {
+      name: toLower(storageServiceContentContainerName)
       properties: {
         publicAccess: 'None'
       }

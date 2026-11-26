@@ -21,6 +21,20 @@ export async function register() {
     );
     assertE2eFakesAllowedOrRefuse();
     await import("./__tests__/e2e-fakes/register");
+  } else {
+    // Periodic cleanup of unreferenced content store blobs (one instance at
+    // a time, via a blob lease). The job itself stays off in tests, `next
+    // build` and when CONTENT_CLEANUP_INTERVAL_HOURS is 0.
+    try {
+      const { startContentCleanupJob } = await import(
+        "./features/common/services/content-store/cleanup-job"
+      );
+      startContentCleanupJob();
+    } catch (error) {
+      logInfo("Content cleanup job could not start", {
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
   }
 
   // Telemetry is opt-in. AZURECHAT_TELEMETRY=1 must be set explicitly

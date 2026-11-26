@@ -84,6 +84,11 @@ export const createProductionOpenAIEmbedding = (): AzureOpenAI => {
     endpoint: `https://${instanceName}.openai.azure.com`,
     deployment: deploymentName,
     apiVersion,
+    // The client retries 408, 409, 429 and 5xx with backoff and honours
+    // retry-after (default: 2 retries). A long document makes many calls in
+    // a row and meets the rate limit, so it gets more retries; no other
+    // retry loop runs on top of this one.
+    maxRetries: 5,
   });
 };
 

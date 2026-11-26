@@ -100,7 +100,7 @@ vi.mock("../history-summary-service", () => ({
 }));
 
 // ── Document service ──────────────────────────────────────────────────────────
-vi.mock("../../chat-document-service", () => ({
+vi.mock("../../chat-document-store", () => ({
   FindAllChatDocuments: vi.fn(async () => ({ status: "OK", response: [] })),
 }));
 
@@ -1046,7 +1046,7 @@ describe("chat-page.unit.thread-context.004 — the document hint is determinist
       .join("");
 
   it("lists document names in sorted order regardless of Cosmos order", async () => {
-    const { FindAllChatDocuments } = await import("../../chat-document-service");
+    const { FindAllChatDocuments } = await import("../../chat-document-store");
     mockEnsureThread.mockResolvedValue({ status: "OK", response: makeThread() });
     mockFindHistory.mockResolvedValue({ status: "OK", response: [] });
 
@@ -1081,7 +1081,7 @@ describe("chat-page.unit.thread-context.004 — the document hint is determinist
     // Same reason as the toolset: a locale-aware sort is the pod's ICU build
     // talking, so "Report.pdf" vs "annex.pdf" could order one way on one
     // replica and the other way on the next. Codepoint puts capitals first.
-    const { FindAllChatDocuments } = await import("../../chat-document-service");
+    const { FindAllChatDocuments } = await import("../../chat-document-store");
     mockEnsureThread.mockResolvedValue({ status: "OK", response: makeThread() });
     mockFindHistory.mockResolvedValue({ status: "OK", response: [] });
     vi.mocked(FindAllChatDocuments).mockResolvedValue({
@@ -1104,7 +1104,7 @@ describe("chat-page.unit.thread-context.004 — the document hint is determinist
   });
 
   it("keeps the hint out of the developer message for an Azure-served thread", async () => {
-    const { FindAllChatDocuments } = await import("../../chat-document-service");
+    const { FindAllChatDocuments } = await import("../../chat-document-store");
     mockEnsureThread.mockResolvedValue({ status: "OK", response: makeThread() });
     mockFindHistory.mockResolvedValue({ status: "OK", response: [] });
     vi.mocked(FindAllChatDocuments).mockResolvedValue({
@@ -1140,7 +1140,7 @@ describe("chat-page.unit.thread-context.005 — the hint follows the model that 
     ctx.modelHistory.filter((m) => m.id === "dochint-thread-001");
 
   async function ctxWithDocument(threadModel: string) {
-    const { FindAllChatDocuments } = await import("../../chat-document-service");
+    const { FindAllChatDocuments } = await import("../../chat-document-store");
     const thread = { ...makeThread(), selectedModel: threadModel } as never;
     mockEnsureThread.mockResolvedValue({ status: "OK", response: thread });
     mockFindHistory.mockResolvedValue({

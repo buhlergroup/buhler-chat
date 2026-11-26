@@ -7,11 +7,29 @@ const nextConfig = {
   },
   serverExternalPackages: [
     "@azure/storage-blob",
+    // Spawns its own runtime binary from a platform package; never bundle it.
+    "@microsoft/copilot-sdk",
+    // Native RE2 binding of the Copilot path's workspace search (workspace-tools.ts).
+    "re2",
     "@azure/monitor-opentelemetry",
     "@opentelemetry/api",
     "@opentelemetry/instrumentation",
     "@opentelemetry/sdk-trace-base",
   ],
+  // The Copilot runtime path (AGENT_RUNTIME / COPILOT_RUNTIME_*) spawns the
+  // runtime binary from the SDK's platform package, which the file trace does
+  // not see (the SDK resolves it by name at run time). Ship the Linux x64
+  // package with /api/chat so it is in the standalone output for App Service.
+  outputFileTracingIncludes: {
+    "/api/chat": [
+      "./node_modules/@microsoft/copilot-sdk-linux-x64/**/*",
+      // The trace finds re2.node through re2.js; listed so a trace change cannot drop it.
+      "./node_modules/re2/re2.js",
+      "./node_modules/re2/package.json",
+      "./node_modules/re2/lib/**/*",
+      "./node_modules/re2/build/Release/re2.node",
+    ],
+  },
   images: {
     imageSizes: [16, 32, 48, 64, 96, 128, 256, 384],
     qualities: [75, 100],

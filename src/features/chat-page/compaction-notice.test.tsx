@@ -142,3 +142,14 @@ describe("chat-page.unit.compaction-notice.004 — the persisted marker", () => 
     expect(screen.queryByText("Show summary")).not.toBeInTheDocument();
   });
 });
+
+describe("runtime compaction notice (no turn count)", () => {
+  it("names the earlier conversation instead of '0 older turns'", () => {
+    render(
+      <CompactionNotice
+        data={{ status: "done", trimmedTurns: 0, summaryOutcome: "ok", durationMs: 10, tokensBefore: 12428, tokensAfter: 8061 }}
+      />,
+    );
+    expect(screen.getByText(/Compacted the earlier conversation into a summary \(12,428 → 8,061 tokens\)/)).toBeTruthy();
+  });
+});

@@ -20,9 +20,12 @@ vi.mock("../../active-chat-store", () => ({
 }));
 
 vi.mock("../../chat-services/chat-document-service", () => ({
-  CrackDocument: vi.fn(),
-  CreateChatDocument: vi.fn(),
-  IndexChatDocuments: vi.fn(),
+  UploadChatDocument: vi.fn(),
+}));
+
+const { mockWorkspaceUpload } = vi.hoisted(() => ({ mockWorkspaceUpload: vi.fn() }));
+vi.mock("../../chat-services/copilot-runtime/workspace-upload-actions", () => ({
+  UploadFileToAgentWorkspace: mockWorkspaceUpload,
 }));
 
 import { fileStore } from "./file-store";
@@ -42,6 +45,7 @@ async function attachImage() {
 describe("chat-page.unit.file-store.image-input — images need a model with vision", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    mockWorkspaceUpload.mockResolvedValue({ status: "OK", response: { handled: false } });
   });
 
   it("refuses an image for Kimi K2.6 and names the model", async () => {
@@ -50,6 +54,8 @@ describe("chat-page.unit.file-store.image-input — images need a model with vis
     await attachImage();
 
     expect(mockShowError).toHaveBeenCalledWith(expect.stringContaining("Kimi K2.6"));
+    // Refused before anything is stored in the chat workspace.
+    expect(mockWorkspaceUpload).not.toHaveBeenCalled();
     expect(fileStore.loading).toBe("idle");
     // FileReader is async; give it a turn to prove nothing was added.
     await new Promise((resolve) => setTimeout(resolve, 20));

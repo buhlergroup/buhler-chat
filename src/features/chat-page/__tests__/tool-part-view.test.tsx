@@ -199,3 +199,62 @@ describe("renderToolOutput — MCP sign-in needed", () => {
     expect(screen.getByRole("button", { name: /Connect Market data/ })).toBeInTheDocument();
   });
 });
+
+describe("renderToolOutput: Copilot path image tools", () => {
+  it("renders generate_image like image_generation (blob ref -> /api/images)", async () => {
+    const { render, screen } = await import("@testing-library/react");
+    const node = renderToolOutput({ result: "blob://t1/abc.png", path: "/workspace/images/cat.png" }, "generate_image");
+    render(<>{node}</>);
+    expect(screen.getByRole("img")).toHaveAttribute("src", "/api/images?t=t1&img=abc.png");
+  });
+
+  it("renders run_code image outputs and the rest as JSON", async () => {
+    const { render, screen } = await import("@testing-library/react");
+    const node = renderToolOutput(
+      { stdout: "ok", files: ["/workspace/outputs/chart.png"], images: ["blob://t1/c1.png", "not-a-ref"] },
+      "run_code",
+    );
+    const { container } = render(<>{node}</>);
+    expect(screen.getAllByRole("img").map((i) => i.getAttribute("src"))).toEqual(["/api/images?t=t1&img=c1.png"]);
+    expect(container.textContent).toContain("/workspace/outputs/chart.png");
+    expect(container.textContent).not.toContain("blob://");
+  });
+});
+
+describe("Copilot path generate_image part (as the event mapper streams it)", () => {
+  // Regression: "generate" is 8 alphanumeric chars, so the extension-key
+  // strip turned the name into "image": label "Image" and no inline image.
+  const part = {
+    type: "dynamic-tool",
+    toolCallId: "call-1",
+    toolName: "generate_image",
+    state: "output-available",
+    input: { prompt: "a red bicycle", name: "red-bicycle" },
+    output: { result: "blob://t1/abc.png", path: "/workspace/images/red-bicycle.png" },
+  };
+
+  it("keeps the tool name and renders the image inline", async () => {
+    const { render, screen } = await import("@testing-library/react");
+    const normalized = normalizeToolPart(part as never, 0);
+    expect(normalized.toolName).toBe("generate_image");
+    render(<>{renderToolOutput(normalized.output, normalized.toolName)}</>);
+    expect(screen.getByRole("img")).toHaveAttribute("src", "/api/images?t=t1&img=abc.png");
+  });
+
+  it("reads 'Image generation' in the header, as on the AI SDK path", async () => {
+    const { render, screen } = await import("@testing-library/react");
+    const { ToolPartView } = await import("../tool-part-view");
+    render(<ToolPartView part={part as never} index={0} />);
+    expect(screen.getByText("Image generation")).toBeInTheDocument();
+  });
+});
+
+describe("sub-agent tool part label (Copilot path)", () => {
+  it("reads 'Sub-agent <name>'", async () => {
+    const { toolPartLabel } = await import("../tool-part-view");
+    expect(toolPartLabel("sub_agent", { agent: "Research" })).toBe("Sub-agent Research");
+    expect(toolPartLabel("sub_agent", {})).toBe("Sub-agent");
+    expect(toolPartLabel("search_documents", { agent: "x" })).toBeUndefined();
+    expect(toolPartLabel("extract_text", { path: "/workspace/uploads/a.pdf" })).toBe("Extract text");
+  });
+});

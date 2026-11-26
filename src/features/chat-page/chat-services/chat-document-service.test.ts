@@ -1,143 +1,113 @@
+// @vitest-environment node
 import { describe, it, expect, vi, beforeEach } from "vitest";
-
-// jsdom Blob/File polyfill for arrayBuffer and text
-if (typeof Blob.prototype.arrayBuffer !== "function") {
-  Blob.prototype.arrayBuffer = function(): Promise<ArrayBuffer> {
-    return new Promise((resolve, reject) => {
-      const reader = new FileReader();
-      reader.onload = () => resolve(reader.result as ArrayBuffer);
-      reader.onerror = reject;
-      reader.readAsArrayBuffer(this);
-    });
-  };
-}
-if (typeof Blob.prototype.text !== "function") {
-  Blob.prototype.text = function(): Promise<string> {
-    return new Promise((resolve, reject) => {
-      const reader = new FileReader();
-      reader.onload = () => resolve(reader.result as string);
-      reader.onerror = reject;
-      reader.readAsText(this);
-    });
-  };
-}
 import { createHash } from "crypto";
 
 const hashedEmail = createHash("sha256").update("test@example.com").digest("hex");
 
 let historyItems: any[] = [];
 let queryCapture: any = null;
+let threadRow: any = null;
 
 const historyContainer = {
   items: {
-    upsert: vi.fn(async (doc: any) => ({ resource: doc })),
     query: vi.fn((q: any, _opts?: any) => {
       queryCapture = q;
       return { fetchAll: async () => ({ resources: historyItems }) };
     }),
   },
+  item: vi.fn(() => ({ read: async () => ({ resource: threadRow }) })),
 };
 
 vi.mock("@/features/common/services/cosmos", () => ({
   HistoryContainer: () => historyContainer,
 }));
-
-vi.mock("@/features/auth-page/auth-api", () => ({
-  authOptions: {},
-  options: {},
-}));
-
+vi.mock("@/features/auth-page/auth-api", () => ({ authOptions: {}, options: {} }));
 vi.mock("@/features/common/services/logger", () => ({
   logDebug: vi.fn(),
   logInfo: vi.fn(),
   logError: vi.fn(),
   logWarn: vi.fn(),
 }));
+vi.mock("@/features/common/navigation-helpers", () => ({ RevalidateCache: vi.fn() }));
 
-vi.mock("@/features/common/services/document-intelligence", () => ({
-  DocumentIntelligenceInstance: vi.fn(() => ({
-    beginAnalyzeDocument: vi.fn(async () => ({
-      pollUntilDone: async () => ({
-        paragraphs: [
-          { content: "paragraph 1" },
-          { content: "paragraph 2" },
-        ],
-      }),
-    })),
-  })),
+const ingest = vi.fn(async (_args: any): Promise<any> => ({
+  status: "OK",
+  response: { name: "a.pdf", sha256: "x", extracted: true, indexing: "indexed", chunks: 1 },
+}));
+vi.mock("./chat-document-ingest", () => ({
+  ingestChatDocument: (args: any) => ingest(args),
 }));
 
-vi.mock("@/features/common/navigation-helpers", () => ({
-  RevalidateCache: vi.fn(),
-}));
+import * as service from "./chat-document-service";
+import { FindAllChatDocuments } from "./chat-document-store";
+import { CHAT_DOCUMENT_ATTRIBUTE, CHAT_THREAD_ATTRIBUTE } from "./models";
 
-vi.mock("@/features/chat-page/chat-services/azure-ai-search/azure-ai-search", () => ({
-  EnsureIndexIsCreated: vi.fn(async () => ({ status: "OK", response: {} })),
-  IndexDocuments: vi.fn(async () => [{ status: "OK", response: true }]),
-  DeleteDocumentsOfChatThread: vi.fn(async () => [{ status: "OK", response: true }]),
-}));
-
-import { CrackDocument, FindAllChatDocuments } from "./chat-document-service";
-import { EnsureIndexIsCreated } from "@/features/chat-page/chat-services/azure-ai-search/azure-ai-search";
-import { CHAT_DOCUMENT_ATTRIBUTE } from "./models";
+const form = (file: File | null, id: string | null = "thread1") => {
+  const fd = new FormData();
+  if (file) fd.set("file", file);
+  if (id !== null) fd.set("id", id);
+  return fd;
+};
+const pdf = (size = 10) => new File([new Uint8Array(size)], "a.pdf", { type: "application/pdf" });
 
 beforeEach(() => {
   historyItems = [];
   queryCapture = null;
-  vi.clearAllMocks();
-  historyContainer.items.query.mockImplementation((q: any) => {
-    queryCapture = q;
-    return { fetchAll: async () => ({ resources: historyItems }) };
-  });
-  (EnsureIndexIsCreated as any).mockResolvedValue({ status: "OK", response: {} });
+  threadRow = { id: "thread1", type: CHAT_THREAD_ATTRIBUTE, userId: hashedEmail, isDeleted: false };
+  ingest.mockClear();
 });
 
-describe("chat-page.unit.document-service.001 — CrackDocument short-circuits for plain text extensions", () => {
-  it("returns OK with chunked array for .txt file", async () => {
-    const text = "A".repeat(5000);
-    const file = new File([text], "doc.txt", { type: "text/plain" });
-    const formData = new FormData();
-    formData.set("file", file);
-    const result = await CrackDocument(formData);
-    expect(result.status).toBe("OK");
-    expect(Array.isArray((result as any).response)).toBe(true);
-    expect((result as any).response.length).toBeGreaterThan(0);
+describe("chat-page.unit.document-service.pin — browser-callable surface", () => {
+  // Every export of a "use server" module is a Server Action any signed-in
+  // browser can call. The module exports only the upload, which checks the
+  // session and the thread itself.
+  it("exports only UploadChatDocument", () => {
+    expect(Object.keys(service).sort()).toEqual(["UploadChatDocument"]);
   });
 });
 
-describe("chat-page.unit.document-service.002 — CrackDocument falls back to Document Intelligence for PDF", () => {
-  it("LoadFile invoked for .pdf file", async () => {
-    const { DocumentIntelligenceInstance } = await import("@/features/common/services/document-intelligence");
-    const pdfContent = new Uint8Array(100);
-    const file = new File([pdfContent], "doc.pdf", { type: "application/pdf" });
-    const formData = new FormData();
-    formData.set("file", file);
-    const result = await CrackDocument(formData);
-    if (result.status !== "OK") console.error("PDF error:", (result as any).errors);
-    expect(result.status).toBe("OK");
-    expect(DocumentIntelligenceInstance).toHaveBeenCalled();
+describe("chat-page.unit.document-service.upload — UploadChatDocument", () => {
+  it("passes the file of the caller's own thread to the content store pipeline", async () => {
+    const res = await service.UploadChatDocument(form(pdf()));
+    expect(res.status).toBe("OK");
+    expect(ingest).toHaveBeenCalledTimes(1);
+    const args = ingest.mock.calls[0][0];
+    expect(args).toMatchObject({ userId: hashedEmail, threadId: "thread1", fileName: "a.pdf" });
+    expect(args.file).toBeInstanceOf(Blob);
   });
-});
 
-describe("chat-page.unit.document-service.003 — CrackDocument returns ERROR if index ensure fails", () => {
-  it("returns same ERROR from EnsureIndexIsCreated", async () => {
-    const { EnsureIndexIsCreated } = await import("@/features/chat-page/chat-services/azure-ai-search/azure-ai-search");
-    (EnsureIndexIsCreated as any).mockResolvedValueOnce({ status: "ERROR", errors: [{ message: "index failed" }] });
-    const file = new File(["content"], "doc.txt", { type: "text/plain" });
-    const formData = new FormData();
-    formData.append("file", file);
-    const result = await CrackDocument(formData);
-    expect(result.status).toBe("ERROR");
-    expect((result as any).errors[0].message).toBe("index failed");
+  it("refuses a thread of another user, a deleted thread and an id that is not ours", async () => {
+    threadRow = { ...threadRow, userId: "someone-else" };
+    expect((await service.UploadChatDocument(form(pdf()))).status).toBe("ERROR");
+    threadRow = { ...threadRow, userId: hashedEmail, isDeleted: true };
+    expect((await service.UploadChatDocument(form(pdf()))).status).toBe("ERROR");
+    expect((await service.UploadChatDocument(form(pdf(), "t1' or 'x"))).status).toBe("ERROR");
+    expect(ingest).not.toHaveBeenCalled();
+  });
+
+  it("refuses a request without a file", async () => {
+    expect((await service.UploadChatDocument(form(null))).status).toBe("ERROR");
+  });
+
+  it("shows the configured MAX_UPLOAD_DOCUMENT_SIZE in MB", async () => {
+    vi.stubEnv("MAX_UPLOAD_DOCUMENT_SIZE", "1048576");
+    try {
+      const res = await service.UploadChatDocument(form(pdf(1048577)));
+      expect(res.status).toBe("ERROR");
+      if (res.status !== "ERROR") return;
+      expect(res.errors[0].message).toBe("File is too large and must be less than 1 MB.");
+      expect(ingest).not.toHaveBeenCalled();
+    } finally {
+      vi.unstubAllEnvs();
+    }
   });
 });
 
 describe("chat-page.unit.document-service.004 — FindAllChatDocuments is a single-partition query in the caller's partition", () => {
   it("filters by type, threadId, the caller's userId and isDeleted, and passes the partition key", async () => {
-    // CreateChatDocument writes every chat document into the partition of
+    // UploadChatDocument writes every chat document into the partition of
     // the user who attached it to their own thread, so the caller's partition
-    // holds all documents of the caller's threads. The partition key skips
-    // the fan-out over every partition.
+    // holds all documents of the caller's threads.
     await FindAllChatDocuments("t1");
     expect(queryCapture.parameters).toEqual(
       expect.arrayContaining([
@@ -147,7 +117,7 @@ describe("chat-page.unit.document-service.004 — FindAllChatDocuments is a sing
         { name: "@isDeleted", value: false },
       ])
     );
-    expect(queryCapture.query).toMatch(/r\.userId=@userId/);
+    expect(queryCapture.query).toMatch(/r.userId=@userId/);
     expect(historyContainer.items.query).toHaveBeenCalledWith(
       expect.anything(),
       { partitionKey: hashedEmail },
@@ -163,56 +133,7 @@ describe("chat-page.unit.document-service.004 — FindAllChatDocuments is a sing
   });
 
   it("orders deterministically, so the document names in the prompt cannot reshuffle", async () => {
-    // The document names go into the system prompt's DOCUMENT CONTEXT line.
-    // Without an ORDER BY, Cosmos may hand the same documents back in a
-    // different order on a later turn, rewriting the prompt prefix and voiding
-    // the prompt cache for no reason at all.
     await FindAllChatDocuments("t1");
     expect(queryCapture.query).toMatch(/ORDER BY r\.createdAt ASC/i);
-  });
-});
-
-describe("chat-page.unit.document-service.005 — Upload over MAX_UPLOAD_DOCUMENT_SIZE returns ERROR", () => {
-  it("returns ERROR for oversized file (PDF > 10MB)", async () => {
-    // Create a file that exceeds 10MB by 1 byte
-    const bigData = new Uint8Array(10485761); // 10MB + 1 byte
-    const file = new File([bigData], "big.pdf", { type: "application/pdf" });
-    const formData = new FormData();
-    formData.append("file", file);
-    const result = await CrackDocument(formData);
-    // File is too large — Document Intelligence will return ERROR
-    // The MAX_UPLOAD_DOCUMENT_SIZE check is inside LoadFile
-    expect(result.status).toBe("ERROR");
-  });
-
-  it("error message shows the default 10 MB limit when MAX_UPLOAD_DOCUMENT_SIZE is unset", async () => {
-    vi.stubEnv("MAX_UPLOAD_DOCUMENT_SIZE", "");
-    try {
-      const file = new File([new Uint8Array(10485761)], "big.pdf", { type: "application/pdf" });
-      const formData = new FormData();
-      formData.append("file", file);
-      const result = await CrackDocument(formData);
-      expect(result.status).toBe("ERROR");
-      if (result.status !== "ERROR") return;
-      expect(result.errors[0].message).toBe("File is too large and must be less than 10 MB.");
-    } finally {
-      vi.unstubAllEnvs();
-    }
-  });
-
-  it("error message shows the configured MAX_UPLOAD_DOCUMENT_SIZE in MB", async () => {
-    // 1 MB limit keeps the test file small.
-    vi.stubEnv("MAX_UPLOAD_DOCUMENT_SIZE", "1048576");
-    try {
-      const file = new File([new Uint8Array(1048577)], "big.pdf", { type: "application/pdf" });
-      const formData = new FormData();
-      formData.append("file", file);
-      const result = await CrackDocument(formData);
-      expect(result.status).toBe("ERROR");
-      if (result.status !== "ERROR") return;
-      expect(result.errors[0].message).toBe("File is too large and must be less than 1 MB.");
-    } finally {
-      vi.unstubAllEnvs();
-    }
   });
 });
