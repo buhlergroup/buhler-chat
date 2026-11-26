@@ -26,7 +26,7 @@ import { buildNamespace, normalizeSessionPath, SESSION_STATE_ROOT, WORKSPACE_ROO
 import { ALL_SEARCH_TOOL_NAMES, workspaceTools, type SearchToolFamily } from "./workspace-tools";
 import { copilotProviderFor } from "./runtime-flag";
 import { buildCopilotSystemMessage } from "./system-message";
-import { toCopilotTools, toolDescription, toolJsonSchema, type ToolCallRecord, type TurnToolBinding } from "./tool-adapter";
+import { TOOL_RESULTS_DIR, toCopilotTools, toolDescription, toolJsonSchema, type ToolCallRecord, type TurnToolBinding } from "./tool-adapter";
 
 /**
  * The runtime's built-in tools this path allows: the file tools whose I/O goes
@@ -349,6 +349,12 @@ async function openSession(input: CopilotTurnInput): Promise<{ live: LiveSession
     tools: {
       definitions,
       availableTools: [...COPILOT_FILE_TOOLS.map((n) => `builtin:${n}`), "custom:*"],
+      // Our adapter writes large app-tool results to /workspace/tool-results/
+      // itself and marks them skipLargeOutputProcessing: the runtime's own
+      // spill file is deleted when the session closes (measured). Its spill
+      // stays on for the built-in tools, inside the jail instead of the OS
+      // temp directory.
+      largeOutput: { enabled: true, outputDirectory: TOOL_RESULTS_DIR },
     },
     systemMessage: buildCopilotSystemMessage(input.systemMessage),
     permissions: { onRequest: permissionGate(appToolNames) },

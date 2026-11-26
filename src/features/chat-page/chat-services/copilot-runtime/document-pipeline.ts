@@ -38,12 +38,16 @@ export async function indexDocument(args: {
   const chunks = (await ChunkDocumentWithOverlap(text)).filter((c) => c.trim().length > 0);
   if (chunks.length === 0) return 0;
 
-  const instance = AzureAISearchInstance<{ id: string }>();
-  const filter = `${odataEq("chatThreadId", threadId)} and ${odataEq("user", userKey)} and ${odataEq("metadata", name)}`;
-  const old: { id: string }[] = [];
-  const found = await instance.search("*", { filter, select: ["id"], top: 1000 });
-  for await (const r of found.results) old.push({ id: r.document.id });
-  if (old.length > 0) await instance.deleteDocuments(old);
+  // `metadata` (the document name) is not filterable in the index: filter by
+  // thread and user, pick this document's chunks from the results.
+  const instance = AzureAISearchInstance<{ id: string; metadata: string | null }>();
+  const filter = `${odataEq("chatThreadId", threadId)} and ${odataEq("user", userKey)}`;
+  const old: string[] = [];
+  const found = await instance.search("*", { filter, select: ["id", "metadata"] });
+  for await (const r of found.results) {
+    if (r.document.metadata === name) old.push(r.document.id);
+  }
+  if (old.length > 0) await instance.deleteDocuments("id", old);
 
   const responses = await IndexDocuments(chunks, name, threadId);
   const failed = responses.find((r) => r.status === "ERROR");

@@ -476,7 +476,7 @@ compactions in thread F: ${JSON.stringify(session.liveSessionCompactions(threadF
     const upPdf2 = await files.uploadToThreadWorkspace(user, threadU, "Recipe Notes.pdf", pdf);
     const upPng = await files.uploadToThreadWorkspace(user, threadU, "shape.png", png);
     console.log(`\n=== U uploads (${Date.now() - t0} ms): ${JSON.stringify([upPdf, upPdf2, upPng])}`);
-    const { fs } = await files.threadWorkspace(user, threadU);
+    const { fs, store: wsStore } = await files.threadWorkspace(user, threadU);
     console.log(`extracted text: ${JSON.stringify((await fs.readFile(upPdf.markdownPath!)).slice(0, 200))}`);
     const extra = { index_document: indexDocumentTool(files.chatDocumentIndexDeps({ fs, threadId: threadU, userKey: user })) };
     const note = await files.workspaceUploadsNote(fs);
@@ -509,7 +509,7 @@ compactions in thread F: ${JSON.stringify(session.liveSessionCompactions(threadF
       prompt: "Index /workspace/uploads/Recipe Notes.pdf again and tell me the status and chunk count it returned.",
     });
     // Deleting the chat documents removes the uploads (SoftDeleteChatDocumentsForCurrentUser calls this).
-    const removed = await files.removeThreadWorkspaceFiles(user, threadU, "uploads");
+    const removed = await files.removeThreadWorkspaceFiles(user, threadU, "uploads", wsStore);
     console.log(`removed ${removed} upload blobs; uploads left: ${(await fs.listEntries("/workspace/uploads")).length}`);
     await DeleteDocumentsOfChatThread(threadU);
     const { resources } = await HistoryContainer()
@@ -522,20 +522,26 @@ compactions in thread F: ${JSON.stringify(session.liveSessionCompactions(threadF
   // ── M: a large MCP result goes to a workspace file and survives a restart ─
   if (section("M")) {
     const threadM = `smoke-m-${runId}`;
+    const mFiles = await import("@/features/chat-page/chat-services/copilot-runtime/workspace-files");
+    const { store: mStore } = await mFiles.threadWorkspace(userKey("mia"), threadM);
+    const listResults = async () =>
+      (await mStore.listNames(`${userKey("mia")}/${threadM}/f/workspace/tool-results/`)).map((n: string) => n.split("/f/")[1]);
     await turn("M1 large MCP result -> file, rg in the same turn", {
       threadId: threadM,
       user: "mia",
       model: gptModel,
       prompt:
-        "Use the docs fetch tool on https://learn.microsoft.com/en-us/azure/storage/blobs/storage-blobs-introduction . The result is saved to a file: use rg on that file to find one line that mentions 'append blob' and quote it.",
+        "Use the docs fetch tool once on https://learn.microsoft.com/en-us/azure/azure-resource-manager/management/azure-subscription-service-limits . The full result is saved to a file: use rg on that file to find the maximum number of tag name/value pairs per resource, and quote the line.",
     });
+    console.log(`tool-results files after M1: ${JSON.stringify(await listResults())}`);
     await session.shutdownCopilotRuntime();
-    console.log("\n--- runtime stopped ---");
+    console.log(`after runtime stop: ${JSON.stringify(await listResults())}`);
     await turn("M2 after restart: rg on the saved result", {
       threadId: threadM,
       user: "mia",
       model: gptModel,
-      prompt: "Without fetching again: use rg on the saved docs result file from before to find a line that mentions 'block blob' and quote it.",
+      prompt:
+        "Without fetching again: use rg on the saved docs result file from before to find the limit for resource groups per subscription, and quote the line.",
     });
   }
 
