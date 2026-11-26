@@ -34,8 +34,13 @@ import {
 import { COPILOT_FILE_TOOLS, SUBAGENT_TOOL, permissionGate, preToolGate } from "./session-gates";
 import { buildSubAgentPlan, SubAgentTurnGate, type SubAgentPlan, type SubAgentPlanInput } from "./subagents";
 import {
+  idleSessionsToEvict,
   isRuntimeGoneError,
+  isSessionGoneError,
+  processRssMb,
+  runtimeIdleBackstopSeconds,
   readRuntimeLimits,
+  sessionsOverMemoryBudget,
   sessionsToEvict,
   TurnLimiter,
 } from "./runtime-limits";
@@ -50,7 +55,8 @@ export type HistoryImportConversationEvent = Parameters<
 export const COMPACTION_THRESHOLD = 0.9;
 /** Share at which the runtime blocks the turn until compaction is done. */
 export const COMPACTION_BLOCK_THRESHOLD = 0.97;
-const SESSION_IDLE_EVICT_MS = 20 * 60 * 1000;
+/** How often idle sessions and the memory budget are checked. */
+const SWEEP_EVERY_MS = 30 * 1000;
 const TURN_TIMEOUT_MS = 590 * 1000;
 const ABORT_GRACE_MS = 10 * 1000;
 
@@ -84,6 +90,8 @@ interface RuntimeState {
   started?: CopilotClient;
   sessions: Map<string, LiveSession>;
   sweeper?: ReturnType<typeof setInterval>;
+  /** A sweep is running (disconnects take time; sweeps never overlap). */
+  sweeping?: boolean;
   limiter?: TurnLimiter;
 }
 
@@ -108,6 +116,10 @@ function runtimeEnv(): Record<string, string> {
   env.COPILOT_GITHUB_TELEMETRY_DISABLED = "true";
   return env;
 }
+
+/** Pid of the runtime child process (SDK internal field), for the memory guard. */
+const runtimePid = (client: CopilotClient | undefined): number | undefined =>
+  (client as unknown as { cliProcess?: { pid?: number } | null } | undefined)?.cliProcess?.pid;
 
 /** True once the client's connection to the runtime process is gone. */
 const connectionClosed = (client: CopilotClient | undefined): boolean =>
@@ -138,7 +150,10 @@ export async function getCopilotClient(): Promise<CopilotClient> {
         // Runtime config dir (app-owned, 0700). Session state does NOT go
         // here: sessionFs routes it to Blob.
         baseDirectory: appRuntimeDir("home"),
-        sessionIdleTimeoutSeconds: SESSION_IDLE_EVICT_MS / 1000,
+        // A backstop only: our sweep (COPILOT_SESSION_IDLE_MINUTES) drops idle
+        // sessions first. A session the runtime drops by itself is still in
+        // state.sessions, and its next turn fails (measured: "Session not found").
+        sessionIdleTimeoutSeconds: runtimeIdleBackstopSeconds(readRuntimeLimits()),
       }),
       sessionFs: {
         initialCwd: WORKSPACE_ROOT,
@@ -161,7 +176,7 @@ export async function getCopilotClient(): Promise<CopilotClient> {
     throw err;
   });
   if (!state.sweeper) {
-    state.sweeper = setInterval(() => void evictIdleSessions(), 60 * 1000);
+    state.sweeper = setInterval(() => void sweepSessions(), SWEEP_EVERY_MS);
     state.sweeper.unref?.();
   }
   return state.client;
@@ -173,22 +188,55 @@ async function dropSession(id: string, live: LiveSession | undefined): Promise<v
   await live.session.disconnect().catch(() => undefined);
 }
 
-async function evictIdleSessions(maxIdleMs = SESSION_IDLE_EVICT_MS): Promise<void> {
-  const now = Date.now();
-  for (const [id, live] of state.sessions) {
-    // Idle too long, or a session of a runtime that is gone (dead session).
-    const dead = live.client !== state.started || connectionClosed(live.client);
-    if (live.busy || (!dead && now - live.lastUsed < maxIdleMs)) continue;
-    await dropSession(id, live);
+/**
+ * Drops sessions of a runtime that is gone, sessions idle for
+ * COPILOT_SESSION_IDLE_MINUTES, and, while the runtime's RSS is over
+ * COPILOT_RUNTIME_MEMORY_BUDGET_MB, the least recently used idle sessions
+ * (one batch per sweep: the RSS is sampled again on the next one).
+ */
+async function sweepSessions(): Promise<void> {
+  if (state.sweeping) return;
+  state.sweeping = true;
+  try {
+    const limits = readRuntimeLimits();
+    for (const [id, live] of state.sessions) {
+      const dead = live.client !== state.started || connectionClosed(live.client);
+      if (dead && !live.busy) await dropSession(id, live);
+    }
+    const idle = await dropIdle(idleSessionsToEvict(state.sessions, Date.now(), limits.sessionIdleMs));
+    if (idle > 0) logInfo("copilot-runtime: evicted idle sessions", { count: idle });
+
+    const rssMb = processRssMb(runtimePid(state.started));
+    const overBudget = await dropIdle(sessionsOverMemoryBudget(state.sessions, rssMb, limits.memoryBudgetMb));
+    if (overBudget > 0) {
+      logWarn("copilot-runtime: runtime over its memory budget, evicted idle sessions", {
+        count: overBudget,
+        rssMb: Math.round(rssMb ?? 0),
+        budgetMb: limits.memoryBudgetMb,
+        liveSessions: state.sessions.size,
+      });
+    }
+  } finally {
+    state.sweeping = false;
   }
+}
+
+/** Drops the listed sessions that are still idle (a turn may have started meanwhile). */
+async function dropIdle(ids: string[]): Promise<number> {
+  let dropped = 0;
+  for (const id of ids) {
+    const live = state.sessions.get(id);
+    if (!live || live.busy) continue;
+    await dropSession(id, live);
+    dropped++;
+  }
+  return dropped;
 }
 
 /** Keeps at most COPILOT_MAX_LIVE_SESSIONS live sessions (least recently used go first). */
 async function enforceSessionCap(): Promise<void> {
-  for (const id of sessionsToEvict(state.sessions, readRuntimeLimits().maxLiveSessions)) {
-    await dropSession(id, state.sessions.get(id));
-    logInfo("copilot-runtime: evicted a live session (cap)", { sessionId: id });
-  }
+  const dropped = await dropIdle(sessionsToEvict(state.sessions, readRuntimeLimits().maxLiveSessions));
+  if (dropped > 0) logWarn("copilot-runtime: evicted live sessions (cap)", { count: dropped });
 }
 
 /** Disconnects every live session and stops the runtime (smoke script / shutdown). */
@@ -428,6 +476,8 @@ async function openSession(
   const existing = state.sessions.get(sessionId);
   if (existing) {
     if (existing.namespace !== namespace) throw new Error("Session namespace mismatch");
+    // In use again: a sweep running meanwhile must not pick it as idle.
+    existing.lastUsed = Date.now();
     const stateGone = !(await existing.fs.exists(EVENTS_JOURNAL));
     if (!stateGone && existing.client === client && existing.agentSignature === `${plan.signature}|${inferenceSignature()}`) {
       // Most recently used goes to the end (LRU order).
@@ -619,6 +669,7 @@ export async function runCopilotTurn(input: CopilotTurnInput): Promise<CopilotTu
     releaseSlot();
     await lease?.release().catch(() => undefined);
     if (isRuntimeGoneError(err)) await resetCopilotRuntime(err instanceof Error ? err.message : String(err));
+    else if (isSessionGoneError(err)) await dropSession(`thread-${input.threadId}`, state.sessions.get(`thread-${input.threadId}`));
     throw err;
   }
 }
@@ -667,7 +718,7 @@ async function runTurnInSession(input: CopilotTurnInput): Promise<CopilotTurnHan
     }
   } catch (err) {
     live.busy = false;
-    if (isRuntimeGoneError(err)) await dropSession(`thread-${input.threadId}`, live);
+    if (isRuntimeGoneError(err) || isSessionGoneError(err)) await dropSession(`thread-${input.threadId}`, live);
     throw err;
   }
 
@@ -797,6 +848,9 @@ async function runTurnInSession(input: CopilotTurnInput): Promise<CopilotTurnHan
     .send({ prompt, ...(attachments.length > 0 ? { attachments } : {}) })
     .catch((err) => {
       if (isRuntimeGoneError(err)) void resetCopilotRuntime(err instanceof Error ? err.message : String(err));
+      // Only this session is gone (the runtime dropped it): the next turn
+      // resumes it from Blob; the other sessions of the runtime stay.
+      else if (isSessionGoneError(err)) void dropSession(`thread-${input.threadId}`, live);
       mapper.fail(err instanceof Error ? err.message : String(err), "SendError");
       settle();
     });
@@ -851,7 +905,7 @@ export function liveSessionCompactions(threadId: string): CopilotTurnResult["com
   return state.sessions.get(`thread-${threadId}`)?.compactions;
 }
 
-/** Diagnostics / tests: number of live sessions and running turns in this process. */
-export function runtimeStats(): { liveSessions: number; runningTurns: number } {
-  return { liveSessions: state.sessions.size, runningTurns: limiter.running };
+/** Diagnostics / tests: live sessions, running turns and the runtime's RSS (Linux) in this process. */
+export function runtimeStats(): { liveSessions: number; runningTurns: number; runtimeRssMb?: number } {
+  return { liveSessions: state.sessions.size, runningTurns: limiter.running, runtimeRssMb: processRssMb(runtimePid(state.started)) };
 }
