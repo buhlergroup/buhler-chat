@@ -46,7 +46,6 @@ function makeThread(overrides: Partial<ChatThreadModel> = {}): ChatThreadModel {
     personaMessageTitle: "",
     extension: [],
     type: "CHAT_THREAD",
-    personaDocumentIds: [],
     ...overrides,
   };
 }

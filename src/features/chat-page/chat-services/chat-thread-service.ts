@@ -31,6 +31,7 @@ import {
   AttachedFileModel,
   normalizeChatModelId,
   withNormalizedSelectedModel,
+  withoutAgentIdLists,
 } from "./models";
 import { mergeClientAttachedFiles } from "./code-interpreter-file-access";
 
@@ -86,9 +87,12 @@ export const FindAllChatThreadForCurrentUser = async (): Promise<
         partitionKey: await userHashedId(),
       })
       .fetchAll();
+    // Older rows carry copies of the agent's id lists: never to the client.
     return {
       status: "OK",
-      response: resources.map(withNormalizedSelectedModel),
+      response: resources.map((thread) =>
+        withoutAgentIdLists(withNormalizedSelectedModel(thread))
+      ),
     };
   } catch (error) {
     return {
@@ -122,9 +126,12 @@ export const FindChatThreadForCurrentUser = async (
       };
     }
 
+    // Every action of this file reads the thread here, so none returns the
+    // agent id lists of older rows to the client, and a save writes the row
+    // without them (THREAD_AGENT_ID_LIST_FIELDS).
     return {
       status: "OK",
-      response: withNormalizedSelectedModel(resource),
+      response: withoutAgentIdLists(withNormalizedSelectedModel(resource)),
     };
   } catch (error) {
     return {
@@ -374,10 +381,11 @@ export const RemoveExtensionFromChatThread = async (props: {
  * Client-facing update of an EXISTING chat thread that the user may change.
  *
  * Only the fields of `applyUserThreadChanges` (name, bookmarked) are taken
- * from the input. Every other field, e.g. personaId, extension ids, persona
- * documents, sub-agents, default tools and userId, comes from the stored
- * thread, so a client cannot attach an agent or an extension to a thread, or
- * write a thread for another user. A changed personaId is ignored.
+ * from the input. Every other field, e.g. personaId, extension ids, default
+ * tools and userId, comes from the stored thread, so a client cannot attach
+ * an agent or an extension to a thread, or write a thread for another user. A
+ * changed personaId is ignored. Agent id lists are never written (see
+ * THREAD_AGENT_ID_LIST_FIELDS).
  *
  * The client's `attachedFiles` list is merged on the server with
  * `mergeClientAttachedFiles`: code interpreter files can only be kept or
@@ -446,7 +454,6 @@ export const CreateChatThread = async (options?: {
       personaMessageTitle: CHAT_DEFAULT_PERSONA,
       selectedModel: DEFAULT_MODEL,
       extension: [],
-      personaDocumentIds: [],
       isTemporary: options?.temporary ?? false,
     };
 

@@ -388,7 +388,8 @@ export async function POST(req: Request) {
     personaDocumentIds: ctx.personaDocumentIds,
     defaultTools: ctx.defaultTools ?? {},
     extensions: resolvedExtensions,
-    subAgentIds: ctx.thread.subAgentIds,
+    // The agent's current sub-agents (loadThreadContext), not a thread copy.
+    subAgentIds: ctx.subAgentIds,
     // Browser-local datetime for the get_current_time tool (server UTC fallback).
     clientDateTime: req.headers.get("x-client-datetime") ?? undefined,
     depth: 0,

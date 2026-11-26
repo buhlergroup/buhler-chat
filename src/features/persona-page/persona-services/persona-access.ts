@@ -6,7 +6,7 @@ import "server-only";
  * Every path that hands a persona to a user, or starts or continues a chat
  * with one, asks `canOpenPersona` (findPersonaForCurrentUser and FindPersonaByID, FindAllPersonaForCurrentUser,
  * CreatePersonaChat, call_sub_agent through findPersonaForCurrentUser, and /api/chat for
- * threads that were started from an agent).
+ * threads that were started from an agent, through resolveThreadAgent).
  *
  * Access model, in order:
  *   1. The owner (persona.userId === hashed e-mail of the viewer) can open it.
@@ -191,18 +191,30 @@ export const findPersonaDocument = async (
   return resources[0];
 };
 
+export type ThreadAgent =
+  | { allowed: false }
+  | { allowed: true; persona: PersonaModel | undefined };
+
 /**
  * For a chat thread that was started from an agent: may the current user
- * send a NEW message in it? The thread itself stays readable (it belongs to
- * the user); only further turns with the agent are refused once the user can
- * no longer open the agent. A deleted agent does not block the thread: the
- * thread keeps the snapshot it was created with, as before.
+ * send a NEW message in it, and with which agent row? The thread itself stays
+ * readable (it belongs to the user); only further turns with the agent are
+ * refused once the user can no longer open the agent.
+ *
+ * When allowed, `persona` is the agent's current row (server only): the chat
+ * route takes the agent's Search file ids and sub-agent ids from it, because
+ * the thread stores no copy of them. One lookup serves both the access check
+ * and the lists. A thread without an agent, or whose agent was deleted,
+ * continues with `persona` undefined: it keeps its instructions snapshot, and
+ * has no agent files and no configured sub-agents.
  */
-export const canContinuePersonaThread = async (
+export const resolveThreadAgent = async (
   personaId: string | undefined
-): Promise<boolean> => {
-  if (!personaId) return true;
+): Promise<ThreadAgent> => {
+  if (!personaId) return { allowed: true, persona: undefined };
   const persona = await findPersonaDocument(personaId);
-  if (!persona) return true;
-  return canOpenPersona(await currentPersonaViewer(), persona);
+  if (!persona) return { allowed: true, persona: undefined };
+  return (await canOpenPersona(await currentPersonaViewer(), persona))
+    ? { allowed: true, persona }
+    : { allowed: false };
 };

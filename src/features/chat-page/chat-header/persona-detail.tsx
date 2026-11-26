@@ -17,7 +17,7 @@ import { useRouter } from "next/navigation";
 import { FindChatThreadForCurrentUser } from "../chat-services/chat-thread-service";
 import { showError } from "@/features/globals/global-message-store";
 import { DocumentMetadata } from "@/features/persona-page/persona-services/models";
-import { DocumentDetails } from "@/features/persona-page/persona-services/persona-documents-service";
+import { AgentDocumentDetailsForThread } from "@/features/persona-page/persona-services/persona-documents-service";
 import { toast } from "@/features/ui/use-toast";
 import {
   Tooltip,
@@ -34,34 +34,27 @@ interface Props {
 
 export const PersonaDetail: FC<Props> = ({ chatThread }) => {
   const [documents, setDocuments] = useState<DocumentMetadata[]>([]);
-  const [noAccessDocuments, setNoAccessDocuments] = useState<
-    { documentId: string }[]
-  >([]);
+  const [noAccessDocumentsCount, setNoAccessDocumentsCount] = useState(0);
 
-  const { personaMessageTitle, personaMessage, personaDocumentIds, id } =
-    chatThread;
+  const { personaMessageTitle, personaMessage, personaId, id } = chatThread;
   const router = useRouter();
 
   useEffect(() => {
-    fetchDocumentMetadata(personaDocumentIds);
-  }, [personaDocumentIds]);
+    if (personaId) fetchDocumentMetadata(id);
+  }, [id, personaId]);
 
-  // The thread lists the Search file row ids of the agent. DocumentDetails
-  // looks up each row with the access rule and reads the details from
-  // SharePoint with the user's token; files the user cannot use come back
-  // as "unsuccessful" (counted, no name).
-  const fetchDocumentMetadata = async (
-    documentIds: string[] | undefined
-  ): Promise<void> => {
-    if (!documentIds || documentIds.length === 0) return;
-
+  // The thread holds only the agent id. The server loads the agent's Search
+  // files (with the open rule and the access rule of each file) and reads
+  // the details from SharePoint with the user's token; files the user cannot
+  // use come back as a number only (no name, no id).
+  const fetchDocumentMetadata = async (chatThreadId: string): Promise<void> => {
     try {
-      const response = await DocumentDetails(documentIds.map((id) => ({ id })));
+      const response = await AgentDocumentDetailsForThread(chatThreadId);
 
       if (response.status === "OK") {
-        setDocuments(response.response.successful);
-        setNoAccessDocuments(response.response.unsuccessful || []);
-        if (response.response.unsuccessful.length > 0) {
+        setDocuments(response.response.documents);
+        setNoAccessDocumentsCount(response.response.notAvailableCount);
+        if (response.response.notAvailableCount > 0) {
           displayToastWarning(
             "Some documents are not accessible",
             "Your agent chat experience may suffer from the lack of documents."
@@ -152,7 +145,7 @@ export const PersonaDetail: FC<Props> = ({ chatThread }) => {
             </div>
             <PersonaDocumentsSection
               documents={documents}
-              noAccessDocumentsCount={noAccessDocuments.length}
+              noAccessDocumentsCount={noAccessDocumentsCount}
             />
           </div>
         </ScrollArea>

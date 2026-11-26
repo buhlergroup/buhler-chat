@@ -37,7 +37,7 @@ vi.mock("@/features/persona-page/persona-services/access-group-service", () => (
 
 import {
   canOpenPersona,
-  canContinuePersonaThread,
+  resolveThreadAgent,
   currentPersonaViewer,
   isListedForViewer,
 } from "./persona-access";
@@ -149,7 +149,7 @@ describe("canOpenPersona — link access", () => {
 
   it("a thread with another user's link agent continues", async () => {
     historyItems = [persona({ id: "p-link", linkAccess: undefined })];
-    expect(await canContinuePersonaThread("p-link")).toBe(true);
+    expect((await resolveThreadAgent("p-link")).allowed).toBe(true);
   });
 });
 
@@ -171,31 +171,42 @@ describe("currentPersonaViewer", () => {
   });
 });
 
-describe("canContinuePersonaThread (existing chat threads)", () => {
-  it("a thread without an agent always continues", async () => {
-    expect(await canContinuePersonaThread(undefined)).toBe(true);
+describe("resolveThreadAgent (existing chat threads)", () => {
+  it("a thread without an agent always continues, without a lookup", async () => {
+    expect(await resolveThreadAgent(undefined)).toEqual({ allowed: true, persona: undefined });
     expect(historyContainer.items.query).not.toHaveBeenCalled();
   });
 
-  it("a thread whose agent was deleted continues (snapshot, as before)", async () => {
-    expect(await canContinuePersonaThread("gone")).toBe(true);
+  it("a thread whose agent was deleted continues, without agent lists", async () => {
+    expect(await resolveThreadAgent("gone")).toEqual({ allowed: true, persona: undefined });
   });
 
-  it("a thread with another user's private agent cannot continue", async () => {
-    historyItems = [persona({ id: "p-private" })];
-    expect(await canContinuePersonaThread("p-private")).toBe(false);
+  it("a thread with another user's private agent cannot continue, and gets no agent row", async () => {
+    historyItems = [persona({ id: "p-private", personaDocumentIds: ["d1"], subAgentIds: ["s1"] })];
+    expect(await resolveThreadAgent("p-private")).toEqual({ allowed: false });
   });
 
   it("a thread continues while the user is still in the share group, and stops after removal", async () => {
     historyItems = [persona({ id: "p-group", accessGroup: group("g1") })];
     memberOf = ["g1"];
-    expect(await canContinuePersonaThread("p-group")).toBe(true);
+    expect((await resolveThreadAgent("p-group")).allowed).toBe(true);
     memberOf = [];
-    expect(await canContinuePersonaThread("p-group")).toBe(false);
+    expect((await resolveThreadAgent("p-group")).allowed).toBe(false);
   });
 
-  it("the owner's own thread continues", async () => {
-    historyItems = [persona({ id: "p-own", userId: USER_HASH })];
-    expect(await canContinuePersonaThread("p-own")).toBe(true);
+  it("an allowed thread gets the agent's current row with its lists, from one lookup", async () => {
+    const row = persona({
+      id: "p-own",
+      userId: USER_HASH,
+      personaDocumentIds: ["d1", "d2"],
+      subAgentIds: ["s1"],
+    });
+    historyItems = [row];
+    const result = await resolveThreadAgent("p-own");
+    expect(result.allowed).toBe(true);
+    if (!result.allowed) return;
+    expect(result.persona?.personaDocumentIds).toEqual(["d1", "d2"]);
+    expect(result.persona?.subAgentIds).toEqual(["s1"]);
+    expect(historyContainer.items.query).toHaveBeenCalledTimes(1);
   });
 });

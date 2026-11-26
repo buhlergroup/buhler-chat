@@ -126,7 +126,6 @@ function makeThread(overrides: Partial<ChatThreadModel> = {}): ChatThreadModel {
     bookmarked: false,
     selectedModel: "gpt-5.6-sol",
     extension: [],
-    personaDocumentIds: [],
     attachedFiles: [],
     personaMessage: PERSONA,
     ...overrides,

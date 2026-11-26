@@ -12,11 +12,13 @@ import "server-only";
 
 import { ServerActionResponse } from "@/features/common/server-action-response";
 import { HistoryContainer } from "@/features/common/services/cosmos";
-import { ChatThreadModel } from "./models";
+import { ChatThreadModel, withoutAgentIdLists } from "./models";
 
 /**
  * Upserts a thread that server code built or loaded from the user's own
- * partition, and stamps lastMessageAt.
+ * partition, and stamps lastMessageAt. The row is written without the agent
+ * id lists that older rows carry (THREAD_AGENT_ID_LIST_FIELDS), so the
+ * returned thread does not have them either.
  */
 export const saveChatThread = async (
   chatThread: ChatThreadModel
@@ -24,7 +26,7 @@ export const saveChatThread = async (
   try {
     chatThread.lastMessageAt = new Date();
     const { resource } = await HistoryContainer().items.upsert<ChatThreadModel>(
-      chatThread
+      withoutAgentIdLists(chatThread)
     );
 
     if (resource) {
@@ -49,9 +51,9 @@ export const saveChatThread = async (
 /**
  * The thread fields a user may change directly: the title and the bookmark.
  * Every other field comes from the stored thread. Fields that grant access or
- * capability (personaId, extension, personaDocumentIds, subAgentIds,
- * defaultTools, personaMessage, attachedFiles, userId, ...) change only
- * through server code or through the dedicated actions that check them.
+ * capability (personaId, extension, defaultTools, personaMessage,
+ * attachedFiles, userId, ...) change only through server code or through the
+ * dedicated actions that check them.
  */
 export const applyUserThreadChanges = (
   stored: ChatThreadModel,

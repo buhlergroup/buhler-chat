@@ -177,6 +177,7 @@ const CTX = {
   documentHintPlacement: "none",
   threadDocumentIds: [],
   personaDocumentIds: [],
+  subAgentIds: undefined,
   defaultTools: undefined,
   extensions: [],
   attachedFiles: [],
@@ -1060,6 +1061,32 @@ describe("/api/chat route (AI SDK v6)", () => {
     const res = await POST(req);
     expect(res.status).toBe(413);
     expect(streamText).not.toHaveBeenCalled();
+  });
+
+  // The thread row stores only the agent id. loadThreadContext reads the
+  // agent's current Search file ids and sub-agent ids; the route hands those
+  // to buildToolset and never reads lists from the thread row.
+  describe("agent documents and sub-agents", () => {
+    it("passes the agent's lists from the thread context to buildToolset", async () => {
+      mockLoadThreadContext.mockResolvedValue({
+        ...CTX,
+        thread: {
+          ...CTX.thread,
+          personaId: "agent-7",
+          // An older row: stale copies that must not be used.
+          personaDocumentIds: ["stale-doc"],
+          subAgentIds: ["stale-sub"],
+        },
+        personaDocumentIds: ["doc-1"],
+        subAgentIds: ["sub-1"],
+      });
+
+      await POST(makeRequest({ message: "hello", id: "t1" }));
+
+      const toolCtx = mockBuildToolset.mock.calls[0][0];
+      expect(toolCtx.personaDocumentIds).toEqual(["doc-1"]);
+      expect(toolCtx.subAgentIds).toEqual(["sub-1"]);
+    });
   });
 
   // The route hands extension resolution to resolveExtensionsForChat, which

@@ -796,6 +796,31 @@ describe("persona-service.ts", () => {
     expect(saved.extensionIds).toEqual(["e-own"]);
   });
 
+  // 014c – the new thread row stores the agent id, not the agent's id lists:
+  // the thread goes to the browser, and the lists are editor-only fields.
+  it("014c CreatePersonaChat stores the agent id and no agent id lists on the thread", async () => {
+    seedPersona({
+      id: "p-chat-lists",
+      userId: "agent-owner-hash",
+      isPublished: true,
+      personaDocumentIds: ["doc-1", "doc-2"],
+      subAgentIds: ["sub-1"],
+    });
+
+    const result = await CreatePersonaChat("p-chat-lists");
+
+    expect(result.status).toBe("OK");
+    const row = vi.mocked(createChatThreadWithServerFiles).mock.calls[0][0] as any;
+    expect(row.personaId).toBe("p-chat-lists");
+    expect(row).not.toHaveProperty("personaDocumentIds");
+    expect(row).not.toHaveProperty("subAgentIds");
+    expect(row).not.toHaveProperty("codeInterpreterDocumentIds");
+    if (result.status === "OK") {
+      expect(result.response).not.toHaveProperty("personaDocumentIds");
+      expect(result.response).not.toHaveProperty("subAgentIds");
+    }
+  });
+
   // 015 – CreatePersonaChat continues after a single CI doc fails to download
   it("015 CreatePersonaChat continues after a single CI doc fails to download", async () => {
     seedPersona({ id: "p-chat-ci-partial", codeInterpreterDocumentIds: ["d1", "d2"] });

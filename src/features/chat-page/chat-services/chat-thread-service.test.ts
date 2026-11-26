@@ -78,7 +78,6 @@ function makeThread(overrides: Partial<any> = {}): any {
     personaMessage: "",
     personaMessageTitle: "Test Persona",
     extension: [],
-    personaDocumentIds: [],
     selectedModel: DEFAULT_MODEL,
     useName: "Test User",
     isTemporary: false,
@@ -198,6 +197,8 @@ describe("chat-page.unit.thread-service.007 — CreateChatThread sets defaults",
     expect(doc.selectedModel).toBe(DEFAULT_MODEL);
     expect(doc.id).toBeTruthy();
     expect(doc.createdAt).toBeTruthy();
+    expect(doc).not.toHaveProperty("personaDocumentIds");
+    expect(doc).not.toHaveProperty("subAgentIds");
   });
 });
 
@@ -310,9 +311,11 @@ describe("chat-page.unit.thread-service.011b — UpsertChatThread takes only use
     expect(doc.name).toBe("Renamed");
     expect(doc.personaId).toBe("agent-1");
     expect(doc.extension).toEqual(["ext-own"]);
-    expect(doc.personaDocumentIds).toEqual(["doc-1"]);
+    // Neither the stored copies (an older row) nor the client's lists: the
+    // row is written without the agent id lists.
+    expect(doc).not.toHaveProperty("personaDocumentIds");
     expect(doc.personaMessage).toBe("stored system prompt");
-    expect(doc.subAgentIds).toEqual([]);
+    expect(doc).not.toHaveProperty("subAgentIds");
     expect(doc.defaultTools).toBeUndefined();
     expect(doc.userId).toBe(hashedEmail);
   });
@@ -825,5 +828,69 @@ describe("chat-page.unit.thread-service — server is the source of truth for co
     expect(historyContainer.items.upsert.mock.calls[0][0].attachedFiles).toEqual([
       { id: "doc-1", name: "n.pdf", type: "search-indexed" },
     ]);
+  });
+});
+
+describe("chat-page.unit.thread-service.034 — older rows with agent id lists never reach the client", () => {
+  // A row written before the thread stopped storing copies of the agent's
+  // Search file ids and sub-agent ids.
+  const legacyRow = () =>
+    makeThread({
+      type: CHAT_THREAD_ATTRIBUTE,
+      isDeleted: false,
+      extension: [],
+      personaId: "agent-1",
+      personaDocumentIds: ["doc-1", "doc-2"],
+      subAgentIds: ["sub-1"],
+      codeInterpreterDocumentIds: ["ci-1"],
+    });
+  const expectNoAgentIdLists = (thread: unknown) => {
+    expect(thread).not.toHaveProperty("personaDocumentIds");
+    expect(thread).not.toHaveProperty("subAgentIds");
+    expect(thread).not.toHaveProperty("codeInterpreterDocumentIds");
+  };
+
+  it("FindAllChatThreadForCurrentUser strips them", async () => {
+    historyItems = [legacyRow()];
+    const result = await FindAllChatThreadForCurrentUser();
+    expect(result.status).toBe("OK");
+    if (result.status !== "OK") return;
+    expect(result.response).toHaveLength(1);
+    expectNoAgentIdLists(result.response[0]);
+    expect(result.response[0].personaId).toBe("agent-1");
+  });
+
+  it("FindChatThreadForCurrentUser and EnsureChatThreadOperation strip them", async () => {
+    historyItems = [legacyRow()];
+    const found = await FindChatThreadForCurrentUser("t1");
+    expect(found.status).toBe("OK");
+    if (found.status === "OK") expectNoAgentIdLists(found.response);
+    const ensured = await EnsureChatThreadOperation("t1");
+    expect(ensured.status).toBe("OK");
+    if (ensured.status === "OK") expectNoAgentIdLists(ensured.response);
+  });
+
+  it("an update returns the thread without them and writes the row without them", async () => {
+    historyItems = [legacyRow()];
+    const result = await UpdateChatThreadSelectedModel("t1", DEFAULT_MODEL);
+    expect(result.status).toBe("OK");
+    if (result.status === "OK") expectNoAgentIdLists(result.response);
+    expectNoAgentIdLists(historyContainer.items.upsert.mock.calls[0][0]);
+  });
+
+  it("a soft delete writes the row without them", async () => {
+    historyItems = [legacyRow()];
+    // No messages and no documents: the only write is the thread row.
+    historyContainer.items.query.mockImplementation((_q: any, _opts?: any) => ({
+      fetchAll: async () => ({ resources: [] }),
+    }));
+    const result = await SoftDeleteChatThreadForCurrentUser("t1");
+    expect(result.status).toBe("OK");
+    if (result.status === "OK") expectNoAgentIdLists(result.response);
+    const threadWrites = historyContainer.items.upsert.mock.calls
+      .map((call) => call[0])
+      .filter((doc: any) => doc.id === "t1");
+    expect(threadWrites.length).toBeGreaterThan(0);
+    for (const doc of threadWrites) expectNoAgentIdLists(doc);
   });
 });

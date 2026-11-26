@@ -30,10 +30,17 @@ vi.mock("../../chat-thread-service", () => ({
 }));
 
 // ── Agent access (persona-access.ts) ─────────────────────────────────────────
-const mockCanContinuePersonaThread = vi.fn(async (_personaId?: string) => true);
+type ThreadAgentResult =
+  | { allowed: false }
+  | { allowed: true; persona: Record<string, unknown> | undefined };
+const mockResolveThreadAgent = vi.fn(
+  async (_personaId?: string): Promise<ThreadAgentResult> => ({
+    allowed: true,
+    persona: undefined,
+  })
+);
 vi.mock("@/features/persona-page/persona-services/persona-access", () => ({
-  canContinuePersonaThread: (personaId?: string) =>
-    mockCanContinuePersonaThread(personaId),
+  resolveThreadAgent: (personaId?: string) => mockResolveThreadAgent(personaId),
 }));
 
 // ── Message service ───────────────────────────────────────────────────────────
@@ -148,7 +155,6 @@ function makeThread(
     bookmarked: false,
     selectedModel: "gpt-5.4-mini",
     extension: [],
-    personaDocumentIds: [],
     attachedFiles: [],
     ...(typeof lastPromptTokens === "number"
       ? {
@@ -280,13 +286,13 @@ describe("loadThreadContext — thread started from an agent", () => {
     mockFindHistory.mockResolvedValue({ status: "OK", response: [] });
     mockCreateMessage.mockClear();
     mockFindHistory.mockClear();
-    mockCanContinuePersonaThread.mockResolvedValueOnce(false);
+    mockResolveThreadAgent.mockResolvedValueOnce({ allowed: false });
 
     await expect(loadThreadContext(makeUserPrompt())).rejects.toMatchObject({
       status: 403,
       message: AGENT_NOT_AVAILABLE_MESSAGE,
     });
-    expect(mockCanContinuePersonaThread).toHaveBeenCalledWith("agent-private");
+    expect(mockResolveThreadAgent).toHaveBeenCalledWith("agent-private");
     expect(mockCreateMessage).not.toHaveBeenCalled();
     expect(mockFindHistory).not.toHaveBeenCalled();
   });
@@ -299,8 +305,69 @@ describe("loadThreadContext — thread started from an agent", () => {
 
     await loadThreadContext(makeUserPrompt());
 
-    expect(mockCanContinuePersonaThread).toHaveBeenCalledWith("agent-ok");
+    expect(mockResolveThreadAgent).toHaveBeenCalledWith("agent-ok");
     expect(mockCreateMessage).toHaveBeenCalledTimes(1);
+  });
+
+  it("takes the Search file ids and sub-agent ids from the agent's current row, not from the thread", async () => {
+    // An older row still holds copies of the lists; they are stale and ignored.
+    const thread = {
+      ...makeThread(),
+      personaId: "agent-ok",
+      personaDocumentIds: ["stale-doc"],
+      subAgentIds: ["stale-sub"],
+    } as ChatThreadModel;
+    mockEnsureThread.mockResolvedValue({ status: "OK", response: thread });
+    mockFindHistory.mockResolvedValue({ status: "OK", response: [] });
+    mockResolveThreadAgent.mockResolvedValueOnce({
+      allowed: true,
+      persona: {
+        id: "agent-ok",
+        personaDocumentIds: ["doc-1", "doc-2"],
+        subAgentIds: ["sub-1"],
+      },
+    });
+
+    const ctx = await loadThreadContext(makeUserPrompt());
+
+    expect(mockResolveThreadAgent).toHaveBeenCalledTimes(1);
+    expect(ctx.personaDocumentIds).toEqual(["doc-1", "doc-2"]);
+    expect(ctx.subAgentIds).toEqual(["sub-1"]);
+    // Agent documents switch the document hint on.
+    expect(ctx.documentHintText).toContain("persona-linked document(s)");
+  });
+
+  it("an agent without lists gives empty lists", async () => {
+    const thread = { ...makeThread(), personaId: "agent-ok" } as ChatThreadModel;
+    mockEnsureThread.mockResolvedValue({ status: "OK", response: thread });
+    mockFindHistory.mockResolvedValue({ status: "OK", response: [] });
+    mockResolveThreadAgent.mockResolvedValueOnce({
+      allowed: true,
+      persona: { id: "agent-ok" },
+    });
+
+    const ctx = await loadThreadContext(makeUserPrompt());
+
+    expect(ctx.personaDocumentIds).toEqual([]);
+    expect(ctx.subAgentIds).toEqual([]);
+  });
+
+  it("a thread whose agent is gone, or without an agent, ignores the lists of an older row", async () => {
+    const thread = {
+      ...makeThread(),
+      personaId: "agent-deleted",
+      personaDocumentIds: ["stale-doc"],
+      subAgentIds: ["stale-sub"],
+    } as ChatThreadModel;
+    mockEnsureThread.mockResolvedValue({ status: "OK", response: thread });
+    mockFindHistory.mockResolvedValue({ status: "OK", response: [] });
+    mockResolveThreadAgent.mockResolvedValueOnce({ allowed: true, persona: undefined });
+
+    const ctx = await loadThreadContext(makeUserPrompt());
+
+    expect(ctx.personaDocumentIds).toEqual([]);
+    expect(ctx.subAgentIds).toBeUndefined();
+    expect(ctx.documentHintText).toBeUndefined();
   });
 });
 

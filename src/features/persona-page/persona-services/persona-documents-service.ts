@@ -29,6 +29,8 @@ import {
   documentDetailRequests,
   maxPersonaDocuments,
 } from "./persona-document-graph-check";
+import { findPersonaForCurrentUser } from "./persona-lookup";
+import { FindChatThreadForCurrentUser } from "@/features/chat-page/chat-services/chat-thread-service";
 
 const positiveInt = (value: string | undefined, fallback: number) => {
   const n = Number(value);
@@ -194,4 +196,50 @@ export async function DocumentDetails(
       ],
     };
   }
+}
+
+/**
+ * The agent's Search files for the agent panel of a chat thread. The thread
+ * stores only the agent id (personaId), not the agent's file ids: this action
+ * reads the thread from the caller's own partition, loads the agent with the
+ * open rule (findPersonaForCurrentUser) and returns the details of the files
+ * the caller may use (DocumentDetails). The answer holds no Search file row
+ * ids, which are editor-only fields of the agent, and only the NUMBER of the
+ * files the caller cannot use.
+ */
+export async function AgentDocumentDetailsForThread(
+  chatThreadId: string
+): Promise<
+  ServerActionResponse<{
+    documents: DocumentMetadata[];
+    notAvailableCount: number;
+  }>
+> {
+  const none = {
+    status: "OK" as const,
+    response: { documents: [], notAvailableCount: 0 },
+  };
+  if (typeof chatThreadId !== "string" || chatThreadId.length === 0) {
+    return none;
+  }
+  const thread = await FindChatThreadForCurrentUser(chatThreadId);
+  if (thread.status !== "OK") return thread;
+  const personaId = thread.response.personaId;
+  if (!personaId) return none;
+
+  const persona = await findPersonaForCurrentUser(personaId);
+  if (persona.status !== "OK") return none;
+  const ids = [...new Set(persona.response.personaDocumentIds ?? [])];
+  if (ids.length === 0) return none;
+
+  const details = await DocumentDetails(ids.map((id) => ({ id })));
+  if (details.status !== "OK") return details;
+  return {
+    status: "OK",
+    response: {
+      // Without `id` (the Search file row id).
+      documents: details.response.successful.map(({ id: _rowId, ...doc }) => doc),
+      notAvailableCount: details.response.unsuccessful.length,
+    },
+  };
 }

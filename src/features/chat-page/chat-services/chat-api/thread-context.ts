@@ -36,7 +36,7 @@ import { CreateChatMessage } from "../chat-message-service";
 import { FindAllChatDocuments } from "../chat-document-service";
 import { FindAllChatMessagesForCurrentUser } from "../chat-message-service";
 import { EnsureChatThreadOperation } from "../chat-thread-service";
-import { canContinuePersonaThread } from "@/features/persona-page/persona-services/persona-access";
+import { resolveThreadAgent } from "@/features/persona-page/persona-services/persona-access";
 import { uiMessagesFromChatMessages } from "./message-adapter";
 import { compareByCodepoint } from "../tools/stabilize-toolset";
 import { getBase64ImageReference } from "../chat-image-persistence-service";
@@ -577,7 +577,17 @@ export interface ThreadContext {
    */
   documentHintPlacement: "tail-message" | "developer-message" | "none";
   threadDocumentIds: string[];
+  /**
+   * Search file ids of the thread's agent, read from the agent's current row
+   * on this turn (resolveThreadAgent), never from the thread row. Empty for a
+   * thread without an agent or whose agent was deleted.
+   */
   personaDocumentIds: string[];
+  /**
+   * Sub-agent ids configured on the thread's agent, read like
+   * `personaDocumentIds`. Undefined for a thread without an agent.
+   */
+  subAgentIds: string[] | undefined;
   defaultTools: DefaultTools | undefined;
   extensions: string[];
   attachedFiles: AttachedFileModel[];
@@ -643,12 +653,16 @@ export async function loadThreadContext(
 
   // 1b. A thread started from an agent continues only while the user can
   // still open that agent (persona-access.ts). The thread stays readable;
-  // only a new turn is refused, before anything is written.
-  if (!(await canContinuePersonaThread(thread.personaId))) {
+  // only a new turn is refused, before anything is written. The same lookup
+  // returns the agent's row: its Search file ids and sub-agent ids are read
+  // from there, the thread stores no copy of them.
+  const threadAgent = await resolveThreadAgent(thread.personaId);
+  if (!threadAgent.allowed) {
     throw Object.assign(new Error(AGENT_NOT_AVAILABLE_MESSAGE), {
       status: 403,
     });
   }
+  const agent = threadAgent.persona;
 
   // 2. Current user (needed for message authorship)
   const currentUser = await getCurrentUser();
@@ -720,8 +734,7 @@ export async function loadThreadContext(
     hasChatDocuments
       ? documentsResponse.response.map((d) => d.id)
       : [];
-  const personaDocumentIds: string[] =
-    thread.personaDocumentIds ?? [];
+  const personaDocumentIds: string[] = agent?.personaDocumentIds ?? [];
   const hasPersonaDocuments = personaDocumentIds.length > 0;
   const hasAnyDocuments = hasChatDocuments || hasPersonaDocuments;
 
@@ -867,6 +880,7 @@ export async function loadThreadContext(
     documentHintPlacement,
     threadDocumentIds: chatDocumentIds,
     personaDocumentIds,
+    subAgentIds: agent ? (agent.subAgentIds ?? []) : undefined,
     defaultTools: thread.defaultTools,
     extensions,
     attachedFiles: thread.attachedFiles ?? [],

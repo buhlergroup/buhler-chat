@@ -806,6 +806,33 @@ export function withNormalizedSelectedModel<T extends { selectedModel?: string }
     : { ...doc, selectedModel: normalized };
 }
 
+/**
+ * Id lists of an agent that a CHAT_THREAD row must not hold. Threads created
+ * before the chat route resolved the agent on every turn stored copies of the
+ * agent's Search file ids and sub-agent ids. Those ids are editor-only fields
+ * of the agent (PERSONA_EDITOR_ONLY_FIELDS in persona-access.ts), and the
+ * thread row goes to the browser. The server ignores these fields on read,
+ * drops them on the next save, and never sends them to the client.
+ */
+export const THREAD_AGENT_ID_LIST_FIELDS = [
+  "personaDocumentIds",
+  "codeInterpreterDocumentIds",
+  "subAgentIds",
+] as const;
+
+/**
+ * The thread without the agent id lists of THREAD_AGENT_ID_LIST_FIELDS. A
+ * copy when a list is present, else the same object.
+ */
+export function withoutAgentIdLists<T extends object>(thread: T): T {
+  if (!THREAD_AGENT_ID_LIST_FIELDS.some((field) => field in thread)) {
+    return thread;
+  }
+  const copy: Record<string, unknown> = { ...thread };
+  for (const field of THREAD_AGENT_ID_LIST_FIELDS) delete copy[field];
+  return copy as T;
+}
+
 /** A model this environment can actually route a turn to. */
 export function isDeployedModel(id: ChatModel): boolean {
   return !!MODEL_CONFIGS[id]?.deploymentName?.trim();
@@ -1234,14 +1261,12 @@ export interface ChatThreadModel {
   personaMessageTitle: string;
   extension: string[];
   type: typeof CHAT_THREAD_ATTRIBUTE;
-  personaDocumentIds: string[];
   selectedModel?: ChatModel;
   reasoningEffort?: ReasoningEffort;
   isTemporary?: boolean;
   codeInterpreterContainerId?: string;
   codeInterpreterFileIdsSignature?: string;
   attachedFiles?: Array<AttachedFileModel>;
-  subAgentIds?: string[];
   usage?: ThreadUsage;
   defaultTools?: DefaultTools;
   /**
@@ -1253,7 +1278,10 @@ export interface ChatThreadModel {
   /**
    * Id of the agent (persona) this thread was started from. Absent on
    * default/extension/temporary chats and on threads created before this
-   * field existed. Used to attribute per-agent usage statistics.
+   * field existed. Used to attribute per-agent usage statistics, and the
+   * chat route loads the agent's current Search files and sub-agents through
+   * it on every turn (the thread stores no copy of those id lists, see
+   * THREAD_AGENT_ID_LIST_FIELDS).
    */
   personaId?: string;
   /**

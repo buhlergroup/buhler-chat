@@ -62,7 +62,6 @@ function makeThread(id: string): ChatThreadModel {
     personaMessageTitle: "",
     extension: [],
     type: "CHAT_THREAD",
-    personaDocumentIds: [],
   };
 }
 
@@ -94,6 +93,28 @@ describe("reporting-service.unit.001 — admin gets thread list", () => {
     if (result.status === "OK") {
       expect(result.response).toHaveLength(2);
       expect(result.response[0].id).toBe("t1");
+    }
+  });
+});
+
+describe("reporting-service.unit.001b — older rows lose their agent id lists", () => {
+  it("returns the threads without personaDocumentIds and subAgentIds", async () => {
+    mockGetCurrentUser.mockResolvedValueOnce(makeAdminUser());
+    const legacy = {
+      ...makeThread("t1"),
+      personaId: "agent-1",
+      personaDocumentIds: ["doc-1"],
+      subAgentIds: ["sub-1"],
+    } as ChatThreadModel;
+    mockFetchAll.mockResolvedValueOnce({ resources: [legacy] });
+
+    const result = await FindAllChatThreadsForAdmin(100, 0);
+
+    expect(result.status).toBe("OK");
+    if (result.status === "OK") {
+      expect(result.response[0].personaId).toBe("agent-1");
+      expect(result.response[0]).not.toHaveProperty("personaDocumentIds");
+      expect(result.response[0]).not.toHaveProperty("subAgentIds");
     }
   });
 });
