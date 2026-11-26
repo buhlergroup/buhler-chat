@@ -156,6 +156,22 @@ describe("mcpExtensionTools", () => {
     expect(uiErrorText(transportError)).not.toContain("fake");
   });
 
+  it("shows a cleaned, short error text in the chat; the model gets the server's text", async () => {
+    const echo =
+      "upstream 401 from https://internal.example.net/v2/quote?sig=AbC123 " +
+      "Authorization: Bearer eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.c2lnbmF0dXJl " +
+      "api_key=sk-live-0123456789 " +
+      "x".repeat(900);
+    session.callTool = vi.fn(async () => ({ isError: true, content: [{ type: "text", text: echo }] }));
+    const [[, t]] = await mcpExtensionTools(extension({ toolAllowList: ["get_price"] }), connection, openSession);
+    const toolError = (await execute(t, {}).catch((e: unknown) => e)) as Error;
+    expect(toolError.message).toContain("https://internal.example.net/v2/quote?sig=AbC123");
+    const ui = uiErrorText(toolError);
+    expect(ui.startsWith("Market / get_price returned an error: upstream 401 from [url]")).toBe(true);
+    expect(ui).not.toMatch(/internal\.example|eyJhbGci|sk-live|AbC123/);
+    expect(Array.from(ui).length).toBeLessThanOrEqual(300);
+  });
+
   it("keeps the generic text for errors that are not marked as safe", () => {
     expect(uiErrorText(new Error("Cosmos 500 at https://internal.example"))).toBe("An error occurred.");
     expect(uiErrorText("boom")).toBe("An error occurred.");
