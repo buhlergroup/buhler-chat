@@ -70,6 +70,9 @@ export function extensionTool(
   return tool({
     description: parsedFunction.description,
     inputSchema: schema,
+    // The extension author writes the schema. Strict decoding would make the
+    // model fill every optional field (see mcp-tool.ts), so it stays off.
+    strict: false,
     execute: async (rawArgs: unknown, { abortSignal }: { abortSignal?: AbortSignal }) => {
       const args: ExtensionArgs = isExtensionArgs(rawArgs) ? rawArgs : {};
       logDebug("extensionTool: executing", {

@@ -75,3 +75,19 @@ describe("AddOrUpdatePersona", () => {
     expect(personaStore.persona.id).toBe("");
   });
 });
+
+// Pinned (from main): the "Anyone with the link can use this agent" switch
+// (name linkAccess) is saved from the editor form like isPublished.
+describe("AddOrUpdatePersona — linkAccess from the form", () => {
+  it("a new agent with the switch on is created with linkAccess true", async () => {
+    service.CreatePersona.mockResolvedValue({ status: "OK", response: saved("new-id") });
+    await AddOrUpdatePersona(null, form({ id: "", linkAccess: "on" }));
+    expect(service.CreatePersona.mock.calls[0][0].linkAccess).toBe(true);
+  });
+
+  it("a saved agent with the switch off is updated with linkAccess false", async () => {
+    service.UpsertPersona.mockResolvedValue({ status: "OK", response: saved("p1") });
+    await AddOrUpdatePersona(null, form({ id: "p1" }));
+    expect(service.UpsertPersona.mock.calls[0][0].linkAccess).toBe(false);
+  });
+});

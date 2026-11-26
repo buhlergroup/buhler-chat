@@ -68,6 +68,8 @@ vi.mock("./persona-access-group/persona-access-group", () => ({
       data-testid="persona-access-group"
       data-published={String(props.initialIsPublished)}
       data-trust={props.trustLevel ?? ""}
+      data-link-access={String(props.initialLinkAccess)}
+      data-persona-id={props.personaId ?? ""}
     />
   ),
 }));
@@ -189,6 +191,17 @@ describe("persona-page.unit.components.001/002 — AddNewPersona", () => {
     const access = screen.getByTestId("persona-access-group");
     expect(access.dataset.published).toBe("false");
     expect(access.dataset.trust).toBe("");
+  });
+
+  it("passes the stored link access and the agent id into the access section", () => {
+    (usePersonaState as any).mockReturnValue({
+      ...mockPersonaState,
+      persona: { ...mockPersonaState.persona, id: "p-42", linkAccess: false },
+    });
+    render(<AddNewPersona extensions={[]} personas={[]} />);
+    const access = screen.getByTestId("persona-access-group");
+    expect(access.dataset.linkAccess).toBe("false");
+    expect(access.dataset.personaId).toBe("p-42");
   });
 
   it("passes the legacy-verified trust level when published without trustLevel", () => {

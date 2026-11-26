@@ -47,6 +47,7 @@ import {
 } from "@/features/chat-page/chat-services/chat-thread-service";
 import { buildToolset, repairExtensionToolCall } from "@/features/chat-page/chat-services/tools/registry";
 import { stabilizeToolset } from "@/features/chat-page/chat-services/tools/stabilize-toolset";
+import { uiErrorText } from "@/features/chat-page/chat-services/tools/tool-user-error";
 import {
   startPublisher,
   unregisterPublisher,
@@ -1041,6 +1042,9 @@ export async function POST(req: Request) {
   let stepCount = 0;
 
   const modelStream = result.toUIMessageStream({
+    // A failed tool call shows its reason when the tool marks it as safe
+    // (ToolUserError). Other errors keep the generic text.
+    onError: uiErrorText,
     // Ship the turn's token usage on the assistant message metadata so the
     // header's live usage display updates every turn (the chat session's
     // onFinish reads this). Provider-agnostic: the SDK normalises usage to

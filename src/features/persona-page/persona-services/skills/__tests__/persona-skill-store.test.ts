@@ -339,7 +339,11 @@ describe("canUsePersonaSkills — the central canOpenPersona rule", () => {
 
   it("published agent: everyone; private agent: nobody else", async () => {
     expect(await canUsePersonaSkills(user, { userId: OWNER, isPublished: true }, notMember)).toBe(true);
-    expect(await canUsePersonaSkills(user, { userId: OWNER, isPublished: false }, member)).toBe(false);
+    expect(await canUsePersonaSkills(user, { userId: OWNER, isPublished: false, linkAccess: false }, member)).toBe(false);
+  });
+
+  it("link agent (linkAccess not false): everyone with the link", async () => {
+    expect(await canUsePersonaSkills(user, { userId: OWNER, isPublished: false }, notMember)).toBe(true);
   });
 
   it("group-shared agent: members yes, non-members no (even when published)", async () => {

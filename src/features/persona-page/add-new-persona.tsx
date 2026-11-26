@@ -391,6 +391,8 @@ export const AddNewPersona: FC<Props> = (props) => {
                 <PersonaAccessGroup
                   initialSelectedGroup={persona.accessGroup?.id || null}
                   initialIsPublished={persona.isPublished}
+                  initialLinkAccess={persona.linkAccess}
+                  personaId={persona.id}
                   trustLevel={effectiveTrustLevel(persona)}
                   sharedNotice={
                     storedSecretCount > 0 ? (

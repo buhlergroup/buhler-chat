@@ -20,7 +20,15 @@ import "server-only";
  *      transitive membership. A Graph error counts as "not a member".
  *   4. With no share group, a published agent (isPublished, "Publish to the
  *      whole organization") can be opened by everyone.
- *   5. Anything else is private: only the owner and admins.
+ *   5. With no share group, link access ("Anyone with the link can use this
+ *      agent") is ON unless linkAccess === false: every signed-in user who
+ *      has the agent id (the /agent/<id>/chat or /embed/agent/<id> link) can
+ *      open it. undefined counts as on, so agents saved before the field
+ *      existed keep working by link. Such an agent is NOT listed for other
+ *      users (FindAllPersonaForCurrentUser does not query it). A share group
+ *      wins over linkAccess: it does not widen a group agent.
+ *   6. Anything else (linkAccess === false, not published, no group) is
+ *      private: only the owner and admins.
  *
  * Callers return NOT_FOUND for a denied access, never "forbidden", so a
  * persona id does not tell a user that the agent exists.
@@ -45,7 +53,7 @@ export type PersonaViewer = {
 
 export type PersonaAccessFields = Pick<
   PersonaModel,
-  "userId" | "isPublished" | "accessGroup"
+  "userId" | "isPublished" | "accessGroup" | "linkAccess"
 >;
 
 /** The share group of a persona, or undefined when it has none. */
@@ -78,8 +86,23 @@ export const canOpenPersona = async (
   const groupId = personaShareGroupId(persona);
   if (groupId) return isGroupMember(groupId);
 
-  return persona.isPublished === true;
+  return persona.isPublished === true || persona.linkAccess !== false;
 };
+
+/**
+ * Is the agent LISTED for the viewer (agent list, sub-agent search)? Only the
+ * viewer's own agents, published agents and group agents. Link access opens
+ * an agent but never lists it: other users reach it only through its link.
+ * FindAllPersonaForCurrentUser queries the same set; this keeps the rule in
+ * code too.
+ */
+export const isListedForViewer = (
+  viewer: PersonaViewer,
+  persona: PersonaAccessFields
+): boolean =>
+  persona.userId === viewer.userId ||
+  persona.isPublished === true ||
+  personaShareGroupId(persona) !== undefined;
 
 /**
  * Who may CHANGE an agent and its documents: the owner or an admin. Being

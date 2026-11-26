@@ -139,6 +139,7 @@ const FormDataToPersonaModel = (formData: FormData): PersonaModel => {
     description: formData.get("description") as string,
     personaMessage: formData.get("personaMessage") as string,
     isPublished: formData.get("isPublished") === "on" ? true : false,
+    linkAccess: formData.get("linkAccess") === "on",
     userId: "", // the user id is set on the server once the user is authenticated
     extensionIds: formData.getAll("extensionIds") as string[],
     createdAt: new Date(),
