@@ -452,6 +452,11 @@ const ChatPageInner = (props: ChatPageProps) => {
   const reasoningEffort = useChatStore((s) => s.reasoningEffort);
   const setReasoningEffort = useChatStore((s) => s.setReasoningEffort);
   const attachedFiles = useChatStore((s) => s.attachedFiles);
+  // The input field shows only files the user attached. The agent's own files
+  // (skills, agent files) are listed in the agent panel of the chat header.
+  const uploadedFiles = attachedFiles.filter(
+    (f) => f.type === "code-interpreter" && (f.source ?? "upload") === "upload",
+  );
   const removeAttachedFile = useChatStore((s) => s.removeAttachedFile);
   const { uploadButtonLabel, loading: fileLoading } = useFileStore();
   const loading: "idle" | "file upload" = fileLoading;
@@ -671,11 +676,10 @@ const ChatPageInner = (props: ChatPageProps) => {
             </div>
           )}
 
-          {/* Attached Files (Code Interpreter files) */}
-          {attachedFiles.filter((f) => f.type === "code-interpreter").length > 0 && (
+          {/* Files the user uploaded for this chat */}
+          {uploadedFiles.length > 0 && (
             <div className="flex flex-wrap gap-2 p-2">
-              {attachedFiles
-                .filter((f) => f.type === "code-interpreter")
+              {uploadedFiles
                 .map((file) => (
                   <div
                     key={file.id}
@@ -686,7 +690,7 @@ const ChatPageInner = (props: ChatPageProps) => {
                       <span className="text-sm font-medium truncate max-w-[150px]" title={file.name}>
                         {file.name}
                       </span>
-                      <span className="text-xs text-muted-foreground">Code Interpreter</span>
+                      <span className="text-xs text-muted-foreground">Uploaded</span>
                     </div>
                     <Button
                       variant="ghost"
