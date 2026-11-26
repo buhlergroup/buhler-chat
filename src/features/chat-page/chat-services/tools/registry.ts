@@ -15,7 +15,7 @@ import { loadSkillTool } from "./load-skill";
 import { fetchSharePointFileTool, findSharePointFilesTool } from "./sharepoint-files";
 import { SharePointFileSession } from "@/features/persona-page/persona-services/sharepoint-files/sharepoint-file-access";
 import { readSharePointFileLimits } from "@/features/persona-page/persona-services/sharepoint-files/sharepoint-file-limits";
-import { uploadFileToCodeInterpreterContainer } from "../code-interpreter-container";
+import { putFileIntoCodeInterpreterContainer } from "../code-interpreter-container";
 import type { ToolContext } from "./tool-context";
 import { compareByCodepoint } from "./stabilize-toolset";
 
@@ -71,7 +71,7 @@ export async function buildToolset(
       accessToken: sharePoint.accessToken,
       limits,
       getContainerId: sharePoint.getContainerId,
-      uploadToContainer: uploadFileToCodeInterpreterContainer,
+      uploadToContainer: putFileIntoCodeInterpreterContainer,
       threadId: ctx.threadId,
     });
     entries.push(["find_sharepoint_files", findSharePointFilesTool(session)]);

@@ -21,7 +21,12 @@ vi.mock("@/features/common/services/openai", () => ({
     },
 }));
 
-import { ensureCodeInterpreterContainer } from "./code-interpreter-container";
+import {
+  ensureCodeInterpreterContainer,
+  putFileIntoCodeInterpreterContainer,
+} from "./code-interpreter-container";
+import { register, SERVICE_KEYS } from "@/features/common/services/service-container";
+import { createMemoryContentBlobBackend } from "@/features/common/services/content-store/memory-backend";
 
 describe("ensureCodeInterpreterContainer", () => {
   beforeEach(() => {
@@ -155,5 +160,54 @@ describe("ensureCodeInterpreterContainer", () => {
     await expect(
       ensureCodeInterpreterContainer({ threadId: "t1", fileIds: [] }),
     ).resolves.toBeUndefined();
+  });
+});
+
+describe("putFileIntoCodeInterpreterContainer (content store)", () => {
+  const owner = "c".repeat(64);
+  const filesCreate = vi.fn();
+  const filesRetrieve = vi.fn();
+  const containerFilesCreate = vi.fn();
+
+  beforeEach(() => {
+    register(SERVICE_KEYS.contentBlobs, createMemoryContentBlobBackend);
+    let n = 0;
+    filesCreate.mockReset().mockImplementation(async () => ({ id: `file-${++n}` }));
+    filesRetrieve.mockReset().mockResolvedValue({ id: "file-1" });
+    containerFilesCreate.mockReset().mockImplementation(async (_c: string, body: any) =>
+      body.file_id
+        ? { id: "cfile_1", path: `/mnt/data/${body.file_id}-notes.csv` }
+        : { id: "cfile_b", path: "/mnt/data/notes.csv" }
+    );
+    clientOverride = {
+      files: { create: filesCreate, retrieve: filesRetrieve },
+      containers: { files: { create: containerFilesCreate } },
+    };
+  });
+
+  it("the same bytes are uploaded to OpenAI once and then referenced by file id", async () => {
+    const data = Buffer.from("a,b\n1,2\n");
+    const first = await putFileIntoCodeInterpreterContainer("cntr_1", "notes.csv", data, owner);
+    const second = await putFileIntoCodeInterpreterContainer("cntr_2", "notes.csv", data, owner);
+    expect(filesCreate).toHaveBeenCalledTimes(1);
+    expect(containerFilesCreate).toHaveBeenNthCalledWith(1, "cntr_1", { file_id: "file-1" });
+    expect(containerFilesCreate).toHaveBeenNthCalledWith(2, "cntr_2", { file_id: "file-1" });
+    expect(first.path).toBe("/mnt/data/file-1-notes.csv");
+    expect(second.path).toBe(first.path);
+  });
+
+  it("falls back to uploading the bytes when the file id is refused", async () => {
+    containerFilesCreate.mockImplementationOnce(async () => {
+      throw Object.assign(new Error("bad request"), { status: 400 });
+    });
+    const res = await putFileIntoCodeInterpreterContainer("cntr_1", "notes.csv", Buffer.from("x"), owner);
+    expect(res.path).toBe("/mnt/data/notes.csv");
+    expect(containerFilesCreate).toHaveBeenCalledTimes(2);
+  });
+
+  it("without a scope uploads the bytes (no content store)", async () => {
+    await putFileIntoCodeInterpreterContainer("cntr_1", "notes.csv", Buffer.from("x"));
+    expect(filesCreate).not.toHaveBeenCalled();
+    expect(containerFilesCreate).toHaveBeenCalledTimes(1);
   });
 });
