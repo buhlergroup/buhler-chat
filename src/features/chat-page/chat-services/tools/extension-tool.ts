@@ -6,6 +6,72 @@ import { logDebug, logError } from "@/features/common/services/logger";
 import type { ExtensionModel, ExtensionFunctionModel } from "@/features/extensions-page/extension-services/models";
 import type { Tool } from "@ai-sdk/provider-utils";
 import { assertExtensionUrlAllowed } from "./extension-url-guard";
+import { buildExtensionUrl } from "./extension-url-builder";
+
+/** Redirect hops an extension call may follow (same origin only). */
+export const MAX_EXTENSION_REDIRECTS = 3;
+const REDIRECT_STATUSES = new Set([301, 302, 303, 307, 308]);
+
+/** The SSRF guard or the redirect rules refused a request. */
+export class ExtensionRequestRefusedError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "ExtensionRequestRefusedError";
+  }
+}
+
+/**
+ * fetch for an extension call. Redirects are never followed by fetch itself
+ * (`redirect: "manual"`). A redirect is followed here only to an https URL
+ * of the same origin (the same rule the MCP client uses), the SSRF guard runs
+ * again on every hop, and at most MAX_EXTENSION_REDIRECTS hops are taken. So
+ * the header secrets never go to another host.
+ */
+export async function fetchExtensionUrl(
+  url: string,
+  init: RequestInit,
+  assertUrl: (url: string) => Promise<unknown> = assertExtensionUrlAllowed
+): Promise<Response> {
+  let current = url;
+  let currentInit: RequestInit = { ...init, redirect: "manual" };
+  for (let hop = 0; ; hop++) {
+    try {
+      await assertUrl(current);
+    } catch (err) {
+      throw new ExtensionRequestRefusedError(err instanceof Error ? err.message : String(err));
+    }
+    const response = await fetch(current, currentInit);
+    if (!REDIRECT_STATUSES.has(response.status)) return response;
+
+    await response.body?.cancel().catch(() => {});
+    if (hop >= MAX_EXTENSION_REDIRECTS) {
+      throw new ExtensionRequestRefusedError("Extension endpoint redirected too many times");
+    }
+    const location = response.headers.get("location");
+    if (!location) {
+      throw new ExtensionRequestRefusedError("Extension endpoint sent a redirect without a location");
+    }
+    let next: URL;
+    try {
+      next = new URL(location, current);
+    } catch {
+      throw new ExtensionRequestRefusedError("Extension endpoint sent an invalid redirect location");
+    }
+    if (next.protocol !== "https:") {
+      throw new ExtensionRequestRefusedError("Extension endpoint redirected to a non-https URL");
+    }
+    if (next.origin !== new URL(current).origin) {
+      throw new ExtensionRequestRefusedError("Extension endpoint redirected to another origin");
+    }
+    const method = (currentInit.method ?? "GET").toUpperCase();
+    if (
+      response.status === 303 ? method !== "HEAD" : (response.status === 301 || response.status === 302) && method === "POST"
+    ) {
+      currentInit = { ...currentInit, method: "GET", body: undefined };
+    }
+    current = next.href;
+  }
+}
 
 export interface ExtensionToolOptions {
   extension: ExtensionModel;
@@ -89,26 +155,31 @@ export function extensionTool(
         authorization: userId,
       };
 
-      let url = functionDef.endpoint;
+      // Fill the endpoint template from the declared query keys only, and
+      // keep the configured origin (see extension-url-builder.ts).
+      let url: string;
+      try {
+        url = buildExtensionUrl(
+          functionDef.endpoint,
+          args.query,
+          parsedFunction.parameters
+        );
+      } catch (err) {
+        logError("extensionTool: URL rejected", {
+          functionName: parsedFunction.name,
+          extensionId: extension.id,
+          reason: err instanceof Error ? err.message : String(err),
+        });
+        throw new Error(
+          `Extension "${parsedFunction.name}" arguments are not allowed for its endpoint`
+        );
+      }
       const requestInit: RequestInit = {
         method: functionDef.endpointType,
         headers: mergedHeaders,
         cache: "no-store",
         signal: abortSignal,
       };
-
-      // Handle query parameters (mirrors registerDynamicFunction)
-      if (args.query) {
-        const queryParams = new URLSearchParams();
-        for (const [key, value] of Object.entries(args.query)) {
-          if (url.includes(key)) {
-            url = url.replace(key, String(value));
-          } else {
-            queryParams.append(key, String(value));
-          }
-        }
-        url += (url.includes("?") ? "&" : "?") + queryParams.toString();
-      }
 
       // Handle body parameters
       const method = functionDef.endpointType;
@@ -148,12 +219,15 @@ export function extensionTool(
       }
 
       // SSRF guard: refuse private/link-local/loopback addresses and
-      // non-https schemes. Without this check any user-authored extension
-      // could pivot to internal services (Cosmos, Key Vault, Azure IMDS).
+      // non-https schemes, on the first URL and on every redirect hop.
+      // Without this check any user-authored extension could pivot to
+      // internal services (Cosmos, Key Vault, Azure IMDS).
+      let response: Response;
       try {
-        await assertExtensionUrlAllowed(url);
+        response = await fetchExtensionUrl(url, requestInit);
       } catch (err) {
-        logError("extensionTool: URL rejected by SSRF guard", {
+        if (!(err instanceof ExtensionRequestRefusedError)) throw err;
+        logError("extensionTool: URL or redirect rejected", {
           functionName: parsedFunction.name,
           extensionId: extension.id,
           reason: err instanceof Error ? err.message : String(err),
@@ -162,8 +236,6 @@ export function extensionTool(
           `Extension "${parsedFunction.name}" endpoint is not allowed`
         );
       }
-
-      const response = await fetch(url, requestInit);
 
       if (!response.ok) {
         logError("extensionTool: HTTP error", {

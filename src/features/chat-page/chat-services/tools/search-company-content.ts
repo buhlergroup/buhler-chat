@@ -75,12 +75,6 @@ export function searchCompanyContentTool(ctx: ToolContext) {
         );
       }
 
-      logDebug("searchCompanyContentTool: token check", {
-        tokenLength: token.length,
-        tokenPrefix: token.substring(0, 10) + "...",
-        userEmail: user.email,
-      });
-
       const dataSource = args.dataSource ?? "sharePoint";
       const maxResults = Math.min(Math.max(args.maxResults ?? 10, 1), 25);
 

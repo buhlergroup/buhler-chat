@@ -45,6 +45,17 @@ describe("extension-url-guard", () => {
       ["ff02::1", "multicast v6"],
       ["::ffff:169.254.169.254", "v4-mapped IMDS"],
       ["::ffff:127.0.0.1", "v4-mapped loopback"],
+      ["::ffff:7f00:1", "v4-mapped loopback in hex (URL-normalised form)"],
+      ["::ffff:a9fe:a9fe", "v4-mapped IMDS in hex"],
+      ["0:0:0:0:0:ffff:7f00:1", "v4-mapped loopback, full form"],
+      ["::127.0.0.1", "v4-compatible loopback"],
+      ["64:ff9b::7f00:1", "NAT64 well-known prefix"],
+      ["64:ff9b::808:808", "NAT64 (any embedded v4)"],
+      ["64:ff9b:1::1", "local-use NAT64"],
+      ["168.63.129.16", "Azure platform address"],
+      ["fec0::1", "site-local v6"],
+      ["2001:db8::1", "documentation v6"],
+      ["1:2:3", "unparseable v6 (fail closed)"],
     ])("blocks %s (%s)", (addr) => {
       expect(isBlockedAddress(addr)).toBe(true);
     });
@@ -56,6 +67,8 @@ describe("extension-url-guard", () => {
       ["172.15.255.255"], // just outside RFC1918
       ["100.128.0.1"], // just outside CGNAT
       ["2001:4860:4860::8888"], // public IPv6
+      ["2606:4700:4700::1111"], // public IPv6
+      ["168.63.129.17"], // next to the Azure platform address
     ])("allows public %s", (addr) => {
       expect(isBlockedAddress(addr)).toBe(false);
     });
@@ -84,6 +97,16 @@ describe("extension-url-guard", () => {
       await expect(
         assertExtensionUrlAllowed("https://169.254.169.254/metadata"),
       ).rejects.toThrow(/non-public address/);
+    });
+
+    it.each([
+      ["https://[::1]/x"],
+      ["https://[::ffff:127.0.0.1]/x"], // URL turns this into [::ffff:7f00:1]
+      ["https://[64:ff9b::a9fe:a9fe]/x"],
+      ["https://168.63.129.16/machine"],
+    ])("rejects literal address URL %s without a DNS lookup", async (url) => {
+      await expect(assertExtensionUrlAllowed(url)).rejects.toThrow(/non-public address/);
+      expect(mockLookup).not.toHaveBeenCalled();
     });
 
     it("rejects DNS-resolved private IP", async () => {

@@ -2,6 +2,7 @@ import { DeleteFileFromCodeInterpreter, DownloadFileFromCodeInterpreter } from "
 import { getCurrentUser } from "@/features/auth-page/helpers";
 import { logError, logDebug } from "@/features/common/services/logger";
 import { NextRequest } from "next/server";
+import { contentDisposition } from "@/features/common/safe-content-type";
 import {
   findCodeInterpreterFileOfCurrentUser,
   mayDeleteCodeInterpreterFile,
@@ -45,7 +46,10 @@ export async function GET(
     return new Response(new Uint8Array(data), {
       headers: {
         "Content-Type": contentType,
-        "Content-Disposition": `attachment; filename="${name}"`,
+        // RFC 6266: ASCII fallback plus filename*=UTF-8''…, so a name that is
+        // not Latin-1 (or holds a quote) cannot break the header.
+        "Content-Disposition": contentDisposition("attachment", name),
+        "X-Content-Type-Options": "nosniff",
         "Content-Length": data.length.toString()
       }
     });

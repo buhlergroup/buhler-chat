@@ -108,12 +108,12 @@ describe("access-group-service.ts — AccessGroupById", () => {
   // 007 – returns OK group when found
   it("007 AccessGroupById returns OK when found", async () => {
     graphGetFn.mockResolvedValueOnce({
-      value: [{ id: "g", displayName: "X", description: "D" }],
+      value: [{ id: "11111111-2222-3333-4444-555555555555", displayName: "X", description: "D" }],
     });
-    const result = await AccessGroupById("g");
+    const result = await AccessGroupById("11111111-2222-3333-4444-555555555555");
     expect(result.status).toBe("OK");
     if (result.status === "OK") {
-      expect(result.response.id).toBe("g");
+      expect(result.response.id).toBe("11111111-2222-3333-4444-555555555555");
       expect(result.response.name).toBe("X");
     }
   });
@@ -121,8 +121,18 @@ describe("access-group-service.ts — AccessGroupById", () => {
   // 008 – returns ERROR when Graph throws 404
   it("008 AccessGroupById returns ERROR on Graph 404", async () => {
     graphGetFn.mockRejectedValueOnce({ statusCode: 404, message: "Not found" });
-    const result = await AccessGroupById("g-missing");
+    const result = await AccessGroupById("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee");
     // 404 is not 401 so should be mapped to ERROR
     expect(result.status).toBe("ERROR");
+  });
+});
+
+describe("access-group-service.ts — AccessGroupById id check", () => {
+  it("009 refuses a group id that is not a GUID and never calls Graph", async () => {
+    for (const id of ["g", "x' or 1 eq 1 or id eq 'y", "11111111-2222-3333-4444-555555555555 ", "11111111-2222-3333-4444-555555555555'"]) {
+      const result = await AccessGroupById(id);
+      expect(result.status).toBe("ERROR");
+    }
+    expect(graphGetFn).not.toHaveBeenCalled();
   });
 });

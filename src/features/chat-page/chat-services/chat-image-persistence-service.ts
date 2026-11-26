@@ -1,5 +1,8 @@
-"use server";
 import "server-only";
+
+// No "use server" here: every export of a "use server" module is a Server
+// Action that any signed-in browser can call with its own arguments. This
+// module is only for server code.
 
 import { ServerActionResponse } from "@/features/common/server-action-response";
 import { UploadImageToStore, GetImageUrl, GetImageFromStore } from "./chat-image-service";

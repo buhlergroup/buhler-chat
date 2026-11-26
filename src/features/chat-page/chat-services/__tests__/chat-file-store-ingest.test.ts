@@ -26,7 +26,13 @@ vi.mock("../chat-image-persistence-service", () => ({
   persistBase64Image: (...a: unknown[]) => mockPersist(...a),
 }));
 
-import { ingestImageGenerationResults } from "../chat-file-store-ingest";
+import {
+  ingestContainerFileSourceToChatStore,
+  ingestImageGenerationResults,
+} from "../chat-file-store-ingest";
+import { GetImageUrlPath, UploadImageToStore } from "../chat-image-service";
+import { DownloadContainerFile } from "../code-interpreter-service";
+import { sandboxFallbackUrl } from "../chat-api/sandbox-rewrite-core";
 
 const TINY_BASE64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8/5+hHgAHggJ/PchI7wAAAABJRU5ErkJggg==";
 const BIG_BASE64 = "A".repeat(4096);
@@ -139,5 +145,58 @@ describe("ingestImageGenerationResults", () => {
     ]);
     const serialized = JSON.stringify(out[0]);
     expect(serialized.length).toBeLessThan(1024);
+  });
+});
+
+describe("ingestContainerFileSourceToChatStore — blob name from the code interpreter", () => {
+  const download = DownloadContainerFile as unknown as ReturnType<typeof vi.fn>;
+  const upload = UploadImageToStore as unknown as ReturnType<typeof vi.fn>;
+  const urlPath = GetImageUrlPath as unknown as ReturnType<typeof vi.fn>;
+
+  const source = (filename: string) => ({
+    type: "source" as const,
+    sourceType: "document",
+    id: "s1",
+    mediaType: "application/octet-stream",
+    title: filename,
+    filename,
+    providerMetadata: {
+      openai: { type: "container_file_citation", fileId: "cfile_1", containerId: "cntr_1" },
+    },
+  });
+
+  beforeEach(() => {
+    download.mockReset();
+    upload.mockReset();
+    urlPath.mockReset();
+    upload.mockResolvedValue({ status: "OK", response: "u" });
+    urlPath.mockImplementation(async (t: string, n: string) => sandboxFallbackUrl(t, n));
+  });
+
+  it("stores a file whose name has .. and / under a safe single name, keeps the original as download name", async () => {
+    const evil = "../../agent-skills/p1/s.svg";
+    download.mockResolvedValue({
+      status: "OK",
+      response: { data: Buffer.from("<svg/>"), name: evil, contentType: "application/octet-stream" },
+    });
+    const res = await ingestContainerFileSourceToChatStore("t1", source(evil));
+    expect(upload).toHaveBeenCalledTimes(1);
+    const [threadId, blobName, , options] = upload.mock.calls[0];
+    expect(threadId).toBe("t1");
+    expect(blobName).toBe("s.svg");
+    expect(options).toEqual({ contentType: "application/octet-stream", originalFileName: evil });
+    // The map key stays the citation name; the URL matches the fallback URL.
+    expect(res).toEqual({ filename: evil, url: sandboxFallbackUrl("t1", evil) });
+    expect(res?.url).toBe("/api/images?t=t1&img=s.svg");
+  });
+
+  it("keeps a normal name unchanged", async () => {
+    download.mockResolvedValue({
+      status: "OK",
+      response: { data: Buffer.from("a,b"), name: "chart.png", contentType: "image/png" },
+    });
+    const res = await ingestContainerFileSourceToChatStore("t1", source("chart.png"));
+    expect(upload.mock.calls[0][1]).toBe("chart.png");
+    expect(res?.url).toBe("/api/images?t=t1&img=chart.png");
   });
 });

@@ -40,10 +40,12 @@ export async function assertExtensionUrlAllowed(rawUrl: string): Promise<string>
   }
 
   // Resolve hostname (or accept literal IPs) and check every address.
-  const literalIpFamily = isIP(parsed.hostname);
+  // URL keeps the brackets of an IPv6 literal ("[::1]").
+  const host = parsed.hostname.replace(/^[(.*)]$/, "$1");
+  const literalIpFamily = isIP(host);
   const addresses = literalIpFamily
-    ? [{ address: parsed.hostname, family: literalIpFamily }]
-    : await lookup(parsed.hostname, { all: true });
+    ? [{ address: host, family: literalIpFamily }]
+    : await lookup(host, { all: true });
 
   for (const { address } of addresses) {
     if (isBlockedAddress(address)) {
@@ -84,6 +86,8 @@ function isBlockedIPv4(address: string): boolean {
   const [a, b] = parts;
   // 0.0.0.0/8 — current network
   if (a === 0) return true;
+  // 168.63.129.16 — Azure platform (wire server / DNS / health probe)
+  if (address === "168.63.129.16") return true;
   // 10/8 — RFC1918
   if (a === 10) return true;
   // 100.64/10 — CGNAT
@@ -109,20 +113,57 @@ function isBlockedIPv4(address: string): boolean {
   return false;
 }
 
+/** The 8 hextets of an IPv6 address, or null when it does not parse. */
+function ipv6Hextets(address: string): number[] | null {
+  let text = address;
+  // A trailing dotted IPv4 ("::ffff:1.2.3.4") becomes two hextets.
+  const v4 = text.match(/^(.*:)(d{1,3}(?:.d{1,3}){3})$/);
+  if (v4) {
+    const p = v4[2].split(".").map(Number);
+    if (p.some((n) => n > 255)) return null;
+    text = `${v4[1]}${((p[0] << 8) | p[1]).toString(16)}:${((p[2] << 8) | p[3]).toString(16)}`;
+  }
+  const halves = text.split("::");
+  if (halves.length > 2) return null;
+  const parse = (part: string) => (part === "" ? [] : part.split(":"));
+  const head = parse(halves[0]);
+  const tail = halves.length === 2 ? parse(halves[1]) : [];
+  const missing = 8 - head.length - tail.length;
+  if (halves.length === 1 ? missing !== 0 : missing < 1) return null;
+  const groups = [...head, ...Array(halves.length === 2 ? missing : 0).fill("0"), ...tail];
+  const out: number[] = [];
+  for (const group of groups) {
+    if (!/^[0-9a-f]{1,4}$/.test(group)) return null;
+    out.push(parseInt(group, 16));
+  }
+  return out;
+}
+
+const embeddedIPv4 = (h: number[]) =>
+  `${h[6] >> 8}.${h[6] & 0xff}.${h[7] >> 8}.${h[7] & 0xff}`;
+
 function isBlockedIPv6(rawAddress: string): boolean {
   // Strip zone id and lowercase.
   const address = rawAddress.split("%")[0].toLowerCase();
+  const h = ipv6Hextets(address);
+  // Not parseable → fail closed.
+  if (!h) return true;
+  const zeroUpTo = (n: number) => h.slice(0, n).every((x) => x === 0);
   // ::, ::1 — unspecified, loopback
-  if (address === "::" || address === "::1") return true;
-  // fe80::/10 — link-local
-  if (address.startsWith("fe8") || address.startsWith("fe9") ||
-      address.startsWith("fea") || address.startsWith("feb")) return true;
+  if (zeroUpTo(7) && (h[7] === 0 || h[7] === 1)) return true;
+  // fe80::/10 — link-local, fec0::/10 — site-local (deprecated)
+  if ((h[0] & 0xffc0) === 0xfe80 || (h[0] & 0xffc0) === 0xfec0) return true;
   // fc00::/7 — unique local
-  if (address.startsWith("fc") || address.startsWith("fd")) return true;
+  if ((h[0] & 0xfe00) === 0xfc00) return true;
   // ff00::/8 — multicast
-  if (address.startsWith("ff")) return true;
-  // IPv4-mapped (::ffff:a.b.c.d) — check the embedded v4
-  const v4MappedMatch = address.match(/^::ffff:([0-9.]+)$/);
-  if (v4MappedMatch) return isBlockedIPv4(v4MappedMatch[1]);
+  if ((h[0] & 0xff00) === 0xff00) return true;
+  // IPv4-mapped ::ffff:a.b.c.d (also written in hex, e.g. ::ffff:7f00:1)
+  if (zeroUpTo(5) && h[5] === 0xffff) return isBlockedIPv4(embeddedIPv4(h));
+  // IPv4-compatible ::a.b.c.d (deprecated) — check the embedded v4
+  if (zeroUpTo(6)) return isBlockedIPv4(embeddedIPv4(h));
+  // 64:ff9b::/96 — NAT64 well-known prefix, 64:ff9b:1::/48 — local NAT64
+  if (h[0] === 0x64 && h[1] === 0xff9b) return true;
+  // 2001:db8::/32 — documentation
+  if (h[0] === 0x2001 && h[1] === 0x0db8) return true;
   return false;
 }
