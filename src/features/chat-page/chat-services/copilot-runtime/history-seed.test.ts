@@ -44,7 +44,7 @@ const generatedImage = (toolCallId: string, ref: string, extra: Record<string, u
 
 function setup(opts: { vision: boolean; store?: Record<string, Buffer>; quota?: WorkspaceQuota } = { vision: true }) {
   const blobs = new FakeBlobStore();
-  const fs = new BlobSessionFs(blobs, `user-a/${THREAD}`, undefined, undefined, opts.quota ?? new WorkspaceQuota(500 * 1024 * 1024, 2000));
+  const fs = new BlobSessionFs(blobs, `user-a/${THREAD}`, undefined, opts.quota ?? new WorkspaceQuota(500 * 1024 * 1024, 2000));
   const images: Record<string, Buffer> = { "gen1.png": GENERATED, ...opts.store };
   const readThreadImage = vi.fn(async (fileName: string, maxBytes: number) => {
     const data = images[fileName];

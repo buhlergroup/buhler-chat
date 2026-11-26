@@ -4,7 +4,7 @@ vi.mock("@/features/common/services/cosmos", () => ({ HistoryContainer: vi.fn() 
 vi.mock("./document-pipeline", () => ({ extractDocumentText: vi.fn(), indexDocument: vi.fn() }));
 vi.mock("./azure-blob-store", () => ({ getAgentWorkspaceStore: vi.fn(), getExistingAgentWorkspaceStore: vi.fn() }));
 
-import { BlobSessionFs, DataBlobCache } from "./blob-session-fs";
+import { BlobSessionFs } from "./blob-session-fs";
 import { FakeBlobStore } from "./fake-blob-store.test-helper";
 import {
   maxWorkspaceUploadBytes,
@@ -24,7 +24,7 @@ const USER_B = "b".repeat(64);
 
 function setup(store = new FakeBlobStore()) {
   const workspace = (user: string, thread: string) => ({
-    fs: new BlobSessionFs(store, `${user}/${thread}`, undefined, new DataBlobCache(1 << 20)),
+    fs: new BlobSessionFs(store, `${user}/${thread}`),
   });
   return { store, workspace };
 }

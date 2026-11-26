@@ -24,7 +24,7 @@ vi.mock("../azure-ai-search/azure-ai-search", () => ({ IndexDocuments: vi.fn() }
 
 import { createContentStore, type ContentStore } from "@/features/common/services/content-store/content-store";
 import { createMemoryContentBlobBackend } from "@/features/common/services/content-store/memory-backend";
-import { BlobSessionFs, DataBlobCache, WorkspaceQuota } from "./blob-session-fs";
+import { BlobSessionFs, WorkspaceQuota } from "./blob-session-fs";
 import { FakeBlobStore } from "./fake-blob-store.test-helper";
 import { extractDocumentText } from "./document-pipeline";
 import {
@@ -50,7 +50,7 @@ function diResult(paragraphs: string[], pages: number) {
 }
 
 function setup(options: { quota?: WorkspaceQuota; maxBytes?: number } = {}) {
-  const fs = new BlobSessionFs(new FakeBlobStore(), `${USER}/thread1`, undefined, new DataBlobCache(1 << 20), options.quota);
+  const fs = new BlobSessionFs(new FakeBlobStore(), `${USER}/thread1`, undefined, options.quota);
   const deps: ExtractTextDeps = {
     fs,
     extract: (data, pages) => extractDocumentText(USER, data, pages),

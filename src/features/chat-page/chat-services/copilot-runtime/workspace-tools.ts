@@ -16,9 +16,20 @@
  * groups, `path:count`; "No matches found." / "No files matched the pattern.".
  *
  * Blob cost per call: ONE flat listing with metadata under the longest literal
- * prefix of path + glob (no per-file stat), contents from the per-process
- * cache of immutable data blobs, misses downloaded 16 at a time, large and
- * binary files skipped, early stop at head_limit.
+ * prefix of path + glob (no per-file stat), read page by page and no further
+ * than the limits need. Contents are streamed, DOWNLOAD_PARALLELISM files
+ * open at a time, and searched line by line as the bytes arrive.
+ *
+ * Memory per call is bounded and nothing stays after it: no content cache.
+ * Held at any time: the current line (at most MAX_LINE_BYTES; longer lines are
+ * truncated, their rest skipped), the -B context lines, the first 8 KB of a
+ * file until the binary check, the stream buffers of the open downloads, and
+ * the output (MAX_OUTPUT_LINES / MAX_OUTPUT_CHARS). A download stops as soon
+ * as the file or the call has what it needs (files_with_matches: the first
+ * match; head_limit; output full; binary file), and the whole call stops at
+ * MAX_SCAN_BYTES read or SEARCH_TIME_BUDGET_MS. Only `multiline: true` needs a
+ * whole file: files up to MAX_MULTILINE_FILE_BYTES, larger ones are skipped
+ * with a note.
  *
  * Regex engine: RE2 (the `re2` package), not the JavaScript engine. The
  * pattern comes from the model, and a backtracking engine runs a pattern like
@@ -33,19 +44,23 @@
  *   - repetition counts up to 1000, patterns up to MAX_PATTERN_CHARS.
  * Also bounded: glob size (GLOB_LIMITS) and the wall time of one search
  * (SEARCH_TIME_BUDGET_MS, results so far plus a note), and the search yields
- * to the event loop between file batches.
+ * to the event loop between files and every MB within a file.
  */
+import type { Readable } from "node:stream";
 import RE2 from "re2";
 import type { Tool as CopilotTool, ToolResultObject } from "@microsoft/copilot-sdk";
 import builtin from "./builtin-search-tools.json";
 import { spillLargeResult } from "./tool-adapter";
 import { normalizeSessionPath, WORKSPACE_ROOT } from "./session-path";
 import type { WorkspaceEntry } from "./blob-session-fs";
+import { BINARY_SNIFF_BYTES, LineSplitter, readAtMost, scanLines } from "./stream-lines";
 
 /** What the tools need from the filesystem (BlobSessionFs implements it). */
 export interface WorkspaceFiles {
-  listEntries(dir: string, literalPrefix?: string): Promise<WorkspaceEntry[]>;
-  readEntry(entry: WorkspaceEntry): Promise<Buffer>;
+  /** One flat listing with metadata, page by page in name order. */
+  listEntryPages(dir: string, literalPrefix?: string): AsyncIterable<WorkspaceEntry[]>;
+  /** Streams a listed file; destroying the stream (or aborting `signal`) stops the download. */
+  openEntry(entry: WorkspaceEntry, signal?: AbortSignal): Promise<Readable>;
 }
 
 export type SearchToolFamily = "gpt" | "claude";
@@ -58,11 +73,18 @@ export const SEARCH_TOOLS_BY_FAMILY: Record<SearchToolFamily, readonly SearchToo
 };
 export const ALL_SEARCH_TOOL_NAMES: readonly SearchToolName[] = ["rg", "grep", "glob"];
 
-/** Biggest file the content search reads. */
-export const MAX_SEARCH_FILE_BYTES = 2 * 1024 * 1024;
-const DOWNLOAD_PARALLELISM = 16;
+/** Downloads open at a time per search call (the file in work plus the next ones). */
+export const DOWNLOAD_PARALLELISM = 4;
+/** Bytes one search call reads at most; then the results so far plus a note. */
+export const MAX_SCAN_BYTES = 256 * 1024 * 1024;
+/** Biggest file `multiline: true` reads (it needs the whole file); larger ones are skipped with a note. */
+export const MAX_MULTILINE_FILE_BYTES = 1024 * 1024;
+/** Output lines and characters of one call. */
+export const MAX_OUTPUT_LINES = 2000;
+export const MAX_OUTPUT_CHARS = 1024 * 1024;
+/** Characters of -B context held at most (beyond it the oldest context lines are dropped). */
+const MAX_BEFORE_CONTEXT_CHARS = 1024 * 1024;
 const MAX_GLOB_RESULTS = 1000;
-const MAX_OUTPUT_LINES = 2000;
 
 /** Longest regex pattern a search accepts (model input). */
 export const MAX_PATTERN_CHARS = 1000;
@@ -286,6 +308,11 @@ interface SearchRoot {
   file?: string;
 }
 
+interface RootFile {
+  root: SearchRoot;
+  entry: WorkspaceEntry;
+}
+
 function searchRoots(paths: unknown): SearchRoot[] {
   const list = Array.isArray(paths) ? paths : typeof paths === "string" && paths.length > 0 ? [paths] : [];
   if (list.length === 0) return [{ dir: WORKSPACE_ROOT, display: "." }];
@@ -298,72 +325,129 @@ function searchRoots(paths: unknown): SearchRoot[] {
 const relTo = (dir: string, path: string) => path.slice(dir.length + 1);
 const show = (root: SearchRoot, entry: WorkspaceEntry) =>
   root.file ? entry.path : `${root.display}/${relTo(root.dir, entry.path)}`;
+const relOf = ({ root, entry }: RootFile) => (root.file ? entry.path.split("/").pop()! : relTo(root.dir, entry.path));
+const byPath = (a: RootFile, b: RootFile) => (a.entry.path < b.entry.path ? -1 : a.entry.path > b.entry.path ? 1 : 0);
 
-/** Lists the files under the roots; a root that is a file becomes that one file. */
-async function listRoots(
+/**
+ * The files under one root, listing page by page (name order); a root that
+ * is a file becomes that one file.
+ */
+async function* rootFiles(fs: WorkspaceFiles, root: SearchRoot, literalPrefix: string): AsyncGenerator<RootFile> {
+  let any = false;
+  for await (const page of fs.listEntryPages(root.dir, literalPrefix)) {
+    for (const entry of page) {
+      any = true;
+      yield { root, entry };
+    }
+  }
+  if (any || root.dir === WORKSPACE_ROOT) return;
+  // Maybe a single file: list its parent narrowed to the file name.
+  const slash = root.dir.lastIndexOf("/");
+  const parent = root.dir.slice(0, slash);
+  const name = root.dir.slice(slash + 1);
+  if (!parent || !normalizeSessionPath(parent)) return;
+  for await (const page of fs.listEntryPages(parent, name)) {
+    const hit = page.find((e) => e.path === root.dir);
+    if (hit) {
+      yield { root: { ...root, file: root.dir }, entry: hit };
+      return;
+    }
+  }
+}
+
+/**
+ * Files of all roots that pass `keep`, in path order. One root streams its
+ * listing (Blob lists in name order, so a search can stop listing early);
+ * several roots are merged by path from their (metadata-only) listings.
+ */
+async function* filesInPathOrder(
   fs: WorkspaceFiles,
   roots: SearchRoot[],
   literalPrefix: string,
-): Promise<Array<{ root: SearchRoot; entry: WorkspaceEntry }>> {
-  const out: Array<{ root: SearchRoot; entry: WorkspaceEntry }> = [];
-  for (const root of roots) {
-    const entries = await fs.listEntries(root.dir, literalPrefix);
-    if (entries.length === 0 && root.dir !== WORKSPACE_ROOT) {
-      // Maybe a single file: list its parent narrowed to the file name.
-      const slash = root.dir.lastIndexOf("/");
-      const parent = root.dir.slice(0, slash);
-      const name = root.dir.slice(slash + 1);
-      if (parent && normalizeSessionPath(parent)) {
-        const hit = (await fs.listEntries(parent, name)).find((e) => e.path === root.dir);
-        if (hit) out.push({ root: { ...root, file: root.dir }, entry: hit });
-      }
-      continue;
-    }
-    for (const entry of entries) out.push({ root, entry });
+  keep: (file: RootFile) => boolean,
+): AsyncGenerator<RootFile> {
+  if (roots.length === 1) {
+    for await (const file of rootFiles(fs, roots[0], literalPrefix)) if (keep(file)) yield file;
+    return;
   }
-  return out;
+  const all: RootFile[] = [];
+  for (const root of roots) for await (const file of rootFiles(fs, root, literalPrefix)) if (keep(file)) all.push(file);
+  yield* all.sort(byPath);
 }
-
-const isBinary = (data: Buffer) => data.subarray(0, 8192).includes(0);
 
 const yieldToEventLoop = () => new Promise<void>((resolve) => setImmediate(resolve));
 
+interface OpenedFile {
+  file: RootFile;
+  /** undefined: not opened (skipped by `wanted`) or gone since the listing. */
+  stream: Readable | undefined;
+  skipped: boolean;
+}
+
 /**
- * Reads files in order, PARALLELISM at a time; `visit` returns false to stop
- * early. Yields to the event loop between batches (cached reads resolve as
- * microtasks only) and stops at `deadline` (epoch ms). Returns false when the
- * deadline stopped it.
+ * Opens the files in order, up to DOWNLOAD_PARALLELISM downloads ahead of
+ * the consumer, and yields each with its stream. A stream that is not yet
+ * consumed holds only its own small buffer (the HTTP response is paused).
+ * Leaving the loop early aborts every download opened ahead. A file deleted
+ * since the listing is skipped.
  */
-async function readInOrder<T extends { entry: WorkspaceEntry }>(
+async function* openInOrder(
   fs: WorkspaceFiles,
-  items: T[],
-  visit: (item: T, text: string) => boolean,
-  deadline: number,
-): Promise<boolean> {
-  for (let i = 0; i < items.length; i += DOWNLOAD_PARALLELISM) {
-    await yieldToEventLoop();
-    if (Date.now() >= deadline) return false;
-    const batch = items.slice(i, i + DOWNLOAD_PARALLELISM);
-    const contents = await Promise.all(
-      batch.map(async (item) => {
-        if (item.entry.size !== undefined && item.entry.size > MAX_SEARCH_FILE_BYTES) return undefined;
-        const data = await fs.readEntry(item.entry);
-        if (data.length > MAX_SEARCH_FILE_BYTES || isBinary(data)) return undefined;
-        return data.toString("utf8");
-      }),
+  files: AsyncIterable<RootFile>,
+  wanted: (file: RootFile) => boolean,
+): AsyncGenerator<OpenedFile> {
+  type Pending = { file: RootFile; controller?: AbortController; ready: Promise<Readable | undefined> };
+  const queue: Pending[] = [];
+  const iterator = files[Symbol.asyncIterator]();
+  let listed = false;
+  const open = (file: RootFile): Pending => {
+    if (!wanted(file)) return { file, ready: Promise.resolve(undefined) };
+    const controller = new AbortController();
+    const ready = fs.openEntry(file.entry, controller.signal).then(
+      (stream) => {
+        // An error before the consumer reads must not crash the process; the
+        // consumer still sees it (the stream is then errored).
+        stream.on("error", () => undefined);
+        if (controller.signal.aborted) {
+          stream.destroy();
+          return undefined;
+        }
+        return stream;
+      },
+      (err: unknown) => {
+        if (controller.signal.aborted || (err as { code?: string })?.code === "ENOENT") return undefined;
+        throw err;
+      },
     );
-    for (let j = 0; j < batch.length; j++) {
-      const text = contents[j];
-      if (text === undefined) continue;
-      if (!visit(batch[j], text)) return true;
-      if (Date.now() >= deadline) return false;
+    ready.catch(() => undefined);
+    return { file, controller, ready };
+  };
+  const fill = async () => {
+    while (!listed && queue.length < DOWNLOAD_PARALLELISM) {
+      const next = await iterator.next();
+      if (next.done) listed = true;
+      else queue.push(open(next.value));
     }
+  };
+  try {
+    await fill();
+    while (queue.length > 0) {
+      const head = queue.shift()!;
+      await fill();
+      yield { file: head.file, stream: await head.ready, skipped: head.controller === undefined };
+    }
+  } finally {
+    for (const p of queue) {
+      p.controller?.abort();
+      void p.ready.then((s) => s?.destroy(), () => undefined);
+    }
+    await iterator.return?.(undefined);
   }
-  return true;
 }
 
 const timeBudgetNote = (ms: number) =>
   `[The search stopped after ${Math.round(ms / 1000)} s; the results above are incomplete. Narrow paths or glob.]`;
+const mb = (bytes: number) => `${Math.round(bytes / (1024 * 1024))} MB`;
 
 // ── rg / grep ──────────────────────────────────────────────────────────────
 
@@ -383,22 +467,11 @@ export interface RgArgs {
 }
 
 /**
- * Line numbers (0-based) that a match touches, per file. `re` is the global
- * regex (multiline mode), `single` the same pattern without "g" (per line).
+ * Line numbers (0-based) that a match of the global multiline regex touches
+ * in a whole text, at most `maxCount` matches.
  */
-function matchingLines(
-  text: string,
-  lines: string[],
-  re: RegExp,
-  single: RegExp,
-  multiline: boolean,
-  maxCount: number,
-): number[] {
+function multilineMatches(text: string, re: RegExp, maxCount: number): number[] {
   const hits: number[] = [];
-  if (!multiline) {
-    for (let i = 0; i < lines.length && hits.length < maxCount; i++) if (single.test(lines[i])) hits.push(i);
-    return hits;
-  }
   const starts: number[] = [0];
   for (let i = 0; i < text.length; i++) if (text[i] === "\n") starts.push(i + 1);
   const lineOf = (offset: number) => {
@@ -428,7 +501,7 @@ function matchingLines(
 export async function runRipgrep(
   fs: WorkspaceFiles,
   args: RgArgs,
-  options: { timeBudgetMs?: number } = {},
+  options: { timeBudgetMs?: number; maxScanBytes?: number } = {},
 ): Promise<ToolResultObject> {
   if (!args.pattern) return failure("Error: pattern is required");
   const mode = args.output_mode ?? "files_with_matches";
@@ -451,53 +524,174 @@ export async function runRipgrep(
   } catch (err) {
     return failure(`Error: ${(err as Error).message}`);
   }
-  const files = (await listRoots(fs, roots, literalGlobPrefix(args.glob)))
-    .filter(({ root, entry }) => {
-      const rel = root.file ? entry.path.split("/").pop()! : relTo(root.dir, entry.path);
-      return (!globMatch || globMatch(rel)) && (!type || type(rel));
-    })
-    .sort((a, b) => (a.entry.path < b.entry.path ? -1 : a.entry.path > b.entry.path ? 1 : 0));
+  const multiline = args.multiline === true;
+  const files = filesInPathOrder(fs, roots, literalGlobPrefix(args.glob), (file) => {
+    const rel = relOf(file);
+    return (!globMatch || globMatch(rel)) && (!type || type(rel));
+  });
 
   const out: string[] = [];
+  let outChars = 0;
   const after = args["-A"] ?? args["-C"] ?? 0;
   const before = args["-B"] ?? args["-C"] ?? 0;
+  const context = before > 0 || after > 0;
   const numbers = args["-n"] === true;
+  // head_limit in content mode caps matches per file (as ripgrep -m does in the built-in).
+  const maxCount = mode === "content" && limit ? limit : Infinity;
   let filesListed = 0;
   let firstGroup = true;
+  let multilineSkipped = 0;
 
   const started = Date.now();
-  const complete = await readInOrder(fs, files, ({ root, entry }, text) => {
-    const name = show(root, entry);
-    const lines = text.split(/\r?\n/);
-    if (lines.length > 0 && lines[lines.length - 1] === "" && text.endsWith("\n")) lines.pop();
-    // head_limit in content mode caps matches per file (as ripgrep -m does in the built-in).
-    const hits = matchingLines(text, lines, re, single, args.multiline === true, mode === "content" && limit ? limit : Infinity);
-    if (hits.length === 0) return true;
-    if (mode === "files_with_matches") {
-      out.push(name);
-      filesListed++;
-      return !(limit && filesListed >= limit);
-    }
-    if (mode === "count") {
-      out.push(`${name}:${hits.length}`);
-      filesListed++;
-      return !(limit && filesListed >= limit);
-    }
+  const deadline = started + (options.timeBudgetMs ?? SEARCH_TIME_BUDGET_MS);
+  const maxScanBytes = options.maxScanBytes ?? MAX_SCAN_BYTES;
+  let scanned = 0;
+  let stop: undefined | "time" | "bytes" | "output" | "limit";
+  const beforeChunk = (bytes: number): boolean => {
+    if (Date.now() >= deadline) stop ??= "time";
+    else if ((scanned += bytes) > maxScanBytes) stop ??= "bytes";
+    return stop === undefined;
+  };
+  const emit = (line: string) => {
+    out.push(line);
+    outChars += line.length + 1;
+    if (out.length >= MAX_OUTPUT_LINES) stop ??= "limit";
+    else if (outChars >= MAX_OUTPUT_CHARS) stop ??= "output";
+  };
+  const listFile = (line: string) => {
+    emit(line);
+    filesListed++;
+    if (limit && filesListed >= limit) stop ??= "limit";
+  };
+
+  /** Content mode on a whole text (multiline): lines shown around the hits. */
+  const emitWhole = (name: string, lines: string[], hits: number[]) => {
     const hitSet = new Set(hits);
     const shown = new Set<number>();
     for (const h of hits) for (let l = Math.max(0, h - before); l <= Math.min(lines.length - 1, h + after); l++) shown.add(l);
     let prev = -2;
     for (const l of [...shown].sort((a, b) => a - b)) {
-      if ((before > 0 || after > 0) && !firstGroup && l !== prev + 1) out.push("--");
+      if (context && !firstGroup && l !== prev + 1) emit("--");
       firstGroup = false;
       const sep = hitSet.has(l) ? ":" : "-";
-      out.push(numbers ? `${name}${sep}${l + 1}${sep}${lines[l]}` : `${name}${sep}${lines[l]}`);
+      emit(numbers ? `${name}${sep}${l + 1}${sep}${lines[l]}` : `${name}${sep}${lines[l]}`);
       prev = l;
     }
-    return out.length < MAX_OUTPUT_LINES;
-  }, started + (options.timeBudgetMs ?? SEARCH_TIME_BUDGET_MS));
+  };
 
-  const note = complete ? "" : `\n${timeBudgetNote(Date.now() - started)}`;
+  /** multiline: the whole file (at most MAX_MULTILINE_FILE_BYTES) in one pass of the global regex. */
+  const searchWhole = async (name: string, stream: Readable) => {
+    const data = await readAtMost(stream, MAX_MULTILINE_FILE_BYTES, beforeChunk);
+    if (data === "stopped") return;
+    if (data === undefined) {
+      multilineSkipped++;
+      return;
+    }
+    if (data.subarray(0, BINARY_SNIFF_BYTES).includes(0)) return;
+    const text = data.toString("utf8");
+    const lines = text.split(/\r?\n/);
+    if (lines.length > 0 && lines[lines.length - 1] === "" && text.endsWith("\n")) lines.pop();
+    const hits = multilineMatches(text, re, maxCount);
+    if (hits.length === 0) return;
+    if (mode === "files_with_matches") listFile(name);
+    else if (mode === "count") listFile(`${name}:${hits.length}`);
+    else emitWhole(name, lines, hits);
+  };
+
+  /** One line at a time as the bytes arrive; stops the download as soon as the file is done. */
+  const searchLines = async (name: string, stream: Readable) => {
+    let hits = 0;
+    let handler: (text: string, i: number) => boolean;
+    if (mode === "files_with_matches") {
+      handler = (text) => {
+        if (!single.test(text)) return true;
+        hits++;
+        return false;
+      };
+    } else if (mode === "count") {
+      handler = (text) => {
+        if (single.test(text)) hits++;
+        return true;
+      };
+    } else {
+      let afterLeft = 0;
+      let lastPrinted = -2;
+      // -B context: the lines since the last printed one, at most `before`.
+      const ring: Array<{ i: number; text: string }> = [];
+      let ringChars = 0;
+      const print = (i: number, text: string, sep: string) => {
+        if (context && !firstGroup && i !== lastPrinted + 1) emit("--");
+        firstGroup = false;
+        emit(numbers ? `${name}${sep}${i + 1}${sep}${text}` : `${name}${sep}${text}`);
+        lastPrinted = i;
+      };
+      handler = (text, i) => {
+        if (hits < maxCount && single.test(text)) {
+          for (const r of ring) print(r.i, r.text, "-");
+          ring.length = 0;
+          ringChars = 0;
+          print(i, text, ":");
+          hits++;
+          afterLeft = after;
+        } else if (afterLeft > 0) {
+          print(i, text, "-");
+          afterLeft--;
+        } else if (before > 0) {
+          ring.push({ i, text });
+          ringChars += text.length;
+          while (ring.length > before || (ringChars > MAX_BEFORE_CONTEXT_CHARS && ring.length > 1)) {
+            ringChars -= ring.shift()!.text.length;
+          }
+        }
+        if (stop !== undefined) return false;
+        return !(hits >= maxCount && afterLeft === 0);
+      };
+    }
+    const end = await scanLines(stream, new LineSplitter(handler), beforeChunk);
+    if (hits === 0 || end === "binary") return;
+    if (mode === "files_with_matches") listFile(name);
+    // A count is only shown for a file read to its end.
+    else if (mode === "count" && end === "eof") listFile(`${name}:${hits}`);
+  };
+
+  const wanted = (file: RootFile) =>
+    !(multiline && file.entry.size !== undefined && file.entry.size > MAX_MULTILINE_FILE_BYTES);
+  for await (const { file, stream, skipped } of openInOrder(fs, files, wanted)) {
+    if (skipped) {
+      multilineSkipped++;
+      continue;
+    }
+    if (Date.now() >= deadline) stop ??= "time";
+    if (stop !== undefined) {
+      stream?.destroy();
+      break;
+    }
+    if (!stream) continue;
+    await yieldToEventLoop();
+    const name = show(file.root, file.entry);
+    try {
+      if (multiline) await searchWhole(name, stream);
+      else await searchLines(name, stream);
+    } finally {
+      stream.destroy();
+    }
+    if (stop !== undefined) break;
+  }
+
+  const notes: string[] = [];
+  if (stop === "time") notes.push(timeBudgetNote(Date.now() - started));
+  if (stop === "bytes") {
+    notes.push(`[The search stopped after reading ${mb(maxScanBytes)}; the results above are incomplete. Narrow paths or glob.]`);
+  }
+  if (stop === "output") {
+    notes.push(`[The output stopped at ${mb(MAX_OUTPUT_CHARS)}; the results above are incomplete. Narrow the pattern, paths or glob.]`);
+  }
+  if (multilineSkipped > 0) {
+    notes.push(
+      `[multiline: ${multilineSkipped} file(s) over ${mb(MAX_MULTILINE_FILE_BYTES)} were not searched. Search them without multiline.]`,
+    );
+  }
+  const note = notes.length > 0 ? `\n${notes.join("\n")}` : "";
   if (out.length === 0) return ok(`No matches found.${note}`);
   return ok(`${out.slice(0, MAX_OUTPUT_LINES).join("\n")}${note}`);
 }
@@ -516,12 +710,22 @@ export async function runGlob(fs: WorkspaceFiles, args: { pattern?: string; path
   } catch (err) {
     return failure(`Error: glob: ${(err as Error).message}`);
   }
-  const found = (await listRoots(fs, roots, literalGlobPrefix(args.pattern)))
-    .filter(({ root, entry }) => match(root.file ? entry.path.split("/").pop()! : relTo(root.dir, entry.path)))
-    // Newest first, like the built-in.
-    .sort((a, b) => b.entry.lastModified.getTime() - a.entry.lastModified.getTime());
+  // Newest first, like the built-in: keep only the newest MAX_GLOB_RESULTS
+  // while listing (ties in listing order), so memory stays bounded.
+  const newestFirst = (a: RootFile & { seq: number }, b: RootFile & { seq: number }) =>
+    b.entry.lastModified.getTime() - a.entry.lastModified.getTime() || a.seq - b.seq;
+  let found: Array<RootFile & { seq: number }> = [];
+  let seq = 0;
+  const literalPrefix = literalGlobPrefix(args.pattern);
+  for (const root of roots) {
+    for await (const file of rootFiles(fs, root, literalPrefix)) {
+      if (!match(relOf(file))) continue;
+      found.push({ ...file, seq: seq++ });
+      if (found.length >= 2 * MAX_GLOB_RESULTS) found = found.sort(newestFirst).slice(0, MAX_GLOB_RESULTS);
+    }
+  }
   if (found.length === 0) return ok("No files matched the pattern.");
-  return ok(found.slice(0, MAX_GLOB_RESULTS).map(({ root, entry }) => show(root, entry)).join("\n"));
+  return ok(found.sort(newestFirst).slice(0, MAX_GLOB_RESULTS).map(({ root, entry }) => show(root, entry)).join("\n"));
 }
 
 /** The search tools for a model family, with the runtime's names and schemas. */
@@ -550,17 +754,28 @@ async function finishResult(
   return { ...result, skipLargeOutputProcessing: true };
 }
 
+/** The listing without the files `denied` names (pages may get smaller, never empty ones yielded). */
+async function* withoutDenied(
+  pages: AsyncIterable<WorkspaceEntry[]>,
+  denied: (normalizedPath: string) => boolean,
+): AsyncGenerator<WorkspaceEntry[]> {
+  for await (const page of pages) {
+    const kept = page.filter((e) => !denied(e.path));
+    if (kept.length > 0) yield kept;
+  }
+}
+
 /** The search tools for a model family, with the runtime's names and schemas. */
 export function workspaceTools(
   fs: WorkspaceFiles,
   family: SearchToolFamily,
   options: WorkspaceToolOptions = {},
 ): CopilotTool[] {
-  const files: WorkspaceFiles = options.readDenied
+  const denied = options.readDenied;
+  const files: WorkspaceFiles = denied
     ? {
-        listEntries: async (dir, prefix) =>
-          (await fs.listEntries(dir, prefix)).filter((e) => !options.readDenied!(e.path)),
-        readEntry: (entry) => fs.readEntry(entry),
+        listEntryPages: (dir, prefix) => withoutDenied(fs.listEntryPages(dir, prefix), denied),
+        openEntry: (entry, signal) => fs.openEntry(entry, signal),
       }
     : fs;
   return SEARCH_TOOLS_BY_FAMILY[family].map((name) => {

@@ -1,11 +1,11 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 
-import { BlobSessionFs, DataBlobCache } from "./blob-session-fs";
+import { BlobSessionFs } from "./blob-session-fs";
 import { FakeBlobStore } from "./fake-blob-store.test-helper";
 import { indexDocumentTool, indexWorkspaceDocument, INDEX_DOCUMENT_DESCRIPTION, type IndexDocumentDeps } from "./index-document";
 
 function setup() {
-  const fs = new BlobSessionFs(new FakeBlobStore(), "userA/thread1", undefined, new DataBlobCache(1 << 20));
+  const fs = new BlobSessionFs(new FakeBlobStore(), "userA/thread1");
   const rows = new Map<string, { id: string; name: string; workspacePath: string; chunkCount: number }>();
   let n = 0;
   const deps: IndexDocumentDeps & { indexCalls: Array<[string, string]> } = {

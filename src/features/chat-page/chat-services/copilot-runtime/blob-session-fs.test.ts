@@ -1,6 +1,7 @@
 import { describe, it, expect, beforeEach } from "vitest";
 
-import { BlobSessionFs } from "./blob-session-fs";
+import { createSessionFsAdapter } from "@microsoft/copilot-sdk";
+import { BlobSessionFs, FileTooLargeError, readFileLimitBytes } from "./blob-session-fs";
 import { FakeBlobStore } from "./fake-blob-store.test-helper";
 import { buildNamespace, normalizeSessionPath, SessionPathError } from "./session-path";
 
@@ -201,5 +202,78 @@ describe("BlobSessionFs", () => {
     await store.upload("userA/thread1/f/workspace/evil.txt", Buffer.alloc(0), { target: "userB/thread2/d/x" });
     await store.upload("userB/thread2/d/x", Buffer.from("B data"), {});
     await expect(fs.readFile("/workspace/evil.txt")).rejects.toMatchObject({ code: "ENOENT" });
+  });
+});
+
+describe("BlobSessionFs bounded reads for the runtime", () => {
+  const NS = "userA/thread1";
+  const limit = 1000;
+  let store: FakeBlobStore;
+  let fs: BlobSessionFs;
+  beforeEach(() => {
+    store = new FakeBlobStore();
+    fs = new BlobSessionFs(store, NS, undefined, undefined, limit);
+  });
+
+  it("readFile of a workspace file over the cap fails before any download and points to view_range / rg", async () => {
+    await fs.writeFile("/workspace/big.log", "x".repeat(limit + 1));
+    await fs.writeFile("/workspace/ok.log", "y".repeat(limit));
+    store.requests = [];
+    const err = await fs.readFile("/workspace/big.log").catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(FileTooLargeError);
+    expect((err as Error).message).toBe(
+      "File too large to read whole: /workspace/big.log is 0.0 MB, the limit is 0.0 MB. " +
+        "Use view with view_range to read a range of lines, or rg / grep to search it.",
+    );
+    expect(store.requests.filter((r) => r.startsWith("download"))).toEqual([]);
+    expect(await fs.readFile("/workspace/ok.log")).toHaveLength(limit);
+    // The runtime's own session state is never capped (it must resume).
+    await fs.writeFile("/session-state/events.jsonl", "e".repeat(limit * 3));
+    expect(await fs.readFile("/session-state/events.jsonl")).toHaveLength(limit * 3);
+    // Binary reads (images for view, run_code inputs) keep the SDK's own limit.
+    expect((await fs.readFileBytes("/workspace/big.log")).length).toBe(limit + 1);
+  });
+
+  it("the cap error reaches the runtime as the error message of the RPC", async () => {
+    await fs.writeFile("/workspace/big.log", "x".repeat(2 * 1024 * 1024));
+    const res = await createSessionFsAdapter(fs).readFile({ sessionId: "s", path: "/workspace/big.log" });
+    expect(res.error?.message).toMatch(/^File too large to read whole: \/workspace\/big\.log is 2\.0 MB.*view_range.*rg/);
+  });
+
+  it("the limit comes from COPILOT_READFILE_MAX_MB, 10 MB by default", () => {
+    expect(readFileLimitBytes({})).toBe(10 * 1024 * 1024);
+    expect(readFileLimitBytes({ COPILOT_READFILE_MAX_MB: "25" })).toBe(25 * 1024 * 1024);
+    expect(readFileLimitBytes({ COPILOT_READFILE_MAX_MB: "nonsense" })).toBe(10 * 1024 * 1024);
+  });
+
+  it("readFileRange reads only the requested bytes with one ranged GET and reports the total size", async () => {
+    const text = "0123456789".repeat(10_000); // 100,000 bytes
+    await fs.writeFile("/workspace/r.txt", text);
+    const key = (await store.getProperties(`${NS}/f/workspace/r.txt`))!.metadata.target;
+    store.chunkSize = 4096;
+    store.requests = [];
+    const r = await fs.readFileRange("/workspace/r.txt", 50_000, 20);
+    expect(Buffer.from(r.content).toString()).toBe(text.slice(50_000, 50_020));
+    expect(r.byteLength).toBe(100_000);
+    expect(store.requests.filter((x) => x.startsWith("download"))).toEqual([`download ${key} bytes=50000+20`]);
+    expect(store.chunksServed.get(key)).toBe(1);
+    // Past the end: no bytes; length 0: only the size.
+    expect((await fs.readFileRange("/workspace/r.txt", 200_000, 10)).content.length).toBe(0);
+    const sizeOnly = await fs.readFileRange("/workspace/r.txt", 0, 0);
+    expect([sizeOnly.content.length, sizeOnly.byteLength]).toEqual([0, 100_000]);
+    // Through the end: capped like readFile under /workspace.
+    await expect(fs.readFileRange("/workspace/r.txt", 0)).rejects.toBeInstanceOf(FileTooLargeError);
+    expect(Buffer.from((await fs.readFileRange("/workspace/r.txt", 99_990)).content).toString()).toBe("0123456789");
+    await expect(fs.readFileRange("/workspace/none.txt", 0, 1)).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
+  it("readFileRange satisfies the SDK adapter contract (exact length, base64)", async () => {
+    const body = "grüße\nzeile 2\n";
+    await fs.writeFile("/workspace/u.txt", body);
+    const adapter = createSessionFsAdapter(fs);
+    const res = await adapter.readFileRange!({ sessionId: "s", path: "/workspace/u.txt", offset: 3, length: 4 });
+    expect(res.error).toBeUndefined();
+    expect(Buffer.from(res.content, "base64")).toEqual(Buffer.from(body).subarray(3, 7));
+    expect(res.byteLength).toBe(Buffer.byteLength(body));
   });
 });

@@ -21,6 +21,7 @@ import { buildCopilotInference, copilotModelSelectionId } from "./providers";
 import { appRuntimeDir, resolveCopilotRuntimePath } from "./runtime-path";
 import { buildNamespace, SESSION_STATE_ROOT, WORKSPACE_ROOT } from "./session-path";
 import { SEARCH_TOOLS_BY_FAMILY, workspaceTools, type SearchToolFamily } from "./workspace-tools";
+import { workspaceViewTool } from "./workspace-view";
 import { copilotProviderFor } from "./runtime-flag";
 import { buildCopilotSystemMessage } from "./system-message";
 import {
@@ -157,7 +158,10 @@ export async function getCopilotClient(): Promise<CopilotClient> {
         initialCwd: WORKSPACE_ROOT,
         sessionStatePath: SESSION_STATE_ROOT,
         conventions: "posix",
-        capabilities: { binary: true },
+        // readFileRange: bounded reads are one ranged Blob GET (BlobSessionFs.readFileRange).
+        // Runtime 1.0.116 does not use it for view (measured; our view override
+        // streams instead), it is there for runtime reads that do.
+        capabilities: { binary: true, readFileRange: true },
       },
       observability: { logLevel: "error" },
       // BYOK only: never look for a GitHub sign-in (stored OAuth tokens, gh CLI,
@@ -486,6 +490,7 @@ async function openSession(
   const definitions: CopilotTool[] = [
     ...(await toCopilotTools(registered, () => binding.current)),
     ...workspaceTools(fs, family, { spill: (p, c) => fs.writeFile(p, c), readDenied: input.readDenied }),
+    workspaceViewTool(fs, family, { readDenied: input.readDenied }),
   ];
   const config = {
     model: selectionId,
@@ -695,6 +700,7 @@ async function runTurnInSession(input: CopilotTurnInput): Promise<CopilotTurnHan
       await live.session.setTools([
         ...(await toCopilotTools(registered, () => live.binding.current)),
         ...workspaceTools(live.fs, family, { spill: (p, c) => live.fs.writeFile(p, c), readDenied: input.readDenied }),
+        workspaceViewTool(live.fs, family, { readDenied: input.readDenied }),
       ]);
       live.toolSignature = signature;
     }

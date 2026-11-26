@@ -25,8 +25,12 @@
  * event journal (under /session-state) is one append-block call, not a
  * rewrite of the whole file. Workspace files (/workspace) are never changed
  * in place: every write, including an append, creates a new data blob. So a
- * workspace data blob is immutable and its content can be cached by name
- * (the workspace search tools do), and the pointer's `size` metadata is exact.
+ * workspace data blob is immutable and the pointer's `size` metadata is exact.
+ *
+ * Memory: no file content stays in this process after a call. The search
+ * tools stream each data blob (openEntry), whole-file reads of the runtime
+ * (readFile / readFileBytes) are capped under /workspace (readFileLimitBytes),
+ * and readFileRange serves the runtime's bounded reads with one ranged GET.
  *
  * Quota: writes under /workspace (uploads, tool-result spills, model writes)
  * are checked against a per-thread byte and file-count quota (WorkspaceQuota,
@@ -34,6 +38,7 @@
  * own /session-state is not counted.
  */
 import { randomUUID } from "node:crypto";
+import type { Readable } from "node:stream";
 import type { SessionFsProvider } from "@microsoft/copilot-sdk";
 import {
   DIR_MARKER_NAME,
@@ -82,7 +87,25 @@ export interface BlobStore {
   /** One level under the prefix: virtual sub-directories and blob names. */
   listHierarchy(prefix: string): Promise<{ prefixes: string[]; names: string[] }>;
   /** All blobs under the prefix (flat) with their metadata, in ONE listing. */
-  listDetailed(prefix: string): Promise<Array<{ name: string; metadata: Record<string, string>; lastModified: Date }>>;
+  listDetailed(prefix: string): Promise<DetailedBlob[]>;
+  /** The same flat listing, page by page in name order (the caller may stop early). */
+  listDetailedPages(prefix: string): AsyncIterable<DetailedBlob[]>;
+  /**
+   * Streams a blob, or `count` bytes from `offset`. `size` is the blob's total
+   * length at the read. An offset at or past the end gives an empty stream.
+   * Destroying the stream (or aborting `signal`) aborts the download.
+   */
+  openRead(
+    name: string,
+    options?: { offset?: number; count?: number; signal?: AbortSignal },
+  ): Promise<{ stream: Readable; size: number }>;
+}
+
+/** One blob of a flat listing with metadata. */
+export interface DetailedBlob {
+  name: string;
+  metadata: Record<string, string>;
+  lastModified: Date;
 }
 
 /** One workspace file as the search tools see it (from one listing, no per-file calls). */
@@ -97,50 +120,26 @@ export interface WorkspaceEntry {
 }
 
 /**
- * Per-process LRU of workspace data blob contents, keyed by data blob name.
- * Workspace data blobs never change (see header), so no staleness check.
+ * Biggest file under /workspace the runtime may read whole (readFile /
+ * readFileBytes: that RPC carries the full content, it cannot stream).
+ * 10 MB unless COPILOT_READFILE_MAX_MB says otherwise. The runtime's own
+ * /session-state files are not capped (it must be able to resume).
  */
-export class DataBlobCache {
-  private readonly entries = new Map<string, Buffer>();
-  private bytes = 0;
-  hits = 0;
-  misses = 0;
-  constructor(private readonly maxBytes: number) {}
-  get(key: string): Buffer | undefined {
-    const value = this.entries.get(key);
-    if (!value) {
-      this.misses++;
-      return undefined;
-    }
-    this.hits++;
-    this.entries.delete(key);
-    this.entries.set(key, value);
-    return value;
-  }
-  set(key: string, value: Buffer): void {
-    if (value.length > this.maxBytes) return;
-    const old = this.entries.get(key);
-    if (old) {
-      this.bytes -= old.length;
-      this.entries.delete(key);
-    }
-    this.entries.set(key, value);
-    this.bytes += value.length;
-    for (const [k, v] of this.entries) {
-      if (this.bytes <= this.maxBytes) break;
-      this.entries.delete(k);
-      this.bytes -= v.length;
-    }
-  }
-  get size(): number {
-    return this.bytes;
+export const readFileLimitBytes = (env: Record<string, string | undefined> = process.env): number =>
+  (Number(env.COPILOT_READFILE_MAX_MB) > 0 ? Number(env.COPILOT_READFILE_MAX_MB) : 10) * 1024 * 1024;
+
+/** Thrown by readFile / readFileBytes for a workspace file over readFileLimitBytes. */
+export class FileTooLargeError extends Error {
+  readonly code = "EFBIG";
+  constructor(path: string, bytes: number, limit: number) {
+    const mb = (n: number) => `${(n / (1024 * 1024)).toFixed(1)} MB`;
+    super(
+      `File too large to read whole: ${path} is ${mb(bytes)}, the limit is ${mb(limit)}. ` +
+        "Use view with view_range to read a range of lines, or rg / grep to search it.",
+    );
+    this.name = "FileTooLargeError";
   }
 }
-
-const g = globalThis as typeof globalThis & { __copilotDataCache?: DataBlobCache };
-/** Shared by all sessions of this process; 64 MB unless COPILOT_SEARCH_CACHE_MB says otherwise. */
-export const sharedDataCache = (): DataBlobCache =>
-  (g.__copilotDataCache ??= new DataBlobCache((Number(process.env.COPILOT_SEARCH_CACHE_MB) || 64) * 1024 * 1024));
 
 /** Biggest block one appendBlock call may carry (Azure limit 4 MiB). */
 const MAX_APPEND_BLOCK = 4 * 1024 * 1024;
@@ -246,8 +245,8 @@ export class BlobSessionFs implements SessionFsProvider {
     private readonly store: BlobStore,
     private readonly namespace: string,
     private readonly onOp?: SessionFsOpListener,
-    private readonly cache: DataBlobCache = sharedDataCache(),
     private readonly quota: WorkspaceQuota | undefined = sharedWorkspaceQuota(),
+    private readonly readFileLimit: number = readFileLimitBytes(),
   ) {
     if (!namespace || namespace.includes("..") || namespace.startsWith("/")) {
       throw new SessionPathError("Invalid namespace");
@@ -321,9 +320,22 @@ export class BlobSessionFs implements SessionFsProvider {
     }
   }
 
-  private async readBuffer(normalized: string): Promise<Buffer> {
+  /** File size from the pointer's metadata, else from the data blob (pointers written before `size` existed). */
+  private async sizeOf(ptr: { props: BlobProps; target: string }): Promise<number | undefined> {
+    const recorded = Number(ptr.props.metadata?.size);
+    if (Number.isFinite(recorded) && ptr.props.metadata?.size !== undefined) return recorded;
+    return (await this.store.getProperties(ptr.target))?.contentLength;
+  }
+
+  /** Whole file; with `capped`, a /workspace file over readFileLimit fails before any download. */
+  private async readBuffer(normalized: string, capped: boolean): Promise<Buffer> {
     const ptr = await this.pointer(normalized);
     if (!ptr) throw enoent(normalized);
+    if (capped && isWorkspacePath(normalized)) {
+      const size = await this.sizeOf(ptr);
+      if (size === undefined) throw enoent(normalized);
+      if (size > this.readFileLimit) throw new FileTooLargeError(normalized, size, this.readFileLimit);
+    }
     return this.store.download(ptr.target);
   }
 
@@ -343,51 +355,124 @@ export class BlobSessionFs implements SessionFsProvider {
    * blob of this namespace.
    */
   async listEntries(dir: string, literalPrefix = ""): Promise<WorkspaceEntry[]> {
+    const entries: WorkspaceEntry[] = [];
+    for await (const page of this.listEntryPages(dir, literalPrefix)) entries.push(...page);
+    return entries;
+  }
+
+  /**
+   * Same as listEntries, one Blob listing page at a time (name order), so a
+   * search can stop listing at its limit. Only metadata, never content.
+   */
+  async *listEntryPages(dir: string, literalPrefix = ""): AsyncGenerator<WorkspaceEntry[]> {
     const n = this.norm("listEntries", dir, { literalPrefix });
     if (literalPrefix.includes("..") || literalPrefix.startsWith("/")) {
       throw new SessionPathError(`Invalid pattern prefix: ${literalPrefix}`);
     }
     const base = this.dirPrefix(n);
-    const listing = await this.store.listDetailed(base + literalPrefix);
-    const entries: WorkspaceEntry[] = [];
-    for (const blob of listing) {
-      if (!blob.name.startsWith(base)) continue;
-      const rel = blob.name.slice(base.length);
-      if (rel === DIR_MARKER_NAME || rel.endsWith(`/${DIR_MARKER_NAME}`) || rel.split("/").includes("..")) continue;
-      const target = blob.metadata?.target;
-      if (typeof target !== "string" || !target.startsWith(`${this.namespace}/d/`)) continue;
-      const size = Number(blob.metadata?.size);
-      entries.push({
-        path: `${n}/${rel}`,
-        dataKey: target,
-        ...(Number.isFinite(size) && blob.metadata?.size !== undefined ? { size } : {}),
-        lastModified: blob.lastModified,
-      });
+    for await (const listing of this.store.listDetailedPages(base + literalPrefix)) {
+      const entries: WorkspaceEntry[] = [];
+      for (const blob of listing) {
+        if (!blob.name.startsWith(base)) continue;
+        const rel = blob.name.slice(base.length);
+        if (rel === DIR_MARKER_NAME || rel.endsWith(`/${DIR_MARKER_NAME}`) || rel.split("/").includes("..")) continue;
+        const target = blob.metadata?.target;
+        if (typeof target !== "string" || !target.startsWith(`${this.namespace}/d/`)) continue;
+        const size = Number(blob.metadata?.size);
+        entries.push({
+          path: `${n}/${rel}`,
+          dataKey: target,
+          ...(Number.isFinite(size) && blob.metadata?.size !== undefined ? { size } : {}),
+          lastModified: blob.lastModified,
+        });
+      }
+      if (entries.length > 0) yield entries;
     }
-    return entries;
   }
 
-  /** Content of a listed workspace file, from the process cache when possible. */
-  async readEntry(entry: WorkspaceEntry): Promise<Buffer> {
+  private checkEntry(entry: WorkspaceEntry): void {
     if (!entry.dataKey.startsWith(`${this.namespace}/d/`)) {
       throw new SessionPathError("Entry outside this namespace");
     }
-    const cached = this.cache.get(entry.dataKey);
-    if (cached) return cached;
-    const data = await this.store.download(entry.dataKey);
-    this.cache.set(entry.dataKey, data);
-    return data;
+  }
+
+  /** Whole content of a listed workspace file (one download, nothing kept). */
+  async readEntry(entry: WorkspaceEntry): Promise<Buffer> {
+    this.checkEntry(entry);
+    return this.store.download(entry.dataKey);
+  }
+
+  /**
+   * For the view tool: a file (size from the pointer, streamed on demand), a
+   * directory (its entry names), or undefined when nothing is there. One
+   * HEAD of the pointer; the content GET only when the caller opens it.
+   */
+  async viewTarget(path: string): Promise<
+    | { kind: "file"; size: number; open: (signal?: AbortSignal) => Promise<Readable> }
+    | { kind: "directory"; entries: () => Promise<string[]> }
+    | undefined
+  > {
+    const n = this.norm("view", path);
+    const ptr = await this.pointer(n);
+    if (ptr) {
+      const size = await this.sizeOf(ptr);
+      if (size === undefined) return undefined;
+      return { kind: "file", size, open: async (signal) => (await this.store.openRead(ptr.target, { signal })).stream };
+    }
+    if (await this.isDirectory(n)) return { kind: "directory", entries: () => this.readdir(n) };
+    return undefined;
+  }
+
+  /** Streams a listed workspace file; destroy the stream (or abort `signal`) to stop the download. */
+  async openEntry(entry: WorkspaceEntry, signal?: AbortSignal): Promise<Readable> {
+    this.checkEntry(entry);
+    return (await this.store.openRead(entry.dataKey, { signal })).stream;
   }
 
   // ── SessionFsProvider ─────────────────────────────────────────────────
   async readFile(path: string): Promise<string> {
     const n = this.norm("readFile", path);
-    return (await this.readBuffer(n)).toString("utf8");
+    return (await this.readBuffer(n, true)).toString("utf8");
   }
 
   async readFileBytes(path: string): Promise<Uint8Array> {
     const n = this.norm("readFileBytes", path);
-    return new Uint8Array(await this.readBuffer(n));
+    // Images for view and inputs of run_code: the SDK caps binary reads (~48 MiB).
+    return new Uint8Array(await this.readBuffer(n, false));
+  }
+
+  /**
+   * Bounded read for the runtime (capabilities.readFileRange): one ranged GET,
+   * `byteLength` is the file's total size at that read. Without `length` the
+   * read runs to the end and is capped like readFile under /workspace.
+   */
+  async readFileRange(path: string, offset: number, length?: number): Promise<{ content: Uint8Array; byteLength: number }> {
+    const n = this.norm("readFileRange", path, { offset, length });
+    const ptr = await this.pointer(n);
+    if (!ptr) throw enoent(n);
+    if (length === 0) {
+      const props = await this.store.getProperties(ptr.target);
+      if (!props) throw enoent(n);
+      return { content: new Uint8Array(0), byteLength: props.contentLength };
+    }
+    const { stream, size } = await this.store.openRead(ptr.target, { offset, ...(length !== undefined ? { count: length } : {}) });
+    const want = Math.max(0, Math.min(length ?? Infinity, size - offset));
+    if (length === undefined && isWorkspacePath(n) && want > this.readFileLimit) {
+      stream.destroy();
+      throw new FileTooLargeError(n, size, this.readFileLimit);
+    }
+    const chunks: Buffer[] = [];
+    let got = 0;
+    for await (const chunk of stream) {
+      const c = chunk as Buffer;
+      const take = Math.min(c.length, want - got);
+      if (take > 0) chunks.push(take === c.length ? c : c.subarray(0, take));
+      got += take;
+      if (got >= want) break;
+    }
+    if (got < want) throw new Error(`Short read of ${n}: ${got} of ${want} bytes`);
+    const data = chunks.length === 1 ? chunks[0] : Buffer.concat(chunks, got);
+    return { content: new Uint8Array(data.buffer, data.byteOffset, data.byteLength), byteLength: size };
   }
 
   async writeFile(path: string, content: string): Promise<void> {

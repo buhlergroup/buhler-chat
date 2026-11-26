@@ -3,8 +3,19 @@ import "server-only";
 import { BlobServiceClient, RestError, type ContainerClient } from "@azure/storage-blob";
 import { getAzureDefaultCredential } from "@/features/common/services/azure-default-credential";
 import { logInfo } from "@/features/common/services/logger";
-import type { BlobProps, BlobStore } from "./blob-session-fs";
+import { Readable } from "node:stream";
+import type { BlobProps, BlobStore, DetailedBlob } from "./blob-session-fs";
 import type { LeaseBackend } from "./thread-lease";
+
+/** Blobs per listing page (the service maximum is 5,000). */
+const LIST_PAGE_SIZE = 1000;
+
+/** Total blob size from a ranged response ("bytes 0-99/1234"), else offset + body length. */
+export function totalSize(contentRange: string | undefined, contentLength: number | undefined, offset: number): number {
+  const m = contentRange ? /\/(\d+)\s*$/.exec(contentRange) : null;
+  if (m) return Number(m[1]);
+  return offset + (contentLength ?? 0);
+}
 
 /** Container for the agent workspaces and Copilot session state. */
 export const agentWorkspaceContainerName = (): string =>
@@ -99,12 +110,46 @@ export class AzureBlobStore implements BlobStore {
     return names;
   }
 
-  async listDetailed(prefix: string) {
-    const out: Array<{ name: string; metadata: Record<string, string>; lastModified: Date }> = [];
-    for await (const blob of this.container.listBlobsFlat({ prefix, includeMetadata: true })) {
-      out.push({ name: blob.name, metadata: blob.metadata ?? {}, lastModified: blob.properties.lastModified });
-    }
+  async listDetailed(prefix: string): Promise<DetailedBlob[]> {
+    const out: DetailedBlob[] = [];
+    for await (const page of this.listDetailedPages(prefix)) out.push(...page);
     return out;
+  }
+
+  async *listDetailedPages(prefix: string): AsyncGenerator<DetailedBlob[]> {
+    const pages = this.container.listBlobsFlat({ prefix, includeMetadata: true }).byPage({ maxPageSize: LIST_PAGE_SIZE });
+    for await (const page of pages) {
+      yield page.segment.blobItems.map((blob) => ({
+        name: blob.name,
+        metadata: blob.metadata ?? {},
+        lastModified: blob.properties.lastModified,
+      }));
+    }
+  }
+
+  async openRead(
+    name: string,
+    options: { offset?: number; count?: number; signal?: AbortSignal } = {},
+  ): Promise<{ stream: Readable; size: number }> {
+    const blob = this.container.getBlobClient(name);
+    const offset = options.offset ?? 0;
+    try {
+      const res = await blob.download(offset, options.count, {
+        abortSignal: options.signal,
+        maxRetryRequests: 3,
+      });
+      const body = res.readableStreamBody as Readable | undefined;
+      const size = totalSize(res.contentRange, res.contentLength, offset);
+      return { stream: body ?? Readable.from([]), size };
+    } catch (err) {
+      // A range that starts at or past the end: no bytes, only the size.
+      if (err instanceof RestError && (err.statusCode === 416 || err.code === "InvalidRange")) {
+        const props = await this.getProperties(name);
+        if (!props) throw Object.assign(new Error(`ENOENT: ${name}`), { code: "ENOENT" });
+        return { stream: Readable.from([]), size: props.contentLength };
+      }
+      return mapError(err, name);
+    }
   }
 
   async listHierarchy(prefix: string): Promise<{ prefixes: string[]; names: string[] }> {

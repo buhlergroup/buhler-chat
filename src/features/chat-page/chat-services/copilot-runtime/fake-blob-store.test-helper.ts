@@ -2,13 +2,22 @@
  * In-memory BlobStore for tests: ETags, conditions, hierarchy and flat
  * listings, and a log of every call (to count Blob requests).
  */
-import type { BlobProps, BlobStore } from "./blob-session-fs";
+import { Readable } from "node:stream";
+import type { BlobProps, BlobStore, DetailedBlob } from "./blob-session-fs";
 
 export class FakeBlobStore implements BlobStore {
   blobs = new Map<string, { data: Buffer; metadata: Record<string, string>; etag: string; append: boolean; at: Date }>();
   calls: string[] = [];
   /** Every request, as "<op> <name or prefix>". */
   requests: string[] = [];
+  /** Blobs per listDetailedPages page. */
+  pageSize = 5000;
+  /** Bytes per chunk of an openRead stream. */
+  chunkSize = 64 * 1024;
+  /** Chunks each openRead stream handed out, per blob name (summed over reads). */
+  chunksServed = new Map<string, number>();
+  /** openRead streams that were destroyed before their end (download aborted). */
+  aborted: string[] = [];
   private n = 0;
   /** Set to make the next delete with ifMatch fail like a concurrent writer. */
   failNextConditionalDelete = false;
@@ -26,6 +35,50 @@ export class FakeBlobStore implements BlobStore {
     const b = this.blobs.get(name);
     if (!b) throw Object.assign(new Error("nf"), { code: "ENOENT" });
     return Buffer.from(b.data);
+  }
+  /** A pull stream of chunkSize chunks; it reads at most one chunk ahead of the consumer. */
+  async openRead(name: string, options: { offset?: number; count?: number; signal?: AbortSignal } = {}) {
+    const ranged = options.offset !== undefined || options.count !== undefined;
+    this.requests.push(`download ${name}${ranged ? ` bytes=${options.offset ?? 0}+${options.count ?? "end"}` : ""}`);
+    const b = this.blobs.get(name);
+    if (!b) throw Object.assign(new Error("nf"), { code: "ENOENT" });
+    const data = b.data;
+    const start = Math.min(options.offset ?? 0, data.length);
+    const end = options.count === undefined ? data.length : Math.min(data.length, start + options.count);
+    let pos = start;
+    const chunkSize = this.chunkSize;
+    const served = this.chunksServed;
+    const aborted = this.aborted;
+    const stream = new Readable({
+      highWaterMark: 1,
+      read() {
+        if (pos >= end) {
+          this.push(null);
+          return;
+        }
+        const next = Math.min(end, pos + chunkSize);
+        served.set(name, (served.get(name) ?? 0) + 1);
+        const chunk = Buffer.from(data.subarray(pos, next));
+        pos = next;
+        this.push(chunk);
+      },
+      destroy(err, callback) {
+        if (pos < end) aborted.push(name);
+        callback(err);
+      },
+    });
+    options.signal?.addEventListener("abort", () => stream.destroy(), { once: true });
+    return { stream, size: data.length };
+  }
+  async *listDetailedPages(prefix: string): AsyncGenerator<DetailedBlob[]> {
+    const all = [...this.blobs.entries()]
+      .filter(([k]) => k.startsWith(prefix))
+      .sort(([a], [b]) => (a < b ? -1 : 1))
+      .map(([name, b]) => ({ name, metadata: { ...b.metadata }, lastModified: b.at }));
+    for (let i = 0; i === 0 || i < all.length; i += this.pageSize) {
+      this.requests.push(`listDetailed ${prefix}`);
+      yield all.slice(i, i + this.pageSize);
+    }
   }
   async createAppendBlob(name: string) {
     this.requests.push(`createAppendBlob ${name}`);

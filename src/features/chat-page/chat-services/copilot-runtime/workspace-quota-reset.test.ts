@@ -7,7 +7,7 @@ vi.mock("./azure-blob-store", () => ({ getAgentWorkspaceStore: vi.fn(), getExist
 const invalidate = vi.fn(async (_u: string, _t: string) => undefined);
 vi.mock("./copilot-session", () => ({ invalidateThreadSessions: (u: string, t: string) => invalidate(u, t) }));
 
-import { BlobSessionFs, DataBlobCache, WorkspaceQuota, WorkspaceQuotaError } from "./blob-session-fs";
+import { BlobSessionFs, WorkspaceQuota, WorkspaceQuotaError } from "./blob-session-fs";
 import { FakeBlobStore } from "./fake-blob-store.test-helper";
 import { removeThreadWorkspaceFiles, removeThreadWorkspaceFilesQuietly } from "./workspace-files";
 import { acquireThreadLease, type LeaseBackend } from "./thread-lease";
@@ -15,7 +15,7 @@ import { acquireThreadLease, type LeaseBackend } from "./thread-lease";
 const USER = "c".repeat(64);
 const ns = (t: string) => `${USER}/${t}`;
 const fsFor = (store: FakeBlobStore, thread: string, quota?: WorkspaceQuota) =>
-  new BlobSessionFs(store, ns(thread), undefined, new DataBlobCache(1 << 20), quota);
+  new BlobSessionFs(store, ns(thread), undefined, quota);
 
 describe("workspace quota", () => {
   it("refuses a write over the byte quota; the journal is not counted", async () => {

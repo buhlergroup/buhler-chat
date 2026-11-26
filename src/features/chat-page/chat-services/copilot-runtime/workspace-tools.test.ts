@@ -1,13 +1,15 @@
 import { describe, it, expect, beforeEach } from "vitest";
 
 import builtin from "./builtin-search-tools.json";
-import { BlobSessionFs, DataBlobCache } from "./blob-session-fs";
+import { BlobSessionFs } from "./blob-session-fs";
 import { FakeBlobStore } from "./fake-blob-store.test-helper";
 import {
   buildSearchRegex,
+  DOWNLOAD_PARALLELISM,
   GLOB_LIMITS,
   GlobPatternError,
   globToRegExp,
+  MAX_MULTILINE_FILE_BYTES,
   MAX_PATTERN_CHARS,
   literalGlobPrefix,
   runGlob,
@@ -17,17 +19,21 @@ import {
 
 const NS = "userA/thread1";
 
-async function workspace(files: Record<string, string | Buffer>, cacheBytes = 64 * 1024 * 1024) {
+async function workspace(files: Record<string, string | Buffer>) {
   const store = new FakeBlobStore();
-  const cache = new DataBlobCache(cacheBytes);
-  const fs = new BlobSessionFs(store, NS, undefined, cache);
+  const fs = new BlobSessionFs(store, NS);
   for (const [path, content] of Object.entries(files)) {
     if (typeof content === "string") await fs.writeFile(path, content);
     else await fs.writeFileBytes(path, content);
   }
   store.requests = [];
-  return { store, fs, cache };
+  return { store, fs };
 }
+
+const downloads = (store: FakeBlobStore) => store.requests.filter((r) => r.startsWith("download"));
+/** Data blob name of a workspace file (the pointer's target). */
+const dataKeyOf = async (store: FakeBlobStore, path: string) =>
+  (await store.getProperties(`${NS}/f${path}`))!.metadata.target;
 
 const text = (r: { textResultForLlm: string }) => r.textResultForLlm;
 
@@ -151,18 +157,18 @@ describe("Blob efficiency", () => {
     expect(literalGlobPrefix("../x/*")).toBe("");
   });
 
-  it("caches immutable data blobs: a warm search downloads nothing", async () => {
+  it("keeps no content between calls: every search streams the files again", async () => {
     const files: Record<string, string> = {};
     for (let i = 0; i < 40; i++) files[`/workspace/f${i}.txt`] = `line ${i}\nneedle ${i}\n`;
-    const { fs, store, cache } = await workspace(files);
-    await runRipgrep(fs, { pattern: "needle", output_mode: "count" });
-    const cold = store.requests.filter((r) => r.startsWith("download")).length;
+    const { fs, store } = await workspace(files);
+    const first = await runRipgrep(fs, { pattern: "needle", output_mode: "count" });
+    expect(downloads(store)).toHaveLength(40);
     store.requests = [];
-    const warm = await runRipgrep(fs, { pattern: "needle", output_mode: "count" });
-    expect(cold).toBe(40);
-    expect(store.requests).toEqual([`listDetailed ${NS}/f/workspace/`]);
-    expect(text(warm).split("\n")).toHaveLength(40);
-    expect(cache.hits).toBe(40);
+    const second = await runRipgrep(fs, { pattern: "needle", output_mode: "count" });
+    expect(store.requests[0]).toBe(`listDetailed ${NS}/f/workspace/`);
+    expect(downloads(store)).toHaveLength(40);
+    expect(text(second)).toBe(text(first));
+    expect(text(second).split("\n")).toHaveLength(40);
   });
 
   it("a rewritten file is a new data blob, so the cache never serves old content", async () => {
@@ -174,27 +180,122 @@ describe("Blob efficiency", () => {
     expect(text(await runRipgrep(fs, { pattern: "appended", output_mode: "content" }))).toBe("./a.txt:appended");
   });
 
-  it("stops early at head_limit and skips large and binary files", async () => {
+  it("stops early at head_limit, skips binary files and streams large ones", async () => {
     const files: Record<string, string | Buffer> = {};
     for (let i = 0; i < 100; i++) files[`/workspace/f${String(i).padStart(3, "0")}.txt`] = "hit\n";
     files["/workspace/aaa-binary.bin"] = Buffer.from([0x68, 0x69, 0x74, 0x00, 0x01]);
     files["/workspace/aab-large.txt"] = "hit\n" + "x".repeat(2 * 1024 * 1024 + 10);
     const { fs, store } = await workspace(files);
     const res = await runRipgrep(fs, { pattern: "hit", head_limit: 3 });
-    expect(text(res)).toBe("./f000.txt\n./f001.txt\n./f002.txt");
-    const downloads = store.requests.filter((r) => r.startsWith("download")).length;
-    expect(downloads).toBeLessThanOrEqual(16); // one parallel batch, the large file is not downloaded
-    expect(store.requests.some((r) => r.startsWith("download") && r.includes("aab-large"))).toBe(false);
+    // No file-size limit any more: the large file is searched, and only its first chunk is read.
+    expect(text(res)).toBe("./aab-large.txt\n./f000.txt\n./f001.txt");
+    expect(downloads(store).length).toBeLessThanOrEqual(4 + DOWNLOAD_PARALLELISM);
+    expect(store.chunksServed.get(await dataKeyOf(store, "/workspace/aab-large.txt"))).toBeLessThanOrEqual(2);
+    expect(store.aborted).toContain(await dataKeyOf(store, "/workspace/aab-large.txt"));
+  });
+});
+
+describe("streaming search: early stop, bounded reads", () => {
+  /** n lines "line <i>" with "needle" on the lines in `needles`. */
+  const lines = (n: number, needles: number[] = []) =>
+    Array.from({ length: n }, (_, i) => (needles.includes(i) ? `needle ${i}` : `line ${i}`)).join("\n") + "\n";
+
+  it("files_with_matches stops a download at the first match", async () => {
+    const { fs, store } = await workspace({ "/workspace/big.txt": lines(200_000, [5, 150_000]) });
+    store.chunkSize = 4096;
+    const key = await dataKeyOf(store, "/workspace/big.txt");
+    expect(text(await runRipgrep(fs, { pattern: "needle" }))).toBe("./big.txt");
+    const total = Math.ceil(store.blobs.get(key)!.data.length / 4096);
+    expect(total).toBeGreaterThan(500);
+    // The binary check holds 8 KB (2 chunks), plus at most one chunk of read-ahead.
+    expect(store.chunksServed.get(key)).toBeLessThanOrEqual(4);
+    expect(store.aborted).toEqual([key]);
   });
 
-  it("LRU cache evicts by bytes", () => {
-    const cache = new DataBlobCache(10);
-    cache.set("a", Buffer.alloc(6));
-    cache.set("b", Buffer.alloc(6));
-    expect(cache.get("a")).toBeUndefined();
-    expect(cache.get("b")?.length).toBe(6);
-    cache.set("huge", Buffer.alloc(11));
-    expect(cache.get("huge")).toBeUndefined();
+  it("count and content read the whole file; content head_limit stops after the last allowed match", async () => {
+    const { fs, store } = await workspace({ "/workspace/big.txt": lines(50_000, [10, 20, 40_000]) });
+    store.chunkSize = 4096;
+    const key = await dataKeyOf(store, "/workspace/big.txt");
+    const total = Math.ceil(store.blobs.get(key)!.data.length / 4096);
+    expect(text(await runRipgrep(fs, { pattern: "needle", output_mode: "count" }))).toBe("./big.txt:3");
+    expect(store.chunksServed.get(key)).toBe(total);
+    store.chunksServed.clear();
+    expect(text(await runRipgrep(fs, { pattern: "needle", output_mode: "content", head_limit: 2, "-A": 1, "-n": true }))).toBe(
+      "./big.txt:11:needle 10\n./big.txt-12-line 11\n--\n./big.txt:21:needle 20\n./big.txt-22-line 21",
+    );
+    expect(store.chunksServed.get(key)).toBeLessThanOrEqual(4);
+  });
+
+  it("context lines across chunk borders, CRLF files and -B larger than the file start", async () => {
+    const crlf = "a1\r\nb2\r\nneedle\r\nc3\r\nd4\r\ne5\r\nneedle two\r\n";
+    const { fs, store } = await workspace({ "/workspace/w.txt": crlf });
+    store.chunkSize = 3;
+    expect(text(await runRipgrep(fs, { pattern: "needle", output_mode: "content", "-B": 5, "-n": true }))).toBe(
+      ["./w.txt-1-a1", "./w.txt-2-b2", "./w.txt:3:needle", "./w.txt-4-c3", "./w.txt-5-d4", "./w.txt-6-e5", "./w.txt:7:needle two"].join("\n"),
+    );
+    expect(text(await runRipgrep(fs, { pattern: "needle", output_mode: "content", "-C": 1 }))).toBe(
+      ["./w.txt-b2", "./w.txt:needle", "./w.txt-c3", "--", "./w.txt-e5", "./w.txt:needle two"].join("\n"),
+    );
+  });
+
+  it("head_limit in files mode stops opening files; the listing stops at the page that had enough", async () => {
+    const files: Record<string, string> = {};
+    for (let i = 0; i < 50; i++) files[`/workspace/f${String(i).padStart(2, "0")}.txt`] = "hit\n";
+    const { fs, store } = await workspace(files);
+    store.pageSize = 10;
+    expect(text(await runRipgrep(fs, { pattern: "hit", head_limit: 2 }))).toBe("./f00.txt\n./f01.txt");
+    expect(downloads(store).length).toBeLessThanOrEqual(2 + DOWNLOAD_PARALLELISM);
+    expect(store.requests.filter((r) => r.startsWith("listDetailed")).length).toBeLessThanOrEqual(2);
+  });
+
+  it("glob and type filters decide before any download", async () => {
+    const { fs, store } = await workspace({ "/workspace/a.ts": "x\n", "/workspace/b.md": "x\n", "/workspace/c.txt": "x\n" });
+    expect(text(await runRipgrep(fs, { pattern: "x", glob: "*.md" }))).toBe("./b.md");
+    expect(downloads(store)).toEqual([`download ${await dataKeyOf(store, "/workspace/b.md")}`]);
+    store.requests = [];
+    expect(text(await runRipgrep(fs, { pattern: "x", type: "ts" }))).toBe("./a.ts");
+    expect(downloads(store)).toHaveLength(1);
+  });
+
+  it("multiline reads whole files up to the cap and skips larger ones with a note", async () => {
+    const big = "start\n" + "y".repeat(MAX_MULTILINE_FILE_BYTES) + "\nend\n";
+    const { fs, store } = await workspace({ "/workspace/a.txt": "start\nend\n", "/workspace/b.txt": big });
+    const res = text(await runRipgrep(fs, { pattern: "start\\nend", multiline: true }));
+    expect(res).toBe("./a.txt\n[multiline: 1 file(s) over 1 MB were not searched. Search them without multiline.]");
+    expect(downloads(store)).toEqual([`download ${await dataKeyOf(store, "/workspace/a.txt")}`]);
+    // Without multiline the large file is searched line by line.
+    expect(text(await runRipgrep(fs, { pattern: "^end$", output_mode: "count" }))).toBe("./a.txt:1\n./b.txt:1");
+  });
+
+  it("a call stops at its byte budget with a note", async () => {
+    const files: Record<string, string> = {};
+    for (let i = 0; i < 10; i++) files[`/workspace/f${i}.txt`] = "x".repeat(10_000) + "\nhit\n";
+    const { fs } = await workspace(files);
+    const res = text(await runRipgrep(fs, { pattern: "hit" }, { maxScanBytes: 25_000 }));
+    expect(res).toBe("./f0.txt\n./f1.txt\n[The search stopped after reading 0 MB; the results above are incomplete. Narrow paths or glob.]");
+  });
+
+  it("a very long line is truncated for matching and output, the next line is still found", async () => {
+    const long = "head " + "z".repeat(200_000) + " tail";
+    const { fs, store } = await workspace({ "/workspace/l.txt": `${long}\nnext needle\n` });
+    store.chunkSize = 8192;
+    expect(text(await runRipgrep(fs, { pattern: "tail", output_mode: "count" }))).toBe("No matches found.");
+    const out = text(await runRipgrep(fs, { pattern: "head|needle", output_mode: "content", "-n": true })).split("\n");
+    expect(out).toHaveLength(2);
+    expect(out[0].length).toBe("./l.txt:1:".length + 64 * 1024);
+    expect(out[1]).toBe("./l.txt:2:next needle");
+  });
+
+  it("a file deleted after the listing is skipped", async () => {
+    const { fs, store } = await workspace({ "/workspace/a.txt": "hit\n", "/workspace/b.txt": "hit\n" });
+    const realOpen = store.openRead.bind(store);
+    store.openRead = async (name, options) => {
+      if (name === store.blobs.get(`${NS}/f/workspace/a.txt`)!.metadata.target) {
+        throw Object.assign(new Error("gone"), { code: "ENOENT" });
+      }
+      return realOpen(name, options);
+    };
+    expect(text(await runRipgrep(fs, { pattern: "hit" }))).toBe("./b.txt");
   });
 });
 
@@ -210,7 +311,7 @@ describe("namespace jail", () => {
 
   it("another namespace's blobs are never listed or read, even under a crafted glob", async () => {
     const { fs, store } = await workspace({ "/workspace/mine.txt": "secret-a" });
-    const other = new BlobSessionFs(store, "userB/thread2", undefined, new DataBlobCache(1024));
+    const other = new BlobSessionFs(store, "userB/thread2");
     await other.writeFile("/workspace/theirs.txt", "secret-b");
     expect(text(await runRipgrep(fs, { pattern: "secret" }))).toBe("./mine.txt");
     expect(text(await runRipgrep(other, { pattern: "secret" }))).toBe("./theirs.txt");
