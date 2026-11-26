@@ -41,7 +41,7 @@ export async function assertExtensionUrlAllowed(rawUrl: string): Promise<string>
 
   // Resolve hostname (or accept literal IPs) and check every address.
   // URL keeps the brackets of an IPv6 literal ("[::1]").
-  const host = parsed.hostname.replace(/^[(.*)]$/, "$1");
+  const host = parsed.hostname.replace(/^\[(.*)\]$/, "$1");
   const literalIpFamily = isIP(host);
   const addresses = literalIpFamily
     ? [{ address: host, family: literalIpFamily }]
@@ -117,7 +117,7 @@ function isBlockedIPv4(address: string): boolean {
 function ipv6Hextets(address: string): number[] | null {
   let text = address;
   // A trailing dotted IPv4 ("::ffff:1.2.3.4") becomes two hextets.
-  const v4 = text.match(/^(.*:)(d{1,3}(?:.d{1,3}){3})$/);
+  const v4 = text.match(/^(.*:)(\d{1,3}(?:\.\d{1,3}){3})$/);
   if (v4) {
     const p = v4[2].split(".").map(Number);
     if (p.some((n) => n > 255)) return null;

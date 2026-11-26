@@ -59,7 +59,8 @@ describe("common.unit.blob-path", () => {
     expect(toSafeBlobFileName("chart.png")).toBe("chart.png");
     expect(toSafeBlobFileName("../../agent-skills/x.svg")).toBe("x.svg");
     expect(toSafeBlobFileName("..\\..\\x.svg")).toBe("x.svg");
-    expect(toSafeBlobFileName("..")).toBe("file");
+    expect(toSafeBlobFileName("..")).toBe("_");
+    expect(toSafeBlobFileName("")).toBe("file");
     expect(toSafeBlobFileName("a..b.csv")).toBe("a_b.csv");
     expect(toSafeBlobFileName("a\u0000b.txt")).toBe("a_b.txt");
     const long = toSafeBlobFileName(`${"x".repeat(300)}.csv`);

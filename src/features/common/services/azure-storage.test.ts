@@ -172,7 +172,7 @@ describe("common.unit.azure-storage — blob name guard", () => {
     vi.stubEnv("AZURE_STORAGE_ACCOUNT_NAME", "teststorage");
   });
 
-  const UNSAFE = ["t/../agent-skills/p1/s.zip", "../x", "t/./x", "/t/x", "t\..\x", "t//x", "t/x\u0000", ""];
+  const UNSAFE = ["t/../agent-skills/p1/s.zip", "../x", "t/./x", "/t/x", "t\\..\\x","t//x", "t/x\u0000", ""];
 
   it("UploadBlob refuses names with dot segments, backslashes or control characters", async () => {
     const { UploadBlob } = await import("./azure-storage");

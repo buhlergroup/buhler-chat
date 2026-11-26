@@ -69,6 +69,8 @@ describe("extension-url-guard", () => {
       ["2001:4860:4860::8888"], // public IPv6
       ["2606:4700:4700::1111"], // public IPv6
       ["168.63.129.17"], // next to the Azure platform address
+      ["::ffff:8.8.8.8"], // v4-mapped public address, dotted form
+      ["::ffff:808:808"], // v4-mapped public address, hex form
     ])("allows public %s", (addr) => {
       expect(isBlockedAddress(addr)).toBe(false);
     });
