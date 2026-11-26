@@ -9,6 +9,12 @@ import {
   DropdownMenuTrigger,
 } from "@/ui/dropdown-menu";
 import { Activity } from "lucide-react";
+import { USAGE_CHANGED_EVENT } from "./usage-events";
+
+/** Poll interval while the tab is visible. */
+export const USAGE_POLL_MS = 5 * 60_000;
+/** A tab that becomes visible refreshes when its data is older than this. */
+const VISIBLE_REFRESH_MIN_MS = 60_000;
 
 interface UsageData {
   daily: {
@@ -96,10 +102,30 @@ export const UserUsage = () => {
     } catch { /* non-critical */ }
   };
 
+  // Every open tab used to call /api/usage each minute, also when hidden:
+  // that was most of the database reads. Now: on mount, after each chat
+  // turn, when the tab becomes visible again, and every 5 minutes while
+  // the tab is visible.
   useEffect(() => {
-    fetchUsage();
-    const interval = setInterval(fetchUsage, 60_000);
-    return () => clearInterval(interval);
+    let last = 0;
+    const refresh = () => {
+      last = Date.now();
+      void fetchUsage();
+    };
+    const onVisible = () => {
+      if (document.visibilityState === "visible" && Date.now() - last > VISIBLE_REFRESH_MIN_MS) refresh();
+    };
+    refresh();
+    const interval = setInterval(() => {
+      if (document.visibilityState === "visible") refresh();
+    }, USAGE_POLL_MS);
+    document.addEventListener("visibilitychange", onVisible);
+    window.addEventListener(USAGE_CHANGED_EVENT, refresh);
+    return () => {
+      clearInterval(interval);
+      document.removeEventListener("visibilitychange", onVisible);
+      window.removeEventListener(USAGE_CHANGED_EVENT, refresh);
+    };
   }, []);
 
   if (!usage || (usage.daily.totalTokens === 0 && usage.weekly.totalTokens === 0)) {
