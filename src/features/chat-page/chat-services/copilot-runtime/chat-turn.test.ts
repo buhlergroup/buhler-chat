@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import type { UIMessageChunk } from "ai";
+import { tool, type UIMessageChunk } from "ai";
+import { z } from "zod";
 
 vi.mock("@/features/auth-page/helpers", () => ({ userHashedId: vi.fn(async () => "hashed-user") }));
 vi.mock("@/features/common/services/logger", () => ({ logInfo: vi.fn(), logWarn: vi.fn(), logError: vi.fn() }));
@@ -12,12 +13,25 @@ vi.mock("../chat-api/persist-assistant", () => ({
   persistAssistantFromFinishEvent: (args: unknown) => persist(args),
   friendlyErrorMessage: (e: { message: string }) => `friendly: ${e.message}`,
 }));
-vi.mock("./workspace-files", () => ({
-  threadWorkspace: async () => ({ fs: {} }),
-  chatDocumentIndexDeps: () => ({}),
-  workspaceExtractDeps: () => ({}),
-  workspaceUploadsNote: async () => "Files the user uploaded to this chat: /workspace/uploads/a.pdf",
+const uploads = vi.hoisted(() => ({
+  entries: [{ path: "/workspace/uploads/a.pdf", dataKey: "d1", lastModified: new Date(1), size: 3 }] as Array<{
+    path: string;
+    dataKey: string;
+    lastModified: Date;
+    size?: number;
+  }>,
 }));
+vi.mock("./workspace-files", async () => {
+  const { uploadsNote } = await import("./workspace-uploads");
+  return {
+    threadWorkspace: async () => ({ fs: {} }),
+    chatDocumentIndexDeps: () => ({}),
+    workspaceExtractDeps: () => ({}),
+    workspaceUploadEntries: async () => uploads.entries,
+    workspaceUploadsNote: (entries: never[]) => uploadsNote(entries),
+    unindexedWorkspaceUploads: async () => uploads.entries.map((e) => e.path),
+  };
+});
 const resolveSubAgents = vi.fn(async (_args: unknown) => ({ personas: [] }));
 vi.mock("./subagent-resolver", () => ({
   resolveSubAgents: (args: unknown) => resolveSubAgents(args),
@@ -285,5 +299,95 @@ describe("runCopilotChatTurn", () => {
     expect(res.status).toBe(409);
     expect(await res.text()).toMatch(/still running/);
     expect(hasActivePublisher("thread-busy")).toBe(false);
+  });
+});
+
+describe("runCopilotChatTurn: search_documents, uploads and run_code", () => {
+  const search = (documentCount: number) =>
+    tool({
+      description: "Search through documents attached to the current chat.",
+      inputSchema: z.object({ query: z.string() }),
+      execute: async ({ query }: { query: string }) => ({ query, documents: [], documentCount, summary: "Found 0" }),
+    });
+  const extensionTool = tool({ description: "Search the engineering guidelines.", inputSchema: z.object({ q: z.string() }), execute: async () => ({}) });
+
+  async function turnWith(opts: {
+    threadId: string;
+    uploads: typeof uploads.entries;
+    threadDocumentIds?: string[];
+    personaDocumentIds?: string[];
+    builtInToggles?: { imageGeneration: boolean; webSearch: boolean; codeInterpreter: boolean };
+    systemMessage?: string;
+  }) {
+    uploads.entries = opts.uploads;
+    fakeTurnUntilAbort();
+    const base = ctx(opts.threadId) as Record<string, unknown>;
+    await runCopilotChatTurn({
+      ctx: { ...base, threadDocumentIds: opts.threadDocumentIds ?? [], personaDocumentIds: opts.personaDocumentIds ?? [] } as never,
+      payload: { message: "hello" } as never,
+      modelConfig,
+      effectiveModel: "gpt-5.5" as never,
+      systemMessage: opts.systemMessage ?? "sys",
+      toolset: { search_documents: search(0), "ext_guidelines-abc": extensionTool },
+      ...(opts.builtInToggles ? { builtInToggles: opts.builtInToggles } : {}),
+    });
+    abortPublisher(opts.threadId);
+    return runCopilotTurn.mock.calls.at(-1)![0] as {
+      toolset: Record<string, { description?: string; execute?: (a: unknown, o: unknown) => Promise<unknown> }>;
+      contextNote?: string;
+      systemMessage: string;
+    };
+  }
+
+  beforeEach(() => {
+    __resetStreamPublishers();
+    runCopilotTurn.mockReset();
+  });
+
+  it("an agent with extensions, no documents and no uploads: no search_documents, the extension tool stays", async () => {
+    const input = await turnWith({ threadId: "t-ext", uploads: [] });
+    expect(Object.keys(input.toolset)).not.toContain("search_documents");
+    expect(Object.keys(input.toolset)).toContain("ext_guidelines-abc");
+    // index_document says when the search is there.
+    expect(Object.keys(input.toolset)).toContain("index_document");
+  });
+
+  it("agent documents or indexed chat documents: search_documents is offered, for indexed documents only", async () => {
+    for (const docs of [{ personaDocumentIds: ["pd1"] }, { threadDocumentIds: ["cd1"] }]) {
+      const input = await turnWith({ threadId: `t-docs-${Object.keys(docs)[0]}`, uploads: [], ...docs });
+      expect(input.toolset.search_documents.description).toMatch(/indexed documents/);
+    }
+  });
+
+  it("an upload that is not indexed: the turn names it, and a search with no hit returns a hint naming it", async () => {
+    const input = await turnWith({
+      threadId: "t-upload",
+      uploads: [{ path: "/workspace/uploads/report.pdf", dataKey: "d", lastModified: new Date(5), size: 10 }],
+    });
+    expect(input.contextNote).toContain("/workspace/uploads/report.pdf");
+    expect(input.contextNote).toMatch(/stored, not indexed/);
+    const out = (await input.toolset.search_documents.execute!({ query: "pressure" }, { toolCallId: "s", messages: [] })) as {
+      documentCount: number;
+      summary: string;
+      unindexedUploads: string[];
+    };
+    expect(out.documentCount).toBe(0);
+    expect(out.unindexedUploads).toEqual(["/workspace/uploads/report.pdf"]);
+    expect(out.summary).toContain("/workspace/uploads/report.pdf");
+    expect(out.summary).toMatch(/extract_text/);
+  });
+
+  it("the system message is the same on two turns of a thread whose uploads change", async () => {
+    const first = await turnWith({ threadId: "t-stable", uploads: [], builtInToggles: { imageGeneration: false, webSearch: false, codeInterpreter: true } });
+    const second = await turnWith({
+      threadId: "t-stable",
+      uploads: [{ path: "/workspace/uploads/new.xlsx", dataKey: "d", lastModified: new Date(9), size: 10 }],
+      builtInToggles: { imageGeneration: false, webSearch: false, codeInterpreter: true },
+    });
+    expect(second.systemMessage).toBe(first.systemMessage);
+    // run_code's description does not change with the files either.
+    expect(second.toolset.run_code.description).toBe(first.toolset.run_code.description);
+    // The new upload reaches the model in the turn's own message.
+    expect(second.contextNote).toContain("/workspace/uploads/new.xlsx");
   });
 });

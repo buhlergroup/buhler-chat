@@ -54,8 +54,9 @@ export interface ToolContext {
    */
   mcpOutputLimit?: number;
   /**
-   * Copilot path: search_documents is always offered, because the agent can
-   * index workspace files (index_document) during the turn.
+   * Copilot path: search_documents is always built; the Copilot turn
+   * (copilot-runtime/chat-turn.ts) offers it only with indexed or agent
+   * documents or with uploads the agent can index (index_document).
    */
   searchDocumentsAlways?: boolean;
   /**

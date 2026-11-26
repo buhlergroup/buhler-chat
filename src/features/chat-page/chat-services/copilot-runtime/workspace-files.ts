@@ -5,7 +5,8 @@ import { HistoryContainer } from "@/features/common/services/cosmos";
 import { uniqueId } from "@/features/common/util";
 import { logInfo, logWarn } from "@/features/common/services/logger";
 import { CHAT_DOCUMENT_ATTRIBUTE, type ChatDocumentModel } from "../models";
-import { BlobSessionFs, sharedWorkspaceQuota, type BlobStore } from "./blob-session-fs";
+import { BlobSessionFs, sharedWorkspaceQuota, type BlobStore, type WorkspaceEntry } from "./blob-session-fs";
+import { indexedWorkspacePath, unindexedUploadPaths } from "./search-documents-hint";
 import { getAgentWorkspaceStore, getExistingAgentWorkspaceStore } from "./azure-blob-store";
 import { buildNamespace, SESSION_STATE_ROOT } from "./session-path";
 import { ThreadBusyError } from "./thread-lease";
@@ -107,9 +108,41 @@ export async function storeSharePointFileInWorkspace(
   return result;
 }
 
-/** The line that tells the model what is in /workspace/uploads (undefined when empty). */
-export async function workspaceUploadsNote(fs: BlobSessionFs): Promise<string | undefined> {
-  return uploadsNote(await fs.listEntries(UPLOADS_DIR));
+/** The files in /workspace/uploads (one listing; [] when it fails). */
+export async function workspaceUploadEntries(fs: BlobSessionFs): Promise<WorkspaceEntry[]> {
+  return fs.listEntries(UPLOADS_DIR).catch(() => []);
+}
+
+/** The note that tells the model what is in /workspace/uploads (undefined when empty). */
+export function workspaceUploadsNote(entries: WorkspaceEntry[]): string | undefined {
+  return uploadsNote(entries);
+}
+
+/**
+ * The uploads of the thread that are not indexed (search_documents cannot
+ * find them): the workspace paths of the thread's indexed chat documents
+ * are left out.
+ */
+export async function unindexedWorkspaceUploads(args: {
+  entries: WorkspaceEntry[];
+  threadId: string;
+  userKey: string;
+}): Promise<string[]> {
+  if (args.entries.length === 0) return [];
+  const query: SqlQuerySpec = {
+    query:
+      "SELECT r.name, r.workspacePath FROM root r WHERE r.type=@type AND r.chatThreadId=@threadId AND r.userId=@userId AND r.isDeleted=false",
+    parameters: [
+      { name: "@type", value: CHAT_DOCUMENT_ATTRIBUTE },
+      { name: "@threadId", value: args.threadId },
+      { name: "@userId", value: args.userKey },
+    ],
+  };
+  const { resources } = await HistoryContainer()
+    .items.query<{ name?: string; workspacePath?: string }>(query)
+    .fetchAll();
+  const indexed = new Set(resources.flatMap((r) => indexedWorkspacePath(r) ?? []));
+  return unindexedUploadPaths(args.entries, indexed);
 }
 
 export type WorkspaceScope = "uploads" | "session" | "all";

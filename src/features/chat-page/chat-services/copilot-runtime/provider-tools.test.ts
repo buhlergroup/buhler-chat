@@ -10,6 +10,7 @@ import {
   type ContainerFile,
   type ProviderClients,
   type ProviderToolToggles,
+  type ProviderToolDeps,
 } from "./provider-tools";
 import { stripExtensionKeyPrefix } from "../../tool-display-name";
 
@@ -60,11 +61,11 @@ function fakeClients(overrides: Partial<ProviderClients> = {}) {
   return { clients, containerFiles, persisted };
 }
 
-function setup(toggles: ProviderToolToggles = ALL, overrides: Partial<ProviderClients> = {}) {
+function setup(toggles: ProviderToolToggles = ALL, overrides: Partial<ProviderClients> = {}, extra: Partial<ProviderToolDeps> = {}) {
   const store = new FakeBlobStore();
   const fs = new BlobSessionFs(store, "user-1/thread-1");
   const fake = fakeClients(overrides);
-  const tools = providerTools({ fs, threadId: "thread-1", userKey: "user-1", toggles, clients: fake.clients });
+  const tools = providerTools({ fs, threadId: "thread-1", userKey: "user-1", toggles, clients: fake.clients, ...extra });
   const records: ToolCallRecord[] = [];
   const spills: string[] = [];
   const binding: TurnToolBinding = {
@@ -302,6 +303,86 @@ describe("run_code inputs: sizes are checked before any download", () => {
     const res = await t.call("run_code", { code: "1", files: ["/workspace/data.csv", "data.csv", "/workspace/./data.csv"] }, "a");
     expect(res.resultType).toBe("success");
     expect(t.clients.uploadToContainer).toHaveBeenCalledTimes(1);
+  });
+
+  it("puts the chat's uploads in without being named and keeps them within the 100 MB cap, newest first", async () => {
+    const t = setup();
+    // Oldest to newest: a 40 MB, b 40 MB, c 40 MB; c and b fit, a does not.
+    const keys = [
+      await inflate(t, "/workspace/uploads/a.csv", 40 * MB),
+      await inflate(t, "/workspace/uploads/b.csv", 40 * MB),
+      await inflate(t, "/workspace/uploads/c.csv", 40 * MB),
+    ];
+    const entries = await t.fs.listEntries("/workspace/uploads");
+    for (const [i, e] of entries.entries()) e.lastModified = new Date(1_000 + i);
+    const listEntries = t.fs.listEntries.bind(t.fs);
+    t.fs.listEntries = async (dir: string, prefix?: string) =>
+      dir === "/workspace/uploads" ? entries : listEntries(dir, prefix);
+    t.store.requests = [];
+    const res = await t.call("run_code", { code: "1" }, "a");
+    expect(res.resultType).toBe("success");
+    const out = t.records[0].output as { inputs: Array<{ containerPath: string }>; skipped?: string[] };
+    expect(out.inputs.map((i) => i.containerPath)).toEqual(["/mnt/data/c.csv", "/mnt/data/b.csv"]);
+    expect(out.skipped).toEqual(["/workspace/uploads/a.csv"]);
+    // The file that does not fit is never downloaded.
+    expect(downloads(t, [keys[0]])).toEqual([]);
+    expect(res.textResultForLlm).toContain("/workspace/uploads/a.csv");
+  });
+});
+
+describe("run_code: the thread's code interpreter files and uploads", () => {
+  const agentFile = {
+    id: "assistant-file1",
+    name: "Line Overview.xlsx",
+    containerPath: "/mnt/data/assistant-file1-Line Overview.xlsx",
+  };
+
+  it("a run without inputs gets the uploads and reports the agent's Code file at its container path", async () => {
+    const t = setup(ALL, {}, { containerFiles: [agentFile] });
+    await t.fs.writeFileBytes("/workspace/uploads/data.csv", Buffer.from("x,y\n1,2\n"));
+    const res = await t.call("run_code", { task: "Summarise the workbook" });
+    expect(res.resultType).toBe("success");
+    expect(t.clients.uploadToContainer).toHaveBeenCalledWith("cntr_1", "data.csv", Buffer.from("x,y\n1,2\n"));
+    const out = t.records[0].output as { inputs: unknown };
+    expect(out.inputs).toEqual([
+      { workspacePath: "/workspace/uploads/data.csv", containerPath: "/mnt/data/data.csv" },
+      { name: agentFile.name, containerPath: agentFile.containerPath },
+    ]);
+    const prompt = (t.clients.runCode as ReturnType<typeof vi.fn>).mock.calls[0][1].input as string;
+    expect(prompt).toContain(agentFile.containerPath);
+    expect(prompt).toContain("/mnt/data/data.csv");
+    // The model gets the paths, the description stays static.
+    expect(res.textResultForLlm).toContain(agentFile.containerPath);
+    // The description is static: no per-thread path in it.
+    const description = String((t.tools.run_code as { description?: string }).description);
+    expect(description).toContain("attached automatically");
+    expect(description).not.toContain(agentFile.containerPath);
+  });
+
+  it("does not upload an input again that is still in the container with the same size", async () => {
+    const t = setup();
+    await t.fs.writeFileBytes("/workspace/uploads/data.csv", Buffer.from("x,y\n1,2\n"));
+    await t.call("run_code", { code: "1" }, "a");
+    // The fake run copied it to /mnt/data/data.csv (8 bytes).
+    await t.call("run_code", { code: "2" }, "b");
+    expect(t.clients.uploadToContainer).toHaveBeenCalledTimes(1);
+    expect((t.records[1].output as { inputs: unknown }).inputs).toEqual([
+      { workspacePath: "/workspace/uploads/data.csv", containerPath: "/mnt/data/data.csv" },
+    ]);
+  });
+
+  it("an unpacked skill package is not copied back as output", async () => {
+    const t = setup(ALL, {
+      runCode: vi.fn(async () => ({ logs: "", text: "", code: [], images: [] })),
+    });
+    const listed: ContainerFile[] = [];
+    (t.clients.listContainerFiles as ReturnType<typeof vi.fn>).mockImplementation(async () => listed);
+    (t.clients.runCode as ReturnType<typeof vi.fn>).mockImplementation(async () => {
+      listed.push({ id: "s1", path: "/mnt/data/skills/deck/SKILL.md", bytes: 3 });
+      return { logs: "", text: "", code: [], images: [] };
+    });
+    await t.call("run_code", { code: "unpack" });
+    expect((t.records[0].output as { files: string[] }).files).toEqual([]);
   });
 });
 

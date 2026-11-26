@@ -489,7 +489,7 @@ compactions in thread F: ${JSON.stringify(session.liveSessionCompactions(threadF
       extract_text: extractTextTool(files.workspaceExtractDeps({ fs, userKey: user })),
       index_document: indexDocumentTool(files.chatDocumentIndexDeps({ fs, threadId: threadU, userKey: user })),
     };
-    const note = await files.workspaceUploadsNote(fs);
+    const note = files.workspaceUploadsNote(await files.workspaceUploadEntries(fs));
     console.log(`context note: ${note}`);
     await turn("U1 rg in the PDF text + view the image", {
       threadId: threadU,
@@ -599,7 +599,7 @@ compactions in thread F: ${JSON.stringify(session.liveSessionCompactions(threadF
       user: "paula",
       model: gptModel,
       extraTools: extra,
-      contextNote: await pFiles.workspaceUploadsNote(pFs),
+      contextNote: pFiles.workspaceUploadsNote(await pFiles.workspaceUploadEntries(pFs)),
       prompt:
         "Use run_code with /workspace/uploads/sales.csv: make a bar chart of units per month saved as sales_chart.png, and print the total units. Tell me the total and where the chart is.",
     });

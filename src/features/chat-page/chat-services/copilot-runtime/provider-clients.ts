@@ -8,7 +8,7 @@ import "server-only";
 import { AzureOpenAI, toFile } from "openai";
 import { OpenAIV1Instance } from "@/features/common/services/openai";
 import { getAzureCognitiveServicesTokenProvider } from "@/features/common/services/azure-default-credential";
-import { logInfo } from "@/features/common/services/logger";
+import { logInfo, logWarn } from "@/features/common/services/logger";
 import { MODEL_CONFIGS } from "../models";
 import { persistBase64Image } from "../chat-image-persistence-service";
 import { ensureCodeInterpreterContainer } from "../code-interpreter-container";
@@ -47,9 +47,44 @@ const withTimeout = (signal: AbortSignal | undefined, ms: number) =>
 
 // One code interpreter container per thread and process. Azure removes an
 // idle container after 20 minutes; ensureCodeInterpreterContainer checks a
-// known id and replaces it when it has gone.
-const g = globalThis as typeof globalThis & { __copilotRunCodeContainers?: Map<string, string> };
-const containers = (g.__copilotRunCodeContainers ??= new Map<string, string>());
+// known id and replaces it when it has gone. A container holds the thread's
+// code interpreter files it was created with (by file id); when that set
+// changes, a new container is created (as the AI SDK path does).
+type KnownContainer = { id: string; files: string };
+const g = globalThis as typeof globalThis & { __copilotRunCodeContainersByFiles?: Map<string, KnownContainer> };
+const containers = (g.__copilotRunCodeContainersByFiles ??= new Map<string, KnownContainer>());
+
+/** The container's file set as one string (sorted ids). */
+export const containerFilesSignature = (fileIds: ReadonlyArray<string>): string => [...new Set(fileIds)].sort().join(",");
+
+/**
+ * The thread's run_code container: the known one while its file set is the
+ * same (replaced when Azure removed it), else a new one with `fileIds`.
+ */
+export async function ensureRunCodeContainer(
+  key: string,
+  threadId: string,
+  fileIds: ReadonlyArray<string>,
+  ensure: typeof ensureCodeInterpreterContainer = ensureCodeInterpreterContainer,
+): Promise<string> {
+  const files = containerFilesSignature(fileIds);
+  const known = containers.get(key);
+  const existing = known && known.files === files ? known.id : undefined;
+  let id = await ensure({ threadId, existingContainerId: existing, fileIds: [...fileIds] });
+  if (!id && fileIds.length > 0) {
+    // A file the container cannot take (e.g. deleted upstream) must not
+    // block every run: run without the files; the next call tries again.
+    logWarn("copilot-runtime: run_code container with files failed, running without them", { threadId, fileCount: fileIds.length });
+    id = await ensure({ threadId, existingContainerId: undefined, fileIds: [] });
+    if (id) return id;
+  }
+  if (!id) throw new ToolUserError("run_code: the code interpreter is not available here.");
+  if (id !== existing) {
+    containers.set(key, { id, files });
+    logInfo("copilot-runtime: run_code container", { threadId, reused: false, fileCount: fileIds.length });
+  }
+  return id;
+}
 
 type Responses = {
   create(body: Record<string, unknown>, options?: { signal?: AbortSignal }): Promise<{
@@ -76,7 +111,7 @@ function textAndCitations(output: Array<Record<string, unknown>> | undefined): {
   return { text, citations };
 }
 
-export function productionProviderClients(deps: Pick<ProviderToolDeps, "threadId" | "userKey">): ProviderClients {
+export function productionProviderClients(deps: Pick<ProviderToolDeps, "threadId" | "userKey" | "containerFiles">): ProviderClients {
   const containerKey = `${deps.userKey}/${deps.threadId}`;
   const responses = () => (OpenAIV1Instance() as unknown as { responses: Responses }).responses;
   const deployment = (envName: string) => {
@@ -115,14 +150,7 @@ export function productionProviderClients(deps: Pick<ProviderToolDeps, "threadId
     },
 
     async ensureContainer() {
-      const existing = containers.get(containerKey);
-      const id = await ensureCodeInterpreterContainer({ threadId: deps.threadId, existingContainerId: existing, fileIds: [] });
-      if (!id) throw new ToolUserError("run_code: the code interpreter is not available here.");
-      if (id !== existing) {
-        containers.set(containerKey, id);
-        logInfo("copilot-runtime: run_code container", { threadId: deps.threadId, reused: false });
-      }
-      return id;
+      return ensureRunCodeContainer(containerKey, deps.threadId, (deps.containerFiles ?? []).map((f) => f.id));
     },
 
     async uploadToContainer(containerId, name, data) {

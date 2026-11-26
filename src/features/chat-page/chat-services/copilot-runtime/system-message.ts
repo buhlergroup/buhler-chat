@@ -1,5 +1,6 @@
 import type { SystemMessageConfig } from "@microsoft/copilot-sdk";
 import { WORKSPACE_ROOT } from "./session-path";
+import { UPLOADS_DIR, UPLOADS_RULE } from "./workspace-uploads";
 
 /**
  * System message for a Copilot session: the app's own system message
@@ -21,8 +22,11 @@ export const WORKSPACE_NOTE =
   `\n\n## Files\nThis chat has a private file workspace at ${WORKSPACE_ROOT}. ` +
   "Use the file tools (view, create, edit, glob, grep) to keep notes or work files there. " +
   "Only paths inside the workspace exist; the files stay with this chat. " +
-  "Uploads are stored as they are: call extract_text to read a PDF or Office file (with pages for a large one); " +
-  "call index_document only when search over a large document helps.";
+  `The user's uploads are in ${UPLOADS_DIR}/ (the user messages name the newest ones). ` +
+  UPLOADS_RULE +
+  " A rule to search the documents first applies to indexed documents only; an upload is read, not searched. " +
+  "The agent's files (Code files, skill packages) are not in the workspace: run_code, when offered, attaches them " +
+  "and the chat's uploads to its sandbox and lists their /mnt/data paths in its result.";
 
 export function copilotSystemMessageMode(): CopilotSystemMessageMode {
   return process.env.COPILOT_SYSTEM_MESSAGE_MODE === "customize" ? "customize" : "replace";

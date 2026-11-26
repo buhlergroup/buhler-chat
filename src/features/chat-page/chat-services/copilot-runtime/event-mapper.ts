@@ -28,6 +28,7 @@
 import type { UIMessageChunk } from "ai";
 import { COMPACTION_DATA_PART_TYPE, COMPACTION_PART_ID, type CompactionDataPart } from "../chat-api/compaction-part";
 import { sanitizeUiErrorText } from "../tools/tool-user-error";
+import { citesAnySource, sourcesMarkdown, WEB_SEARCH_TOOL, webSearchSources, type WebSource } from "./web-sources";
 
 /** The Copilot path image tool (provider-tools.ts). */
 export const GENERATE_IMAGE_TOOL = "generate_image";
@@ -203,6 +204,10 @@ export class CopilotEventMapper {
   private readonly compactionStarts: number[] = [];
   /** Markdown of the images generate_image made this turn; leads the stored text. */
   private generatedImagesText = "";
+  /** Sources of the turn's web_search calls (web-sources.ts). */
+  private readonly webSources: WebSource[] = [];
+  /** The Sources line added to an answer that linked none of them; ends the stored text. */
+  private webSourcesText = "";
   private lastFinishReason: MappedFinishReason = "stop";
   private error: { message: string; name?: string } | undefined;
   private aborted = false;
@@ -326,7 +331,7 @@ export class CopilotEventMapper {
     return {
       // The image markdown is part of the answer text, live and stored (as the
       // AI SDK path stores it), so the image shows again after a reload.
-      text: this.generatedImagesText + (last?.text ?? ""),
+      text: this.generatedImagesText + (last?.text ?? "") + this.webSourcesText,
       reasoningText: last?.reasoningText ? last.reasoningText : undefined,
       toolResults: last?.toolResults ?? [],
       steps: this.steps,
@@ -567,6 +572,7 @@ export class CopilotEventMapper {
       });
       const imageRef = generatedImageRef(toolName, output);
       if (imageRef) this.emitGeneratedImage(toolCallId, imageRef);
+      if (toolName === WEB_SEARCH_TOOL) this.addWebSources(output);
       return;
     }
     // App tools give their UI-safe text (tool-adapter.ts). For the runtime's
@@ -590,8 +596,44 @@ export class CopilotEventMapper {
     this.generatedImagesText += markdown;
   }
 
+  private addWebSources(output: unknown): void {
+    let value = output;
+    if (typeof value === "string") {
+      try {
+        value = JSON.parse(value);
+      } catch {
+        return;
+      }
+    }
+    const known = new Set(this.webSources.map((s) => s.url));
+    for (const s of webSearchSources(value)) {
+      if (!known.has(s.url)) {
+        known.add(s.url);
+        this.webSources.push(s);
+      }
+    }
+  }
+
+  /**
+   * The web_search sources as a Sources line when the answer links none of
+   * them: the AI SDK path's answers carry their sources as markdown links.
+   */
+  private emitWebSources(): void {
+    if (this.webSources.length === 0 || this.aborted || this.error || this.stepState === "none") return;
+    const answer = this.steps.map((s) => s.text).join("\n");
+    if (citesAnySource(answer, this.webSources)) return;
+    const markdown = sourcesMarkdown(this.webSources);
+    if (!markdown) return;
+    const id = `web-sources-${this.steps.length}`;
+    this.emit({ type: "text-start", id });
+    this.emit({ type: "text-delta", id, delta: markdown });
+    this.emit({ type: "text-end", id });
+    this.webSourcesText = markdown;
+  }
+
   private finish(): void {
     this.closeParts();
+    this.emitWebSources();
     if (this.stepState !== "none") this.emit({ type: "finish-step" });
     this.stepState = "none";
     this.finished = true;

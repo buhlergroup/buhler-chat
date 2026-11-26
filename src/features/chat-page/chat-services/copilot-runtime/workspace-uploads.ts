@@ -110,14 +110,25 @@ export async function storeUpload(
   return { path, kind, bytes: data.length };
 }
 
-/** One line for the model: which files are in the uploads folder. */
-export function uploadsNote(entries: WorkspaceEntry[], max = 50): string | undefined {
-  const paths = entries.map((e) => e.path).sort();
-  if (paths.length === 0) return undefined;
+/** How the model reads uploads: they are stored, not indexed. */
+export const UPLOADS_RULE =
+  "Uploaded files are stored, not indexed. Read them with extract_text (PDF and Office files; use pages for a long file), " +
+  "view or rg (text files). Use index_document only when you need search over a long document; " +
+  "search_documents only finds indexed documents.";
+
+/** Uploads the per-turn note names: the newest ones. */
+export const MAX_NOTED_UPLOADS = 20;
+
+/**
+ * The note for the model: which files are in the uploads folder (newest
+ * first, bounded) and how to read them. Undefined when there are none.
+ */
+export function uploadsNote(entries: WorkspaceEntry[], max = MAX_NOTED_UPLOADS): string | undefined {
+  if (entries.length === 0) return undefined;
+  const paths = [...entries]
+    .sort((a, b) => b.lastModified.getTime() - a.lastModified.getTime() || (a.path < b.path ? -1 : a.path > b.path ? 1 : 0))
+    .map((e) => e.path);
   const shown = paths.slice(0, max);
-  const more = paths.length > shown.length ? ` (+${paths.length - shown.length} more)` : "";
-  return (
-    "Files the user uploaded to this chat (stored as they are: read text files with view or rg; " +
-    `for PDF and Office files call extract_text first): ${shown.join(", ")}${more}`
-  );
+  const more = paths.length > shown.length ? ` (+${paths.length - shown.length} older, list ${UPLOADS_DIR} to see them)` : "";
+  return `Files the user uploaded to this chat: ${shown.join(", ")}${more}\n${UPLOADS_RULE}`;
 }

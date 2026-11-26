@@ -74,6 +74,7 @@ import { loadUsableFileSources } from "@/features/persona-page/persona-services/
 import { type UserPrompt } from "@/features/chat-page/chat-services/models";
 import { copilotProviderFor } from "@/features/chat-page/chat-services/copilot-runtime/runtime-flag";
 import { resolveAgentRuntimeForCurrentUser } from "@/features/chat-page/chat-services/copilot-runtime/runtime-selection";
+import { copilotCodeInterpreterPlan } from "@/features/chat-page/chat-services/copilot-runtime/agent-code-interpreter";
 
 // Allow streaming responses to run for up to 10 minutes (600 seconds)
 export const maxDuration = 600;
@@ -324,22 +325,6 @@ export async function POST(req: Request) {
         })
       : { fileIds: attributedCiFiles.fileIds, skillsInCodeInterpreter: [] };
   const skillFiles = resolveSkillFiles();
-  const skillsInCodeInterpreter = effectiveToolsSafe.codeInterpreter
-    ? skillFiles.skillsInCodeInterpreter
-    : [];
-  if (agentSkills.length > 0) {
-    logInfo("/api/chat agent skills", {
-      threadId: ctx.thread.id,
-      skills: agentSkills.map((s) => s.name),
-      skillsInCodeInterpreter,
-    });
-  }
-  if (unavailableSkills.length > 0) {
-    logInfo("/api/chat agent skills not available to this user", {
-      threadId: ctx.thread.id,
-      skills: unavailableSkills,
-    });
-  }
 
   // SharePoint files for the model (personas only): the folders/files the
   // agent links. Only loaded when the code interpreter runs in this turn,
@@ -365,6 +350,39 @@ export async function POST(req: Request) {
         })()
       : undefined;
 
+  // Copilot path: run_code (provider-tools.ts) is the code interpreter. It is
+  // on for the toggle or for an agent whose files need it, and its container
+  // gets the agent's skill archives and Code files (agent-code-interpreter.ts).
+  const copilotCodeInterpreter = useCopilotRuntime
+    ? copilotCodeInterpreterPlan({
+        toggle: effectiveTools.codeInterpreter,
+        isAgentChat: !!ctx.thread.personaId,
+        skills: agentSkills,
+        attachedFiles: ciAttachedFiles,
+        requestedFileIds: attributedCiFiles.fileIds,
+        agentFileSourceCount: fileSources?.sources.length ?? 0,
+      })
+    : undefined;
+  const codeInterpreterOn = copilotCodeInterpreter?.enabled ?? effectiveToolsSafe.codeInterpreter;
+  const skillsInCodeInterpreter = copilotCodeInterpreter
+    ? copilotCodeInterpreter.skillsInCodeInterpreter
+    : effectiveToolsSafe.codeInterpreter
+      ? skillFiles.skillsInCodeInterpreter
+      : [];
+  if (agentSkills.length > 0) {
+    logInfo("/api/chat agent skills", {
+      threadId: ctx.thread.id,
+      skills: agentSkills.map((s) => s.name),
+      skillsInCodeInterpreter,
+    });
+  }
+  if (unavailableSkills.length > 0) {
+    logInfo("/api/chat agent skills not available to this user", {
+      threadId: ctx.thread.id,
+      skills: unavailableSkills,
+    });
+  }
+
   // ── prompt prefix assembly (cache-stability critical) ──────────────────
   // The generative-UI block is process-constant, so it is handed to
   // buildSystemMessage as `trailingStaticBlock` instead of being concatenated
@@ -383,7 +401,9 @@ export async function POST(req: Request) {
         ) +
         // Exact /mnt/data paths of the attached files (agent Code files and
         // uploads): a file attached by id has a prefixed name there.
-        (effectiveToolsSafe.codeInterpreter
+        // Not on the Copilot path: its system message stays the same on every
+        // turn; run_code's result names the paths (`inputs`).
+        (!useCopilotRuntime && effectiveToolsSafe.codeInterpreter
           ? buildCodeInterpreterFilesPrompt(ciAttachedFiles, skillFiles.fileIds)
           : ""),
       // The Copilot session keeps one system message; it sends the hint per turn.
@@ -432,7 +452,7 @@ export async function POST(req: Request) {
     depth: 0,
     skills: agentSkills,
     skillsInCodeInterpreter,
-    codeInterpreterAvailable: effectiveToolsSafe.codeInterpreter,
+    codeInterpreterAvailable: codeInterpreterOn,
     ...(fileSources && {
       sharePointFiles: {
         sources: fileSources.sources,
@@ -459,7 +479,10 @@ export async function POST(req: Request) {
       systemMessage: system,
       toolset: tools,
       // The provider-hosted built-ins become our own tools on this path.
-      builtInToggles: effectiveTools,
+      builtInToggles: { ...effectiveTools, codeInterpreter: codeInterpreterOn },
+      // The thread's code interpreter files (agent Code files, skill
+      // archives, uploads) for the run_code container.
+      codeInterpreterFiles: copilotCodeInterpreter?.files ?? [],
       clientDateTime: req.headers.get("x-client-datetime") ?? undefined,
     });
   }
