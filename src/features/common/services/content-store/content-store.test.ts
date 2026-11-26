@@ -1,7 +1,13 @@
 // @vitest-environment node
 import { describe, it, expect, vi } from "vitest";
 import { contentBlobPath } from "@/features/common/blob-path";
-import { createContentStore, sha256Hex, type ContentOpenAiFiles } from "./content-store";
+import {
+  createContentStore,
+  MAX_STORED_FILE_NAME_LENGTH,
+  sha256Hex,
+  storedFileName,
+  type ContentOpenAiFiles,
+} from "./content-store";
 import { createMemoryContentBlobBackend } from "./memory-backend";
 
 const userA = "a".repeat(64);
@@ -124,8 +130,8 @@ describe("common.unit.content-store.openAiFile", () => {
     const { sha256, blobKey } = await store.put(userA, bytes("csv"));
     const first = await store.openAiFile(userA, sha256, { name: "a.csv" });
     const second = await store.openAiFile(userA, sha256, { name: "a.csv" });
-    expect(first).toEqual({ fileId: "file-1", uploaded: true });
-    expect(second).toEqual({ fileId: "file-1", uploaded: false });
+    expect(first).toEqual({ fileId: "file-1", uploaded: true, recorded: true });
+    expect(second).toEqual({ fileId: "file-1", uploaded: false, recorded: true });
     expect(openAi.upload).toHaveBeenCalledTimes(1);
     expect((await blobs.head(blobKey))?.metadata.openaifileid).toBe("file-1");
   });
@@ -136,7 +142,7 @@ describe("common.unit.content-store.openAiFile", () => {
     await store.openAiFile(userA, sha256, { name: "a.csv" });
     known.delete("file-1");
     const again = await store.openAiFile(userA, sha256, { name: "a.csv" });
-    expect(again).toEqual({ fileId: "file-2", uploaded: true });
+    expect(again).toEqual({ fileId: "file-2", uploaded: true, recorded: true });
     expect(openAi.upload).toHaveBeenCalledTimes(2);
     expect((await blobs.head(blobKey))?.metadata.openaifileid).toBe("file-2");
   });
@@ -264,5 +270,169 @@ describe("common.unit.content-store.putBlob (streamed uploads)", () => {
     const { sha256 } = await store.putBlob(userA, blob);
     await store.openAiFile(userA, sha256, { name: "a.csv", blob });
     expect((openAi.upload.mock.calls[0] as unknown[])[0]).toBe(blob);
+  });
+});
+
+describe("common.unit.content-store.cleanup — bounded runs", () => {
+  const orphans = async (count: number) => {
+    const ctx = setup();
+    const hashes: string[] = [];
+    for (let i = 0; i < count; i++) {
+      const { sha256 } = await ctx.store.put(userA, bytes(`orphan ${i}`));
+      await ctx.store.markdown(userA, sha256, async () => `text ${i}`);
+      hashes.push(sha256);
+    }
+    ctx.advance(8 * DAY);
+    return { ...ctx, hashes };
+  };
+
+  it("a content and its Markdown on two pages are handled as one (carried over)", async () => {
+    const { store, blobs } = await orphans(3);
+    // Page size 1: every `<hash>` and `<hash>.md` sit on different pages.
+    const result = await store.cleanup({ isReferenced: async () => false, pageSize: 1 });
+    expect(result.complete).toBe(true);
+    expect(result.continuationToken).toBeUndefined();
+    expect(result.scanned).toBe(3);
+    expect(result.deleted).toHaveLength(3);
+    expect(blobs.keys()).toEqual([]);
+  });
+
+  it("maxBlobs bounds the listing; the token lets the next run go on", async () => {
+    const { store, blobs } = await orphans(5); // 10 blobs
+    const listPage = vi.spyOn(blobs, "listPage");
+    const first = await store.cleanup({
+      isReferenced: async () => false,
+      pageSize: 2,
+      maxBlobs: 4,
+    });
+    const pages = (await Promise.all(listPage.mock.results.map((r) => r.value))) as Array<{
+      items: unknown[];
+    }>;
+    expect(pages.reduce((n, page) => n + page.items.length, 0)).toBe(4);
+    expect(first.complete).toBe(false);
+    expect(first.continuationToken).toBeTruthy();
+    expect(first.deleted).toHaveLength(2);
+    expect(blobs.keys()).toHaveLength(6);
+
+    const second = await store.cleanup({
+      isReferenced: async () => false,
+      pageSize: 2,
+      maxBlobs: 100,
+      continuationToken: first.continuationToken,
+    });
+    expect(second.complete).toBe(true);
+    expect(second.deleted).toHaveLength(3);
+    expect(blobs.keys()).toEqual([]);
+  });
+
+  it("shouldStop ends the run inside a page; the next run lists that page again", async () => {
+    const { store, blobs } = await orphans(3);
+    let checks = 0;
+    const result = await store.cleanup({
+      isReferenced: async () => false,
+      pageSize: 100,
+      shouldStop: () => ++checks > 2, // the page check and one content
+    });
+    expect(result.deleted).toHaveLength(1);
+    expect(result.complete).toBe(false);
+    expect(result.continuationToken).toBeUndefined(); // the first page again
+    const rest = await store.cleanup({ isReferenced: async () => false });
+    expect(rest.deleted).toHaveLength(2);
+    expect(blobs.keys()).toEqual([]);
+  });
+
+  it("keeps referenced and recent content in a bounded run too", async () => {
+    const { store, blobs, hashes, advance } = await orphans(2);
+    const fresh = await store.put(userA, bytes("fresh"));
+    advance(1);
+    const result = await store.cleanup({
+      isReferenced: async (_s, hash) => hash === hashes[0],
+      pageSize: 1,
+      maxBlobs: 100,
+    });
+    expect(result.deleted.map((d) => d.sha256)).toEqual([hashes[1]]);
+    expect(result.keptReferenced).toBe(1);
+    expect(result.keptRecent).toBe(1);
+    expect(blobs.keys()).toContain(fresh.blobKey);
+    expect(blobs.keys()).toContain(contentBlobPath(userA, hashes[0]));
+  });
+});
+
+describe("common.unit.content-store.openAiFile — agent files", () => {
+  it("an agent file never gets the OpenAI file of an upload of the same bytes and name", async () => {
+    const { store, blobs, openAi } = setup();
+    const { sha256, blobKey } = await store.put(userA, bytes("csv"));
+    const upload = await store.openAiFile(userA, sha256, { name: "a.csv" });
+    const agent = await store.openAiFile(userA, sha256, { name: "a.csv", use: "agent" });
+    const agentAgain = await store.openAiFile(userA, sha256, { name: "a.csv", use: "agent" });
+    const uploadAgain = await store.openAiFile(userA, sha256, { name: "a.csv" });
+    expect(agent.fileId).not.toBe(upload.fileId);
+    expect(agentAgain).toMatchObject({ fileId: agent.fileId, uploaded: false });
+    expect(uploadAgain).toMatchObject({ fileId: upload.fileId, uploaded: false });
+    expect(openAi.upload).toHaveBeenCalledTimes(2);
+    const meta = (await blobs.head(blobKey))!.metadata;
+    expect(meta.openaifileid).toBe(upload.fileId);
+    expect(meta.agentopenaifileid).toBe(agent.fileId);
+  });
+
+  it("an agent file does not reuse the id an upload cached before (older content)", async () => {
+    const { store, openAi } = setup();
+    const { sha256 } = await store.put(userA, bytes("csv"));
+    const legacy = await store.openAiFile(userA, sha256, { name: "a.csv" });
+    const agent = await store.openAiFile(userA, sha256, { name: "a.csv", use: "agent" });
+    expect(agent.uploaded).toBe(true);
+    expect(agent.fileId).not.toBe(legacy.fileId);
+    expect(openAi.upload).toHaveBeenCalledTimes(2);
+  });
+
+  it("isAgentOpenAiFile is true only for the agent file id", async () => {
+    const { store } = setup();
+    const { sha256 } = await store.put(userA, bytes("csv"));
+    const upload = await store.openAiFile(userA, sha256, { name: "a.csv" });
+    const agent = await store.openAiFile(userA, sha256, { name: "a.csv", use: "agent" });
+    expect(await store.isAgentOpenAiFile(userA, sha256, agent.fileId)).toBe(true);
+    expect(await store.isAgentOpenAiFile(userA, sha256, upload.fileId)).toBe(false);
+    expect(await store.isAgentOpenAiFile(userB, sha256, agent.fileId)).toBe(false);
+    expect(await store.isAgentOpenAiFile(userA, sha256, "")).toBe(false);
+  });
+});
+
+describe("common.unit.content-store.openAiFile — names and metadata failures", () => {
+  it("caps a long file name, keeps the extension, and the metadata stays small", async () => {
+    const { store, blobs, openAi } = setup();
+    const { sha256, blobKey } = await store.put(userA, bytes("csv"));
+    const long = `${"ü".repeat(20_000)}.csv`;
+    const first = await store.openAiFile(userA, sha256, { name: long });
+    const name = (openAi.upload.mock.calls[0] as unknown[])[1] as string;
+    expect(name.length).toBe(MAX_STORED_FILE_NAME_LENGTH);
+    expect(name.endsWith(".csv")).toBe(true);
+    expect(first.recorded).toBe(true);
+    const meta = (await blobs.head(blobKey))!.metadata;
+    const metaChars = Object.entries(meta).reduce((n, [k, v]) => n + k.length + v.length, 0);
+    expect(metaChars).toBeLessThan(4 * 1024);
+    // The same long name finds the cached id.
+    const again = await store.openAiFile(userA, sha256, { name: long });
+    expect(again).toMatchObject({ fileId: first.fileId, uploaded: false });
+  });
+
+  it("storedFileName never cuts a surrogate pair and replaces control characters", () => {
+    const capped = storedFileName("😀".repeat(300));
+    expect(capped.length).toBeLessThanOrEqual(MAX_STORED_FILE_NAME_LENGTH);
+    expect(() => encodeURIComponent(capped)).not.toThrow();
+    expect(storedFileName("a\u0000b/c\\d.csv")).toBe("a_b_c_d.csv");
+    expect(storedFileName("   ")).toBe("file");
+    expect(storedFileName("short.csv")).toBe("short.csv");
+  });
+
+  it("returns the uploaded id when the metadata write fails (no second upload)", async () => {
+    const { store, blobs, openAi } = setup();
+    const { sha256 } = await store.put(userA, bytes("csv"));
+    const setMetadata = vi
+      .spyOn(blobs, "setMetadata")
+      .mockRejectedValueOnce(Object.assign(new Error("MetadataTooLarge"), { statusCode: 400 }));
+    const result = await store.openAiFile(userA, sha256, { name: "a.csv" });
+    expect(result).toEqual({ fileId: "file-1", uploaded: true, recorded: false });
+    expect(openAi.upload).toHaveBeenCalledTimes(1);
+    setMetadata.mockRestore();
   });
 });

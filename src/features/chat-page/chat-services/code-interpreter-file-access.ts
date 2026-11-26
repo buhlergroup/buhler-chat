@@ -21,6 +21,7 @@ import "server-only";
 import { userHashedId } from "@/features/auth-page/helpers";
 import { HistoryContainer } from "@/features/common/services/cosmos";
 import { logWarn } from "@/features/common/services/logger";
+import { contentStore } from "@/features/common/services/content-store";
 import {
   CHAT_THREAD_ATTRIBUTE,
   type AttachedFileModel,
@@ -114,12 +115,36 @@ export async function findCodeInterpreterFileOfCurrentUser(
 }
 
 /**
+ * True when `fileId` is the OpenAI file the content store keeps for an agent
+ * file of the caller's content (OpenAiFileUse "agent"): chats of other users
+ * with the agent use it. On a storage error the answer is true (keep the
+ * file).
+ */
+async function isAgentFileOfCaller(userId: string, fileId: string, sha256?: string) {
+  if (!sha256) return false;
+  try {
+    return await contentStore().isAgentOpenAiFile(userId, sha256, fileId);
+  } catch (error) {
+    logWarn("code interpreter file: agent file check failed, the file is kept", {
+      error: error instanceof Error ? error.message : String(error),
+    });
+    return true;
+  }
+}
+
+/**
  * How many places of the caller use an OpenAI file: the caller's (not
  * deleted) threads that list the id, plus the caller's agent Code files with
- * the same content (`sha256` of the attached entry). The content store gives
- * the same bytes of one owner one OpenAI file, so an upload can be attached
- * to several threads, or be the file of the owner's agent; it is deleted
- * from OpenAI only when the thread that asks is its last user (count 1).
+ * the same content (`sha256` of the attached entry), plus one when the id is
+ * the agent file of that content. It is deleted from OpenAI only when the
+ * thread that asks is its last user (count 1).
+ *
+ * The content store gives the same bytes of one owner one OpenAI file per
+ * use: uploads share one, agent files have their own (cached under separate
+ * metadata keys), so a new upload never gets an agent file id. Content
+ * cached before that has one id for both; the Code rows with the same hash
+ * still keep such an id from being deleted while the owner's agent has the
+ * file.
  */
 export async function countUsesOfCodeInterpreterFile(
   fileId: string,
@@ -127,6 +152,7 @@ export async function countUsesOfCodeInterpreterFile(
 ): Promise<number> {
   if (!fileId) return 0;
   const userId = await userHashedId();
+  const agentUse = (await isAgentFileOfCaller(userId, fileId, sha256)) ? 1 : 0;
   const { resources } = await HistoryContainer()
     .items.query<number>(
       {
@@ -144,7 +170,7 @@ export async function countUsesOfCodeInterpreterFile(
       { partitionKey: userId },
     )
     .fetchAll();
-  return resources?.[0] ?? 0;
+  return (resources?.[0] ?? 0) + agentUse;
 }
 
 /**

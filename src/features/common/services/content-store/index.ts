@@ -33,7 +33,13 @@ const delegatingBackend: ContentBlobBackend = {
   setMetadata: (key, metadata) => blobs().setMetadata(key, metadata),
   delete: (key) => blobs().delete(key),
   list: (prefix) => blobs().list(prefix),
+  listPage: (prefix, options) => blobs().listPage(prefix, options),
+  acquireLock: (key, ttlSeconds) => blobs().acquireLock(key, ttlSeconds),
 };
+
+/** Takes a lock blob of the content container (see ContentBlobBackend.acquireLock). */
+export const acquireContentJobLock = (key: string, ttlSeconds: number) =>
+  delegatingBackend.acquireLock(key, ttlSeconds);
 
 const isNotFound = (error: unknown): boolean => {
   const status =
@@ -94,5 +100,5 @@ export const contentStoreTakesBuffer = (size: number): boolean => {
   return size <= limit;
 };
 
-export { sha256Hex } from "./content-store";
-export type { IndexTarget, StoredContent } from "./content-store";
+export { sha256Hex, storedFileName } from "./content-store";
+export type { IndexTarget, OpenAiFileUse, StoredContent } from "./content-store";

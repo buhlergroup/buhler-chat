@@ -135,3 +135,53 @@ describe("chat-page.unit.ci-upload-once — content store failure falls back", (
     expect(blobs().stats.writes).toBe(1);
   });
 });
+
+describe("chat-page.unit.ci-upload-once — agent files and orphans", () => {
+  const nameOf = (call: unknown[]) => ((call[0] as { file: File }).file as File).name;
+
+  it("an agent file gets its own OpenAI file, never the one of the same upload", async () => {
+    const bytes = Buffer.from("x,y\n");
+    const upload = await UploadFileForCodeInterpreterOnce(owner, { name: "d.csv", bytes });
+    const agent = await UploadFileForCodeInterpreterOnce(owner, { name: "d.csv", bytes, use: "agent" });
+    const agentAgain = await UploadFileForCodeInterpreterOnce(owner, { name: "d.csv", bytes, use: "agent" });
+    expect(upload.status === "OK" && agent.status === "OK").toBe(true);
+    if (upload.status !== "OK" || agent.status !== "OK" || agentAgain.status !== "OK") return;
+    expect(agent.response.id).not.toBe(upload.response.id);
+    expect(agentAgain.response).toMatchObject({ id: agent.response.id, uploaded: false });
+    expect(filesCreate).toHaveBeenCalledTimes(2);
+  });
+
+  it("a long file name is capped before the upload and in the answer", async () => {
+    const res = await UploadFileForCodeInterpreterOnce(owner, {
+      name: `${"n".repeat(9000)}.csv`,
+      contentType: "text/csv",
+      blob: new Blob(["a,b\n"]),
+    });
+    expect(res.status).toBe("OK");
+    if (res.status !== "OK") return;
+    expect(res.response.name).toHaveLength(255);
+    expect(res.response.name.endsWith(".csv")).toBe(true);
+    expect(nameOf(filesCreate.mock.calls[0])).toBe(res.response.name);
+  });
+
+  it("the metadata write fails after the upload: the id is used, no second upload", async () => {
+    const setMetadata = vi
+      .spyOn(blobs(), "setMetadata")
+      .mockRejectedValue(Object.assign(new Error("metadata too large"), { statusCode: 400 }));
+    try {
+      const res = await UploadFileForCodeInterpreterOnce(owner, {
+        name: "m.csv",
+        contentType: "text/csv",
+        bytes: Buffer.from("m\n"),
+      });
+      expect(res.status).toBe("OK");
+      if (res.status !== "OK") return;
+      expect(filesCreate).toHaveBeenCalledTimes(1);
+      const created = await filesCreate.mock.results[0].value;
+      expect(res.response).toMatchObject({ id: created.id, uploaded: true });
+      expect(res.response.sha256).toMatch(/^[0-9a-f]{64}$/);
+    } finally {
+      setMetadata.mockRestore();
+    }
+  });
+});

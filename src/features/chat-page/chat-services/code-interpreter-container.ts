@@ -210,6 +210,9 @@ export async function uploadFileToCodeInterpreterContainer(
  * uploaded to OpenAI once and then only referenced (container file from
  * `file_id`; the path is then `/mnt/data/<file id>-<name>`). On any error,
  * or without a scope, the bytes are uploaded as before.
+ *
+ * The files are agent files (scope = agent owner): the OpenAI file is the
+ * agent one of that content, never the one of an upload of the owner.
  */
 export async function putFileIntoCodeInterpreterContainer(
   containerId: string,
@@ -221,7 +224,11 @@ export async function putFileIntoCodeInterpreterContainer(
     try {
       const store = contentStore();
       const { sha256 } = await store.put(scope, data);
-      const { fileId } = await store.openAiFile(scope, sha256, { name: fileName, bytes: data });
+      const { fileId } = await store.openAiFile(scope, sha256, {
+        name: fileName,
+        bytes: data,
+        use: "agent",
+      });
       const client = OpenAIV1Instance();
       const files = (client as { containers?: { files?: { create?: unknown } } }).containers?.files;
       if (typeof files?.create === "function") {

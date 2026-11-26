@@ -68,6 +68,32 @@ export interface ContentBlobBackend {
   delete(key: string): Promise<void>;
   /** Every blob whose name starts with `prefix`. */
   list(prefix: string): AsyncIterable<{ key: string; lastModified: Date }>;
+  /**
+   * One page of the blobs whose name starts with `prefix`, in name order.
+   * `continuationToken` (from the previous page) continues the listing; the
+   * result has none when the listing is at its end.
+   */
+  listPage(
+    prefix: string,
+    options: { continuationToken?: string; maxPageSize: number }
+  ): Promise<{ items: Array<{ key: string; lastModified: Date }>; continuationToken?: string }>;
+  /**
+   * Takes the lock blob `key` (a blob lease of `ttlSeconds`, 15 to 60; the
+   * blob is created when missing). Undefined when another holder has it.
+   */
+  acquireLock(key: string, ttlSeconds: number): Promise<ContentJobLock | undefined>;
+}
+
+/** A held lock blob (a blob lease); its metadata keeps the job's state. */
+export interface ContentJobLock {
+  /** The lock blob's metadata when the lock was taken (lowercase keys). */
+  readonly metadata: Record<string, string>;
+  /** Extends the lease by its ttl; throws when the lease was lost. */
+  renew(): Promise<void>;
+  /** Replaces the lock blob's metadata (only while the lease is held). */
+  setMetadata(metadata: Record<string, string>): Promise<void>;
+  /** Gives the lock up; never throws. */
+  release(): Promise<void>;
 }
 
 /** The OpenAI file operations the content store needs. */
@@ -114,6 +140,14 @@ export interface CleanupOptions {
   scope?: string;
   /** Report only, delete nothing. */
   dryRun?: boolean;
+  /** Continue the listing where an earlier run stopped (its `continuationToken`). */
+  continuationToken?: string;
+  /** Blobs per listing call (default 1000). */
+  pageSize?: number;
+  /** Stop after this many listed blobs (default: no limit). */
+  maxBlobs?: number;
+  /** Checked before each page and each content: true stops the run (time budget, lost lock). */
+  shouldStop?: () => boolean;
 }
 
 export interface CleanupResult {
@@ -121,9 +155,47 @@ export interface CleanupResult {
   deleted: Array<{ scope: string; sha256: string }>;
   keptReferenced: number;
   keptRecent: number;
+  /** Where the next run continues; undefined when this run reached the end. */
+  continuationToken?: string;
+  /** True when the listing reached its end (all content was looked at). */
+  complete: boolean;
 }
 
 export const DEFAULT_CLEANUP_GRACE_MS = 7 * 24 * 60 * 60 * 1000;
+const DEFAULT_CLEANUP_PAGE_SIZE = 1000;
+
+/** Longest file name (UTF-16 units) the store uploads and keeps in metadata. */
+export const MAX_STORED_FILE_NAME_LENGTH = 255;
+
+/**
+ * The file name the store uploads to OpenAI and keeps in the blob metadata:
+ * control characters and path separators replaced, trimmed, and at most
+ * MAX_STORED_FILE_NAME_LENGTH characters with the extension kept. A
+ * surrogate pair is never cut. Blob metadata is limited to 8 KB in total; an
+ * uncapped name could make the metadata write fail after the upload.
+ */
+export const storedFileName = (name: string): string => {
+  const clean =
+    String(name ?? "").replace(/[\u0000-\u001f\u007f-\u009f/\\]/g, "_").trim() || "file";
+  if (clean.length <= MAX_STORED_FILE_NAME_LENGTH) return clean;
+  const dot = clean.lastIndexOf(".");
+  const extension = dot > 0 && clean.length - dot <= 16 ? clean.slice(dot) : "";
+  const room = MAX_STORED_FILE_NAME_LENGTH - extension.length;
+  let head = "";
+  for (const char of clean.slice(0, dot > 0 && extension ? dot : clean.length)) {
+    if (head.length + char.length > room) break;
+    head += char;
+  }
+  return head + extension;
+};
+
+/**
+ * Who uses an OpenAI file of the store. Agent files (documents of an agent,
+ * in the agent owner's scope) and the owner's own uploads get separate
+ * OpenAI files: a chat of another user with the agent uses the agent file,
+ * and deleting the owner's upload never removes it.
+ */
+export type OpenAiFileUse = "upload" | "agent";
 
 // put() refreshes the change time of reused content older than this.
 const TOUCH_AFTER_MS = 24 * 60 * 60 * 1000;
@@ -132,6 +204,13 @@ const TOUCH_AFTER_MS = 24 * 60 * 60 * 1000;
 const META_SHA256 = "sha256";
 const META_OPENAI_FILE_ID = "openaifileid";
 const META_OPENAI_FILE_NAME = "openaifilename";
+const META_AGENT_OPENAI_FILE_ID = "agentopenaifileid";
+const META_AGENT_OPENAI_FILE_NAME = "agentopenaifilename";
+
+const openAiMetaKeys = (use: OpenAiFileUse) =>
+  use === "agent"
+    ? { id: META_AGENT_OPENAI_FILE_ID, name: META_AGENT_OPENAI_FILE_NAME }
+    : { id: META_OPENAI_FILE_ID, name: META_OPENAI_FILE_NAME };
 
 export const sha256Hex = (data: Uint8Array): string =>
   createHash("sha256").update(data).digest("hex");
@@ -289,32 +368,49 @@ export function createContentStore(deps: ContentStoreDeps) {
    * one under another name, is replaced by a new upload. `bytes` saves the
    * read from the blob when the caller has them; they must hash to `sha256`.
    * `blob` is the upload that putBlob stored in the same request.
+   *
+   * `use` "agent" (an agent file, scope = agent owner) caches the id under
+   * its own metadata keys, so an agent file never shares an OpenAI file with
+   * an upload of the owner (see OpenAiFileUse). The name is stored as
+   * storedFileName gives it.
+   *
+   * When the upload worked but recording the id in the metadata fails, the
+   * id is still returned (`recorded` false): the caller uses it, and no
+   * second upload leaves the first one behind as an orphan.
    */
   async function openAiFile(
     scope: string,
     sha256: string,
-    file: { name: string; contentType?: string; bytes?: Uint8Array; blob?: Blob }
-  ): Promise<{ fileId: string; uploaded: boolean }> {
+    file: {
+      name: string;
+      contentType?: string;
+      bytes?: Uint8Array;
+      blob?: Blob;
+      use?: OpenAiFileUse;
+    }
+  ): Promise<{ fileId: string; uploaded: boolean; recorded: boolean }> {
     assertScope(scope);
     assertHash(sha256);
     const blobKey = contentBlobPath(scope, sha256);
-    const name = file.name;
+    const name = storedFileName(file.name);
+    const use: OpenAiFileUse = file.use === "agent" ? "agent" : "upload";
+    const keys = openAiMetaKeys(use);
 
     const cachedId = async (): Promise<string | undefined> => {
       const props = await blobs.head(blobKey);
       if (!props) throw new Error("Content not found in the store");
-      const id = props.metadata[META_OPENAI_FILE_ID];
-      const cachedName = decodeMeta(props.metadata[META_OPENAI_FILE_NAME]);
+      const id = props.metadata[keys.id];
+      const cachedName = decodeMeta(props.metadata[keys.name]);
       if (!id || cachedName !== name) return undefined;
       return (await deps.openAiFiles().exists(id)) ? id : undefined;
     };
 
     const first = await cachedId();
-    if (first) return { fileId: first, uploaded: false };
+    if (first) return { fileId: first, uploaded: false, recorded: true };
 
-    return once(`oai:${blobKey}:${name}`, async () => {
+    return once(`oai:${use}:${blobKey}:${name}`, async () => {
       const again = await cachedId();
-      if (again) return { fileId: again, uploaded: false };
+      if (again) return { fileId: again, uploaded: false, recorded: true };
 
       // A Blob is passed through as it is (it was hashed by putBlob in the
       // same request); bytes are checked against the hash.
@@ -334,15 +430,32 @@ export function createContentStore(deps: ContentStoreDeps) {
         .openAiFiles()
         .upload(data, name, file.contentType || "application/octet-stream");
 
-      const props = await blobs.head(blobKey);
-      await blobs.setMetadata(blobKey, {
-        ...(props?.metadata ?? {}),
-        [META_SHA256]: sha256,
-        [META_OPENAI_FILE_ID]: fileId,
-        [META_OPENAI_FILE_NAME]: encodeMeta(name),
-      });
-      return { fileId, uploaded: true };
+      try {
+        const props = await blobs.head(blobKey);
+        await blobs.setMetadata(blobKey, {
+          ...(props?.metadata ?? {}),
+          [META_SHA256]: sha256,
+          [keys.id]: fileId,
+          [keys.name]: encodeMeta(name),
+        });
+      } catch {
+        // The file exists in OpenAI: use it now, upload again next time.
+        return { fileId, uploaded: true, recorded: false };
+      }
+      return { fileId, uploaded: true, recorded: true };
     });
+  }
+
+  /**
+   * True when `fileId` is the cached OpenAI file of an agent file of this
+   * content (OpenAiFileUse "agent"). Such a file is never deleted for an
+   * upload of the owner.
+   */
+  async function isAgentOpenAiFile(scope: string, sha256: string, fileId: string): Promise<boolean> {
+    assertScope(scope);
+    assertHash(sha256);
+    const props = await blobs.head(contentBlobPath(scope, sha256));
+    return Boolean(fileId) && props?.metadata[META_AGENT_OPENAI_FILE_ID] === fileId;
   }
 
   /**
@@ -368,7 +481,9 @@ export function createContentStore(deps: ContentStoreDeps) {
 
   /**
    * Deletes content (and its Markdown) that no row points to any more and
-   * that is older than the grace period. Scan based: run it on a schedule.
+   * that is older than the grace period. Scan based: run it on a schedule
+   * (cleanup-job.ts). `maxBlobs`, `pageSize` and `shouldStop` bound one run;
+   * the returned `continuationToken` lets the next run go on from there.
    * OpenAI files are not deleted here (chats that started with them can
    * still use them).
    */
@@ -377,59 +492,101 @@ export function createContentStore(deps: ContentStoreDeps) {
     const cutoff = now().getTime() - graceMs;
     if (options.scope !== undefined) assertScope(options.scope);
     const prefix = options.scope ? `content/${options.scope}/` : "content/";
+    const pageSize = Math.max(1, Math.floor(options.pageSize ?? DEFAULT_CLEANUP_PAGE_SIZE));
+    const maxBlobs = options.maxBlobs ?? Number.POSITIVE_INFINITY;
+    const shouldStop = options.shouldStop ?? (() => false);
 
-    // scope/hash -> newest change of the content or its Markdown, and keys.
-    const groups = new Map<
-      string,
-      { scope: string; sha256: string; newest: number; keys: string[] }
-    >();
-    for await (const blob of blobs.list(prefix)) {
-      const parsed = parseContentBlobPath(blob.key);
-      if (!parsed) continue;
-      const id = `${parsed.scope}/${parsed.sha256}`;
-      const group = groups.get(id) ?? {
-        scope: parsed.scope,
-        sha256: parsed.sha256,
-        newest: 0,
-        keys: [],
-      };
-      group.newest = Math.max(group.newest, blob.lastModified.getTime());
-      group.keys.push(blob.key);
-      groups.set(id, group);
-    }
+    type Group = { scope: string; sha256: string; newest: number; keys: string[] };
 
     const result: CleanupResult = {
-      scanned: groups.size,
+      scanned: 0,
       deleted: [],
       keptReferenced: 0,
       keptRecent: 0,
+      complete: false,
     };
-    for (const group of groups.values()) {
+
+    const processGroup = async (group: Group) => {
+      result.scanned++;
       if (group.newest > cutoff) {
         result.keptRecent++;
-        continue;
+        return;
       }
       if (await options.isReferenced(group.scope, group.sha256)) {
         result.keptReferenced++;
-        continue;
+        return;
       }
       if (!options.dryRun) {
         // Reused while the scan ran (put touches reused content): keep it.
         const latest = await blobs.head(contentBlobPath(group.scope, group.sha256));
         if (latest && latest.lastModified.getTime() > cutoff) {
           result.keptRecent++;
-          continue;
+          return;
         }
         // The Markdown first: content without Markdown is still complete.
         const ordered = [...group.keys].sort((a, b) => b.length - a.length);
         for (const key of ordered) await blobs.delete(key);
       }
       result.deleted.push({ scope: group.scope, sha256: group.sha256 });
+    };
+
+    // Page by page, in name order: `<hash>` and `<hash>.md` are neighbours.
+    // The last group of a page can go on in the next page, so it is carried
+    // over. A group cut by the end of a run is complete enough: the part on
+    // the next page is looked at (and checked again) by the next run.
+    let token = options.continuationToken;
+    let listed = 0;
+    let carry: Group | undefined;
+    while (listed < maxBlobs && !shouldStop()) {
+      const pageStart = token;
+      const page = await blobs.listPage(prefix, {
+        continuationToken: token,
+        maxPageSize: Math.max(1, Math.min(pageSize, maxBlobs - listed)),
+      });
+      listed += page.items.length;
+
+      // scope/hash -> newest change of the content or its Markdown, and keys.
+      const groups = new Map<string, Group>();
+      if (carry) groups.set(`${carry.scope}/${carry.sha256}`, carry);
+      carry = undefined;
+      for (const blob of page.items) {
+        const parsed = parseContentBlobPath(blob.key);
+        if (!parsed) continue;
+        const id = `${parsed.scope}/${parsed.sha256}`;
+        const group = groups.get(id) ?? {
+          scope: parsed.scope,
+          sha256: parsed.sha256,
+          newest: 0,
+          keys: [],
+        };
+        group.newest = Math.max(group.newest, blob.lastModified.getTime());
+        group.keys.push(blob.key);
+        groups.set(id, group);
+      }
+      const ready = [...groups.values()];
+      if (page.continuationToken) carry = ready.pop();
+
+      for (const group of ready) {
+        if (shouldStop()) {
+          // Stopped inside the page: the next run lists this page again.
+          result.continuationToken = pageStart;
+          return result;
+        }
+        await processGroup(group);
+      }
+
+      token = page.continuationToken;
+      if (!token) {
+        result.complete = true;
+        return result;
+      }
     }
+    if (carry && !shouldStop()) await processGroup(carry);
+    result.continuationToken = token;
     return result;
   }
 
-  return { put, putBlob, markdown, openAiFile, ensureIndexed, cleanup };
+  return { put, putBlob, markdown, openAiFile, isAgentOpenAiFile, ensureIndexed, cleanup };
 }
 
 export type ContentStore = ReturnType<typeof createContentStore>;
