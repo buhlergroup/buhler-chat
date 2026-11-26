@@ -139,7 +139,7 @@ async function main() {
   const listener = (ns: string) => (op: string, p: string) => fsOps.push({ ns, op, path: p });
 
   const summary: Json[] = [];
-  // SMOKE_ONLY=A,B,... runs only those sections (A B C D F L E U M P).
+  // SMOKE_ONLY=A,B,... runs only those sections (A B C D F L E U M P S).
   const only = process.env.SMOKE_ONLY?.split(",").map((x) => x.trim().toUpperCase());
   const section = (name: string) => !only || only.includes(name);
 
@@ -598,6 +598,263 @@ compactions in thread F: ${JSON.stringify(session.liveSessionCompactions(threadF
     console.log(`  /workspace/outputs: ${JSON.stringify(outs.map((e) => ({ path: e.path, bytes: e.size })))}`);
     const removedP = await pFiles.removeThreadWorkspaceFiles(user, threadP, "all", pStore);
     console.log(`  cleaned ${removedP} blobs of thread P`);
+  }
+
+  // ── S: milestone 4 (regex limits, reset, journal scan, sub-agents, compaction) ─
+  // SMOKE_ONLY=S. Sub-sections with SMOKE_S=regex,reset,journal,sub,compact (default all).
+  if (section("S")) {
+    const files = await import("@/features/chat-page/chat-services/copilot-runtime/workspace-files");
+    const { workspaceTools } = await import("@/features/chat-page/chat-services/copilot-runtime/workspace-tools");
+    const { copilotModelSelectionId } = await import("@/features/chat-page/chat-services/copilot-runtime/providers");
+    const { extensionTool } = await import("@/features/chat-page/chat-services/tools/extension-tool");
+    const { tool } = await import("ai");
+    const { z } = await import("zod");
+    const subs = (process.env.SMOKE_S ?? "regex,reset,journal,sub,compact").split(",");
+    const sub = (name: string) => subs.includes(name);
+    const noAiSdkSubAgents = async (threadId: string) => {
+      const { call_sub_agent: _c, search_sub_agent: _s, ...rest } = await toolsetFor(threadId);
+      return rest;
+    };
+    const cleanup: Array<[string, string]> = [];
+
+    if (sub("regex")) {
+      const user = userKey("sam");
+      const threadR = `smoke-sr-${runId}`;
+      cleanup.push([user, threadR]);
+      const { fs } = await files.threadWorkspace(user, threadR);
+      const NL = String.fromCharCode(10);
+      await fs.writeFile("/workspace/evil.txt", Array.from({ length: 2000 }, () => `${"a".repeat(40)}!`).join(NL));
+      const rg = workspaceTools(fs, "gpt").find((t) => t.name === "rg")! as unknown as {
+        handler: (a: unknown, i: { toolCallId: string }) => Promise<{ resultType: string; textResultForLlm: string; skipLargeOutputProcessing?: boolean }>;
+      };
+      let ticks = 0;
+      const iv = setInterval(() => ticks++, 5);
+      for (const [label, pattern] of [
+        ["(a+)+$ on 2,000 lines of 40 a + !", "(a+)+$"],
+        ["pattern of 1,500 chars", "a".repeat(1500)],
+        ["backreference", "(a)\\1"],
+      ] as const) {
+        const t0 = Date.now();
+        const ticks0 = ticks;
+        const r = await rg.handler({ pattern, output_mode: "count" }, { toolCallId: `evil-${label.length}` });
+        console.log(
+          `\n=== S regex: ${label}: ${Date.now() - t0} ms, ${r.resultType}, timer ticks during the search ${ticks - ticks0}, skipLargeOutputProcessing=${r.skipLargeOutputProcessing}: ${r.textResultForLlm.slice(0, 140).replace(/\s+/g, " ")}`,
+        );
+      }
+      clearInterval(iv);
+    }
+
+    if (sub("reset")) {
+      const threadT = `smoke-st-${runId}`;
+      cleanup.push([userKey("tara"), threadT]);
+      await turn("S reset 1: remember a code word", {
+        threadId: threadT,
+        user: "tara",
+        model: gptModel,
+        prompt: "Remember this code word for later: ZEBRA-4417. Reply only with OK.",
+      });
+      const { fs } = await files.threadWorkspace(userKey("tara"), threadT);
+      console.log(`journal before reset: events.jsonl exists = ${await fs.exists("/session-state/events.jsonl")}`);
+      // What ResetChatThread runs on the Copilot path (chat-thread-service: scope "all").
+      process.env.AGENT_RUNTIME ??= "copilot";
+      await files.removeThreadWorkspaceFilesQuietly(userKey("tara"), threadT, "all");
+      console.log(`journal after reset: events.jsonl exists = ${await fs.exists("/session-state/events.jsonl")}`);
+      await turn("S reset 2: ask for the code word (empty history after reset)", {
+        threadId: threadT,
+        user: "tara",
+        model: gptModel,
+        prompt: "What code word did I ask you to remember? If you do not know, say NONE.",
+      });
+    }
+
+    if (sub("journal")) {
+      const user = userKey("jules");
+      const threadJ = `smoke-sj-${runId}`;
+      cleanup.push([user, threadJ]);
+      process.env.SMOKE_USER_KEY = user;
+      const headerSecret = `smk-${createHash("sha256").update(`secret-${runId}`).digest("hex").slice(0, 32)}`;
+      const ext = {
+        id: "5m0kehttp-extension",
+        name: "Status page",
+        description: "A public status page",
+        executionSteps: "",
+        headers: [{ id: "h1", key: "X-Api-Key", value: "(secret)" }],
+        userId: "smoke",
+        isPublished: false,
+        createdAt: new Date(),
+        functions: [],
+        type: "EXTENSION",
+      };
+      const fn = {
+        id: "f1",
+        functionName: "get_status_page",
+        code: JSON.stringify({ name: "get_status_page", description: "Fetch the public status page.", parameters: { type: "object", properties: {} } }),
+        endpoint: "https://www.example.com/",
+        endpointType: "GET",
+        isOpen: false,
+      };
+      const httpTool = extensionTool(fn as never, JSON.parse(fn.code), { extension: ext as never, headerSecrets: { "X-Api-Key": headerSecret } });
+      await files.uploadToThreadWorkspace(user, threadJ, "notes.txt", Buffer.from("Plant notes: line 2 runs at 80 % load.", "utf8"));
+      await turn("S journal: HTTP extension with header secret + MCP + upload", {
+        threadId: threadJ,
+        user: "jules",
+        model: gptModel,
+        extraTools: { smoke001_get_status_page: httpTool },
+        prompt:
+          "1) Call get_status_page once and tell me its title. 2) Use the docs MCP search tool for 'blob lease duration' (one call). 3) view /workspace/uploads/notes.txt and quote it.",
+      });
+      // Scan every journal file for secrets (values are never printed).
+      const { fs, store: jStore } = await files.threadWorkspace(user, threadJ);
+      const ns = `${user}/${threadJ}`;
+      const pointers = await jStore.listNames(`${ns}/f/session-state/`);
+      const envSecrets = Object.entries(process.env)
+        .filter(([k, v]) => /KEY|SECRET|TOKEN|PASSWORD|CONNECTION/i.test(k) && typeof v === "string" && v.length >= 16)
+        .map(([k, v]) => [k, v as string] as const);
+      const patterns: Array<[string, RegExp]> = [
+        ["bearer token", /Bearer\s+[A-Za-z0-9._~+/=-]{20,}/],
+        ["Authorization header", /"?authorization"?\s*[:=]/i],
+        ["api key field", /"?(?:api[-_]?key|x-api-key|ocp-apim-subscription-key)"?\s*[:=]\s*"?[A-Za-z0-9]{16,}/i],
+        ["SAS signature", /[?&]sig=[A-Za-z0-9%/+=]{20,}/],
+        ["OAuth code / token", /[?&](?:code|access_token|refresh_token)=[A-Za-z0-9._-]{16,}/],
+        ["connection string", /AccountKey=|SharedAccessSignature=|Password=/i],
+        ["JWT", /eyJ[A-Za-z0-9_-]{10,}\.eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}/],
+      ];
+      const hits: string[] = [];
+      let bytes = 0;
+      for (const pointer of pointers) {
+        if (pointer.endsWith("/.~dir")) continue;
+        const path = pointer.slice(`${ns}/f`.length);
+        const text = Buffer.from(await fs.readFileBytes(path)).toString("utf8");
+        bytes += text.length;
+        if (text.includes(headerSecret)) hits.push(`${path}: extension header secret`);
+        for (const [name, re] of patterns) if (re.test(text)) hits.push(`${path}: ${name}`);
+        for (const [k, v] of envSecrets) if (text.includes(v)) hits.push(`${path}: value of ${k}`);
+      }
+      console.log(
+        `\n=== S journal scan: ${pointers.length} files, ${bytes} chars, ${envSecrets.length} env secret values checked; findings: ${hits.length ? JSON.stringify(hits) : "none"}`,
+      );
+    }
+
+    if (sub("sub")) {
+      const user = "sofia";
+      const threadS = `smoke-ss-${runId}`;
+      cleanup.push([userKey(user), threadS]);
+      const forecastKey = "wx000001_station_forecast";
+      let forecastCalls = 0;
+      const subAgents = {
+        generalModelSelectionId: copilotModelSelectionId(gptModel),
+        personas: [
+          {
+            personaId: "smoke-persona-weather",
+            displayName: "Weather Desk",
+            description: "Answers weather questions for a city with its own station forecast tool.",
+            instructions: "You are the weather desk. Always call your station forecast tool and report its code.",
+            modelSelectionId: copilotModelSelectionId(gptModel),
+            toolset: {
+              [forecastKey]: tool({
+                description: "Station forecast for a city.",
+                inputSchema: z.object({ city: z.string() }),
+                execute: async ({ city }: { city: string }) => {
+                  forecastCalls++;
+                  return { city, forecast: "Sunny, 21 C", code: "WX-4417" };
+                },
+              }),
+            },
+          },
+        ],
+      };
+      const events: Array<{ t: number; type: string; agentId?: string; data?: any }> = [];
+      const runS = async (label: string, prompt: string) => {
+        const toolset = await noAiSdkSubAgents(threadS);
+        const abort = new AbortController();
+        const handle = await session.runCopilotTurn({
+          threadId: threadS,
+          userKey: userKey(user),
+          modelId: gptModel,
+          reasoningEffort: MODEL_CONFIGS[gptModel].defaultReasoningEffort,
+          systemMessage: system,
+          toolset,
+          priorHistory: [],
+          prompt,
+          abortSignal: abort.signal,
+          store,
+          subAgents: subAgents as never,
+          canUsePersona: async () => true,
+          onEvent: (e) => events.push({ t: Date.now(), ...(e as { type: string }) }),
+          finishMetadata: (u) => ({ usage: u }),
+        });
+        const parts: string[] = [];
+        const reader = handle.stream.getReader();
+        for (;;) {
+          const { value, done } = await reader.read();
+          if (done) break;
+          const c = value as Json;
+          if (c.type === "tool-input-available" || c.type === "tool-output-available" || c.type === "tool-output-error") {
+            parts.push(`${c.type} ${c.toolName ?? ""} ${JSON.stringify(c.input ?? c.output ?? c.errorText).slice(0, 200)}`);
+          }
+          if (c.type === "finish") parts.push(`finish metadata reasoningDurationMs=${(c.messageMetadata as Json)?.reasoningDurationMs}`);
+        }
+        const r = await handle.result;
+        console.log(`\n=== ${label}`);
+        for (const p of parts) console.log(`  ${p}`);
+        console.log(`  text: ${r.text.slice(0, 300)}`);
+        console.log(
+          `  usage: total input=${r.turnUsage.inputTokens} output=${r.turnUsage.outputTokens}; byModel=${JSON.stringify(r.turnUsage.byModel)}; bySubAgent=${JSON.stringify(r.turnUsage.bySubAgent)}; personas=${JSON.stringify(r.subAgentPersonas)}; reasoningDurationMs=${r.reasoningDurationMs}`,
+        );
+        return r;
+      };
+      events.length = 0;
+      await runS(
+        "S sub 1: general twice in parallel",
+        "Use the general sub-agent twice IN PARALLEL (two task calls in ONE message): one writes /workspace/a.txt with the word alpha, the other writes /workspace/b.txt with the word beta. Then list both paths.",
+      );
+      const starts = events.filter((e) => e.type === "subagent.started");
+      const ends = events.filter((e) => e.type === "subagent.completed" || e.type === "subagent.failed");
+      let running = 0;
+      let maxRunning = 0;
+      for (const e of [...starts, ...ends].sort((a, b) => a.t - b.t)) {
+        running += e.type === "subagent.started" ? 1 : -1;
+        maxRunning = Math.max(maxRunning, running);
+      }
+      console.log(`  sub-agents started=${starts.length} completed=${ends.length} max running at once=${maxRunning}`);
+      const parentTools = await session.liveSessionToolNames(threadS);
+      console.log(`  parent sees: ${parentTools?.join(", ")} (persona-only tool hidden: ${!parentTools?.includes(forecastKey)})`);
+      events.length = 0;
+      await runS("S sub 2: persona sub-agent with its own tool", "Ask the Weather Desk agent for the forecast in Zurich and tell me the code it reports.");
+      const personaToolCalls = events.filter((e) => e.type === "tool.execution_start" && e.data?.toolName === forecastKey);
+      console.log(`  forecast tool calls=${forecastCalls}, by a sub-agent (agentId set)=${personaToolCalls.every((e) => !!e.agentId) && personaToolCalls.length > 0}`);
+    }
+
+    if (sub("compact")) {
+      const threadC = `smoke-sc-${runId}`;
+      cleanup.push([userKey("carl"), threadC]);
+      const previous = process.env.COPILOT_MAX_PROMPT_TOKENS;
+      process.env.COPILOT_MAX_PROMPT_TOKENS = "6000";
+      const filler = (n: number) =>
+        Array.from({ length: n }, (_, i) => `Line ${i}: the inspection log of conveyor ${i % 17} lists bearing temperature ${40 + (i % 23)} C and belt speed ${1 + (i % 5)} m/s.`).join(" ");
+      let notice = false;
+      for (let n = 1; n <= 8 && !notice; n++) {
+        const r = await turn(`S compact ${n}`, {
+          threadId: threadC,
+          user: "carl",
+          model: gptModel,
+          prompt: `${n === 1 ? "The project code is HERON-12. " : ""}Here is part ${n} of a log; reply with just 'noted ${n}'. ${filler(60)}`,
+        });
+        const shown = (r as unknown as { compactionNotice?: unknown }).compactionNotice;
+        if (shown) {
+          notice = true;
+          console.log(`  compaction notice with turn ${n}: ${JSON.stringify(shown)} (stored with the turn as the data-compaction part)`);
+        }
+      }
+      if (previous === undefined) delete process.env.COPILOT_MAX_PROMPT_TOKENS;
+      else process.env.COPILOT_MAX_PROMPT_TOKENS = previous;
+      console.log(`  compactions in thread: ${JSON.stringify(session.liveSessionCompactions(threadC))}`);
+    }
+
+    for (const [user, thread] of cleanup) {
+      const removed = await files.removeThreadWorkspaceFiles(user, thread, "all", store);
+      console.log(`  cleaned ${removed} blobs of ${thread}`);
+    }
   }
 
   // ── Runtime process memory ──────────────────────────────────────────────
