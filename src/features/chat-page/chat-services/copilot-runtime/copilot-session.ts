@@ -377,6 +377,8 @@ export interface CopilotTurnResult extends MappedTurnResult {
   firstChunkMs?: number;
   /** Runtime compactions that finished during this turn. */
   compactions: RuntimeCompaction[];
+  /** The compaction the chat showed with this turn (also one from between turns), to store with it. */
+  compactionNotice?: RuntimeCompaction;
   /** Sub-agent name -> persona id, for the sub-agents that ran (usage attribution). */
   subAgentPersonas: Record<string, string>;
 }
@@ -394,6 +396,17 @@ function runtimeErrorText(message: string, name?: string): string {
   logError("copilot-runtime: turn error", { name, message });
   return friendlyErrorMessage({ message, name });
 }
+
+/** The BYOK models the runtime knows (a model added later needs a new session config). */
+const inferenceSignature = (): string =>
+  buildCopilotInference()
+    .models.map((m) => `${m.provider}/${m.id}`)
+    .sort()
+    .join(",");
+
+/** True for the runtime's error on a model the session's config does not list. */
+export const isModelNotRegisteredError = (err: unknown): boolean =>
+  /not registered|unknown model|model .* not (?:found|available)/i.test(err instanceof Error ? err.message : String(err));
 
 function planFor(input: CopilotTurnInput, family: SearchToolFamily): SubAgentPlan {
   const names = workspaceToolNames(family);
@@ -416,14 +429,14 @@ async function openSession(
   if (existing) {
     if (existing.namespace !== namespace) throw new Error("Session namespace mismatch");
     const stateGone = !(await existing.fs.exists(EVENTS_JOURNAL));
-    if (!stateGone && existing.client === client && existing.agentSignature === plan.signature) {
+    if (!stateGone && existing.client === client && existing.agentSignature === `${plan.signature}|${inferenceSignature()}`) {
       // Most recently used goes to the end (LRU order).
       state.sessions.delete(sessionId);
       state.sessions.set(sessionId, existing);
       return { live: existing, mode: "live", seeded: 0 };
     }
     if (existing.busy) throw new Error("A reply is still running in this chat. Wait for it or stop it first.");
-    // Other sub-agents or a restarted runtime: reopen from the Blob state.
+    // Other sub-agents, new models, or a restarted runtime: reopen from the Blob state.
     await dropSession(sessionId, existing);
     if (stateGone) {
       // The chat was reset (possibly on another instance): its session state is
@@ -521,7 +534,7 @@ async function openSession(
     namespace,
     binding,
     toolSignature: await toolSignature(registered, family),
-    agentSignature: plan.signature,
+    agentSignature: `${plan.signature}|${inferenceSignature()}`,
     plan,
     selectionId,
     reasoningEffort: input.reasoningEffort,
@@ -613,7 +626,7 @@ export async function runCopilotTurn(input: CopilotTurnInput): Promise<CopilotTu
 async function runTurnInSession(input: CopilotTurnInput): Promise<CopilotTurnHandle> {
   const family = searchFamily(input.modelId);
   const plan = planFor(input, family);
-  const { live, mode, seeded } = await openSession(input, plan);
+  let { live, mode, seeded } = await openSession(input, plan);
   if (live.busy) throw new Error("A reply is still running in this chat. Wait for it or stop it first.");
   live.busy = true;
   live.lastUsed = Date.now();
@@ -623,7 +636,22 @@ async function runTurnInSession(input: CopilotTurnInput): Promise<CopilotTurnHan
     // Model or effort switch between turns: one session, same history.
     const selectionId = copilotModelSelectionId(input.modelId);
     if (selectionId !== live.selectionId || input.reasoningEffort !== live.reasoningEffort) {
-      await live.session.setModel(selectionId, input.reasoningEffort ? { reasoningEffort: input.reasoningEffort } : undefined);
+      const effort = input.reasoningEffort ? { reasoningEffort: input.reasoningEffort } : undefined;
+      try {
+        await live.session.setModel(selectionId, effort);
+      } catch (err) {
+        if (!isModelNotRegisteredError(err)) throw err;
+        // The session's model list is older than the deployment: reopen it
+        // from its Blob state with the current list (once), on this model.
+        logWarn("copilot-runtime: model not registered in the session, reopening it", { threadId: input.threadId, model: selectionId });
+        live.busy = false;
+        await dropSession(`thread-${input.threadId}`, live);
+        ({ live, mode, seeded } = await openSession(input, plan));
+        live.busy = true;
+        if (live.selectionId !== selectionId || live.reasoningEffort !== input.reasoningEffort) {
+          await live.session.setModel(selectionId, effort);
+        }
+      }
       live.selectionId = selectionId;
       live.reasoningEffort = input.reasoningEffort;
     }
@@ -717,7 +745,8 @@ async function runTurnInSession(input: CopilotTurnInput): Promise<CopilotTurnHan
   });
   mapper.start();
   // Compactions that finished between turns are shown with this one.
-  for (const c of live.compactions.slice(live.compactionsShown)) mapper.emitCompaction(c);
+  const pendingCompactions = live.compactions.slice(live.compactionsShown);
+  for (const c of pendingCompactions) mapper.emitCompaction(c);
   live.compactionsShown = live.compactions.length;
 
   let settle!: () => void;
@@ -801,6 +830,7 @@ async function runTurnInSession(input: CopilotTurnInput): Promise<CopilotTurnHan
       reasoningDurationMs: reasoningDurationMs(),
       firstChunkMs,
       compactions: live.compactions.slice(compactionsBefore),
+      compactionNotice: [...pendingCompactions, ...live.compactions.slice(compactionsBefore)].filter((c) => c.success).at(-1),
       subAgentPersonas,
     };
   });

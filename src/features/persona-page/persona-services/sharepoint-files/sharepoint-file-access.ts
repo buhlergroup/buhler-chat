@@ -561,8 +561,9 @@ export class SharePointFileSession {
 
       try {
         const { path } = await this.deps.uploadToContainer(containerId, prepared.name, prepared.data);
-        logInfo("fetch_sharepoint_file: file in the code interpreter", {
+        logInfo("fetch_sharepoint_file: file stored", {
           threadId: this.deps.threadId,
+          destination: path.startsWith("/workspace/") ? "workspace" : "code-interpreter",
           source,
           originalBytes: file.size,
           bytes: prepared.data.length,

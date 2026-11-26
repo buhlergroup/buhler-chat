@@ -616,3 +616,18 @@ describe("step boundaries survive a Cosmos round-trip", () => {
     expect(await convertToModelMessages(rehydrated)).toHaveLength(1);
   });
 });
+
+describe("compaction notice round trip (Copilot path)", () => {
+  it("an assistant row keeps the compaction and gets the data-compaction part back on load", async () => {
+    const { chatMessagesFromUIMessages, uiMessagesFromChatMessages } = await import("../message-adapter");
+    const compaction = { status: "done", trimmedTurns: 0, summaryOutcome: "ok", durationMs: 900, tokensBefore: 6634, tokensAfter: 2805 };
+    const rows = chatMessagesFromUIMessages(
+      [{ id: "a1", role: "assistant", parts: [{ type: "text", text: "Hi" }], metadata: { compaction } }],
+      { threadId: "t", userId: "u" },
+    );
+    expect(rows[0].compaction).toEqual(compaction);
+    const [loaded] = uiMessagesFromChatMessages(rows.map((r) => ({ ...r, createdAt: new Date() })) as never);
+    expect(loaded.parts[0]).toEqual({ type: "data-compaction", id: "compaction", data: compaction });
+    expect(loaded.parts[1]).toMatchObject({ type: "text", text: "Hi" });
+  });
+});

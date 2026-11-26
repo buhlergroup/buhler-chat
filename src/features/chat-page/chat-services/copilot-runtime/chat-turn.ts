@@ -22,7 +22,7 @@ import { ThreadBusyError } from "./thread-lease";
 import { TurnLimitError } from "./runtime-limits";
 import { canUsePersona, resolveSubAgents } from "./subagent-resolver";
 import { turnCostUsd } from "./usage-cost";
-import type { TurnUsage } from "./event-mapper";
+import { compactionPart, type TurnUsage } from "./event-mapper";
 import { RecordAgentInteraction } from "@/features/common/services/agent-stats-service";
 
 const NOTE_SEPARATOR = String.fromCharCode(10, 10);
@@ -169,6 +169,7 @@ export async function runCopilotChatTurn(args: CopilotChatTurnArgs): Promise<Res
         reasoningDurationMs: result.reasoningDurationMs,
         personaId: ctx.thread.isTemporary ? undefined : ctx.thread.personaId,
         costUsd: turnCostUsd(result.turnUsage, modelConfig, MODEL_CONFIGS),
+        ...(result.compactionNotice ? { compaction: compactionPart(result.compactionNotice).data } : {}),
       });
       recordSubAgentInteractions(result.turnUsage, result.subAgentPersonas ?? {});
       if (ctx.history.length === 1) {

@@ -46,6 +46,7 @@ import type { ChatMessageModel } from "../models";
 import { uniqueId } from "@/features/common/util";
 import { chatMessagesFromUIMessages } from "./message-adapter";
 import { computeTokenCostUsd } from "./usage-data";
+import type { CompactionDoneData } from "./compaction-part";
 import { rewriteSandboxUrls } from "./rewrite-sandbox-urls";
 import {
   ingestContainerFileSourcesToChatStore,
@@ -668,6 +669,12 @@ export interface PersistAssistantFromFinishParams<TOOLS extends ToolSet> {
   personaId?: string;
   /** Turn cost priced by the caller (see UsagePayload.costUsd). */
   costUsd?: number;
+  /**
+   * A context compaction that ran in this turn (Copilot path: the runtime
+   * compacts on its own). Stored on the assistant row, so the notice comes
+   * back after a reload.
+   */
+  compaction?: CompactionDoneData;
 }
 
 /**
@@ -686,6 +693,7 @@ export async function persistAssistantFromFinishEvent<TOOLS extends ToolSet>({
   reasoningDurationMs,
   personaId,
   costUsd,
+  compaction,
 }: PersistAssistantFromFinishParams<TOOLS>): Promise<void> {
   // Detect an empty finish — Azure content-filter trips, aborted streams
   // before any output, or a model error that resolves without text/tools.
@@ -785,6 +793,9 @@ export async function persistAssistantFromFinishEvent<TOOLS extends ToolSet>({
     messageId ?? assistantMessageIdGenerator(),
     reasoningDurationMs,
   );
+  if (compaction) {
+    assistant.metadata = { ...((assistant.metadata as Record<string, unknown> | undefined) ?? {}), compaction };
+  }
 
   // Ingest every container_file_citation source the model referenced into
   // the chat file store (the same Azure-blob-backed surface images use).

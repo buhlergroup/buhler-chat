@@ -353,13 +353,14 @@ export async function POST(req: Request) {
   const uploadToWorkspace =
     fileSources && useCopilotRuntime
       ? await (async () => {
-          const [{ uploadToThreadWorkspace }, { userHashedId }] = await Promise.all([
+          const [{ storeSharePointFileInWorkspace }, { userHashedId }] = await Promise.all([
             import("@/features/chat-page/chat-services/copilot-runtime/workspace-files"),
             import("@/features/auth-page/helpers"),
           ]);
           const userKey = await userHashedId();
           return async (fileName: string, data: Buffer) => ({
-            path: (await uploadToThreadWorkspace(userKey, ctx.thread.id, fileName, data)).path,
+            // Under /workspace/sharepoint: not part of the chat's uploads.
+            path: (await storeSharePointFileInWorkspace(userKey, ctx.thread.id, fileName, data)).path,
           });
         })()
       : undefined;

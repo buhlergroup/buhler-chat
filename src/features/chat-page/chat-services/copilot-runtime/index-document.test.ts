@@ -94,6 +94,6 @@ describe("index_document", () => {
         { path: "/workspace/b.txt", name: "b.txt", chunks: 1, status: "indexed" },
       ],
     });
-    expect(INDEX_DOCUMENT_DESCRIPTION).toMatch(/only when a file is too large to read with view or rg, or when you need semantic/);
+    expect(INDEX_DOCUMENT_DESCRIPTION).toMatch(/when the user asks to index or search a document/);
   });
 });

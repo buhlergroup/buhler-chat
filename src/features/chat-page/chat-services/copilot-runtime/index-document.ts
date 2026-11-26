@@ -82,8 +82,10 @@ export async function indexWorkspaceDocument(deps: IndexDocumentDeps, rawPath: s
 
 export const INDEX_DOCUMENT_DESCRIPTION =
   "Index workspace files for semantic search with search_documents. " +
-  "Use it only when a file is too large to read with view or rg, or when you need semantic (meaning-based) search over it; " +
-  "for short files and exact words, read them with view or rg instead. " +
+  "Call it when the user asks to index or search a document (also again, when asked again), " +
+  "when a document is long (more than about 20 pages or 50,000 characters), " +
+  "or when you need meaning-based search across several documents. " +
+  "Otherwise read files directly with view or rg. " +
   "Uploaded documents are indexed from their extracted text (<file>.md). Indexing a file again replaces its earlier index entries. " +
   "Returns the file name and the number of chunks.";
 

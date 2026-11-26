@@ -1060,6 +1060,8 @@ export interface ChatMessageModel {
    * message-adapter so the UI's "Thought for Ns" label survives a reload.
    */
   reasoningDurationMs?: number;
+  /** A context compaction that ran in this turn (Copilot path), for the notice after a reload. */
+  compaction?: Record<string, string | number>;
   toolCallHistory?: Array<{ name: string; arguments: string; result?: string; timestamp: Date }>;
   /**
    * Ordered layout of the assistant turn's UIMessage parts, including the

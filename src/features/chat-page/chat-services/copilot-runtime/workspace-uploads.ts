@@ -94,13 +94,18 @@ export interface StoredUpload {
 export const paragraphsToMarkdown = (paragraphs: string[]): string =>
   paragraphs.map((p) => p.trim()).filter((p) => p.length > 0).join(LF + LF) + LF;
 
-export async function storeUpload(deps: UploadDeps, rawName: string, data: Buffer): Promise<StoredUpload> {
+export async function storeUpload(
+  deps: UploadDeps,
+  rawName: string,
+  data: Buffer,
+  dir: string = UPLOADS_DIR,
+): Promise<StoredUpload> {
   const name = sanitizeUploadName(rawName);
   const kind = uploadKind(name);
-  const entries = await deps.fs.listEntries(UPLOADS_DIR);
-  const taken = new Set(entries.map((e) => e.path.slice(UPLOADS_DIR.length + 1)));
+  const entries = await deps.fs.listEntries(dir);
+  const taken = new Set(entries.map((e) => e.path.slice(dir.length + 1)));
   const finalName = uniqueUploadName(name, taken, kind === "document");
-  const path = `${UPLOADS_DIR}/${finalName}`;
+  const path = `${dir}/${finalName}`;
   await deps.fs.writeFileBytes(path, data);
   if (kind !== "document") return { path, kind, bytes: data.length };
 

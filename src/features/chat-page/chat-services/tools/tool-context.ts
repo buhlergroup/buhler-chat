@@ -95,7 +95,7 @@ export interface ToolContext {
     getContainerId: () => string | undefined;
     /**
      * Copilot path: fetched files go to the chat's file workspace
-     * (/workspace/uploads/) instead of the code interpreter container.
+     * (/workspace/sharepoint/) instead of the code interpreter container.
      */
     uploadToWorkspace?: (fileName: string, data: Buffer) => Promise<{ path: string }>;
   };

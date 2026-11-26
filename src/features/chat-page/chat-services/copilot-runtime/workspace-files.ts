@@ -43,6 +43,26 @@ export async function uploadToThreadWorkspace(
   return result;
 }
 
+/**
+ * Folder of SharePoint files the agent fetched (fetch_sharepoint_file). Kept
+ * apart from /workspace/uploads so deleting the chat documents (the user's
+ * uploads) does not delete them; they go with the thread.
+ */
+export const SHAREPOINT_DIR = "/workspace/sharepoint";
+
+/** Stores a fetched SharePoint file under /workspace/sharepoint (same naming and .md rule as uploads). */
+export async function storeSharePointFileInWorkspace(
+  userKey: string,
+  threadId: string,
+  fileName: string,
+  data: Buffer,
+): Promise<StoredUpload> {
+  const { fs } = await threadWorkspace(userKey, threadId);
+  const result = await storeUpload({ fs, extractMarkdown }, fileName, data, SHAREPOINT_DIR);
+  logInfo("copilot-runtime: SharePoint file stored in the workspace", { threadId, kind: result.kind, bytes: result.bytes });
+  return result;
+}
+
 /** The line that tells the model what is in /workspace/uploads (undefined when empty). */
 export async function workspaceUploadsNote(fs: BlobSessionFs): Promise<string | undefined> {
   return uploadsNote(await fs.listEntries(UPLOADS_DIR));
