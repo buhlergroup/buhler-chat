@@ -297,9 +297,12 @@ describe("chunkItems", () => {
 });
 
 // ── Server action surface and input limits (security review) ────────────────
-describe("only DocumentDetails is a server action", () => {
+describe("only the agent panel actions are server actions", () => {
   it("the Graph check helpers are not exported from the use-server module", () => {
-    expect(Object.keys(documentsActions).sort()).toEqual(["DocumentDetails"]);
+    expect(Object.keys(documentsActions).sort()).toEqual([
+      "AgentDocumentDetailsForThread",
+      "DocumentDetails",
+    ]);
   });
 });
 

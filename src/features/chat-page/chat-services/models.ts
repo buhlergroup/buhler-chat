@@ -828,7 +828,7 @@ export function withoutAgentIdLists<T extends object>(thread: T): T {
   if (!THREAD_AGENT_ID_LIST_FIELDS.some((field) => field in thread)) {
     return thread;
   }
-  const copy: Record<string, unknown> = { ...thread };
+  const copy = { ...thread } as Record<string, unknown>;
   for (const field of THREAD_AGENT_ID_LIST_FIELDS) delete copy[field];
   return copy as T;
 }

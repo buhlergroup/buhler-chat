@@ -1072,13 +1072,15 @@ describe("persona payloads for users who cannot edit the agent", () => {
     hasNoIds(byId["p-theirs"]);
   });
 
-  it("CreatePersonaChat still builds the thread from the whole row for a viewer", async () => {
+  it("CreatePersonaChat: a viewer's thread holds the agent id, not its file or sub-agent ids", async () => {
     await setSession(defaultSession);
     seedPersona({ id: "p-pub-chat", userId: "other-hash", isPublished: true, ...withIds });
     const result = await CreatePersonaChat("p-pub-chat");
     expect(result.status).toBe("OK");
     const callArg = vi.mocked(createChatThreadWithServerFiles).mock.calls[0][0] as any;
-    expect(callArg.personaDocumentIds).toEqual(["doc-1"]);
-    expect(callArg.subAgentIds).toEqual(["sub-1"]);
+    // The chat route reads the lists from the agent on every turn.
+    expect(callArg.personaId).toBe("p-pub-chat");
+    hasNoIds(callArg);
+    if (result.status === "OK") hasNoIds(result.response as any);
   });
 });
