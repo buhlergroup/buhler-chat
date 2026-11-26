@@ -27,6 +27,8 @@ const blobs = (): ContentBlobBackend => resolve<ContentBlobBackend>(SERVICE_KEYS
 const delegatingBackend: ContentBlobBackend = {
   head: (key) => blobs().head(key),
   createIfAbsent: (key, data, options) => blobs().createIfAbsent(key, data, options),
+  createIfAbsentFromStream: (key, open, size, options) =>
+    blobs().createIfAbsentFromStream(key, open, size, options),
   read: (key) => blobs().read(key),
   setMetadata: (key, metadata) => blobs().setMetadata(key, metadata),
   delete: (key) => blobs().delete(key),

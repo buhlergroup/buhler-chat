@@ -12,6 +12,7 @@ import { RevalidateCache } from "@/features/common/navigation-helpers";
 import { ServerActionResponse } from "@/features/common/server-action-response";
 import { isValidId } from "@/features/common/odata-filter";
 import { RestError } from "@azure/storage-blob";
+import { logError } from "@/features/common/services/logger";
 import { CHAT_THREAD_ATTRIBUTE, ChatThreadModel } from "./models";
 import {
   ingestChatDocument,
