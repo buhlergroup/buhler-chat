@@ -91,7 +91,7 @@ function pickHardCapTarget(opts: {
   // The cheapest hard-cap target (Foundry DeepSeek) is text-only, so routing an
   // image turn there fails the request. Gating to vision-capable models means
   // an image turn downgrades to the cheapest model that can actually see it
-  // (e.g. Kimi before gpt-5.4-mini). If none qualify we return undefined and
+  // (e.g. gpt-5.6-luna, not DeepSeek or Kimi). If none qualify we return undefined and
   // the caller fails safe (no downgrade) rather than break the turn.
   const candidates = opts.requireVision
     ? hardCapSet.filter((id) => MODEL_CONFIGS[id].capabilities?.includes("vision"))
@@ -231,7 +231,16 @@ export async function resolveModelAndLimits(
     if (!fallbackInfo.fellBack && !explicitPick && thread.intent) {
       const target = getDowngradeTargets().intentByClass[thread.intent];
       const targetConfig = target ? MODEL_CONFIGS[target] : undefined;
-      if (target && targetConfig?.deploymentName && target !== selectedModel) {
+      // An image turn stays on its model when the intent target has no vision
+      // (e.g. Kimi): that deployment rejects the request.
+      const turnHasImages = (payload.multimodalImages?.length ?? 0) > 0;
+      const targetSeesImages = targetConfig?.capabilities?.includes("vision") ?? false;
+      if (
+        target &&
+        targetConfig?.deploymentName &&
+        target !== selectedModel &&
+        (!turnHasImages || targetSeesImages)
+      ) {
         fallbackInfo = {
           fellBack: true,
           reason: "intent",

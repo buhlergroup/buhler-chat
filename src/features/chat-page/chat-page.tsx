@@ -29,7 +29,13 @@ import { SoftDeleteChatDocumentsForCurrentUser } from "./chat-services/chat-thre
 import { RevalidateCache } from "@/features/common/navigation-helpers";
 import { InternetSearch } from "@/features/ui/chat/chat-input-area/internet-search";
 import { ReasoningEffortSelector } from "./chat-input/reasoning-effort-selector";
-import { MODEL_CONFIGS, DEFAULT_MODEL, getModelAvailability } from "./chat-services/models";
+import {
+  MODEL_CONFIGS,
+  DEFAULT_MODEL,
+  getModelAvailability,
+  imageInputNotSupportedMessage,
+  modelAcceptsImages,
+} from "./chat-services/models";
 import { ModelOptionContent, ModelOptionName } from "./chat-header/model-option";
 import {
   DefaultModelReminder,
@@ -509,6 +515,10 @@ const ChatPageInner = (props: ChatPageProps) => {
     });
 
   const attachImageFromFile = async (file: File) => {
+    if (!modelAcceptsImages(effectiveModel)) {
+      showError(imageInputNotSupportedMessage(effectiveModel));
+      return;
+    }
     const dataUrl = await fileToDataUrl(file);
     InputImageStore.AddImage(dataUrl);
   };
@@ -600,6 +610,13 @@ const ChatPageInner = (props: ChatPageProps) => {
     e.preventDefault();
     const text = input.trim();
     if (!text || isStreaming) return;
+
+    // Images attached before the user switched to a text-only model. Keep the
+    // draft and the images, so the user can pick another model or remove them.
+    if (base64Images.some(Boolean) && !modelAcceptsImages(effectiveModel)) {
+      showError(imageInputNotSupportedMessage(effectiveModel));
+      return;
+    }
 
     // Build FileUIPart[] from base64 images stored in InputImageStore.
     const fileParts: FileUIPart[] = base64Images
