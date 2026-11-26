@@ -112,6 +112,9 @@ export function getCopilotClient(): Promise<CopilotClient> {
         capabilities: { binary: true },
       },
       observability: { logLevel: "error" },
+      // BYOK only: never look for a GitHub sign-in (stored OAuth tokens, gh CLI,
+      // GH_TOKEN). Without this the runtime called api.github.com on Linux.
+      github: { useLoggedInUser: false },
     });
     const started = Date.now();
     await client.start();
@@ -337,7 +340,7 @@ async function openSession(input: CopilotTurnInput): Promise<{ live: LiveSession
   const config = {
     model: selectionId,
     clientName: "chat",
-    github: { capi: { enabled: false } },
+    github: { capi: { enabled: false }, telemetryEnabled: false },
     inference: {
       ...buildCopilotInference(),
       ...(input.reasoningEffort ? { reasoningEffort: input.reasoningEffort } : {}),
