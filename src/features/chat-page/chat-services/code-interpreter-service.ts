@@ -13,6 +13,8 @@ import {
   contentStore,
   contentStoreTakesBuffer,
   openAiContentFiles,
+  storedFileName,
+  type OpenAiFileUse,
 } from "@/features/common/services/content-store";
 
 /**
@@ -81,13 +83,18 @@ export async function UploadFileForCodeInterpreter(
  * `blob` (an upload) is streamed, never copied into one buffer. `bytes`
  * larger than CONTENT_STORE_MAX_BUFFERED_BYTES skip the content store and
  * are uploaded as before (no `sha256` then).
+ *
+ * `use` "agent" is for the files of an agent (scope = the agent owner): they
+ * get their own OpenAI file, never the one of the owner's upload of the
+ * same bytes. The name is capped (storedFileName) on every path.
  */
 export async function UploadFileForCodeInterpreterOnce(
   scope: string,
-  file: { name: string; contentType?: string; bytes?: Buffer; blob?: Blob }
+  input: { name: string; contentType?: string; bytes?: Buffer; blob?: Blob; use?: OpenAiFileUse }
 ): Promise<
   ServerActionResponse<{ id: string; name: string; sha256?: string; uploaded: boolean }>
 > {
+  const file = { ...input, name: storedFileName(input.name) };
   try {
     const fileExtension = file.name.split(".").pop()?.toUpperCase();
     if (!fileExtension || !CODE_INTERPRETER_SUPPORTED_EXTENSIONS.includes(fileExtension)) {
@@ -121,8 +128,17 @@ export async function UploadFileForCodeInterpreterOnce(
       const opened = await store.openAiFile(scope, stored.sha256, {
         name: file.name,
         contentType: file.contentType,
+        use: file.use,
         ...(file.blob ? { blob: file.blob } : { bytes: file.bytes }),
       });
+      // Uploaded, but the id could not be recorded in the store (metadata
+      // write failed): the file is used as it is. The fallback below runs
+      // only when nothing was uploaded, so no orphan is left behind.
+      if (!opened.recorded) {
+        logInfo("Code Interpreter: file id not recorded in the content store", {
+          fileId: opened.fileId,
+        });
+      }
       fileId = opened.fileId;
       uploaded = opened.uploaded;
       sha256 = stored.sha256;

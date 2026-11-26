@@ -148,5 +148,65 @@ export function createAzureContentBlobBackend(): ContentBlobBackend {
         };
       }
     },
+
+    async listPage(prefix, { continuationToken, maxPageSize }) {
+      const client = await container();
+      const next = await client
+        .listBlobsFlat({ prefix })
+        .byPage({ continuationToken: continuationToken || undefined, maxPageSize })
+        .next();
+      const page = next.done ? undefined : next.value;
+      return {
+        items: (page?.segment.blobItems ?? []).map((item) => ({
+          key: item.name,
+          lastModified: item.properties.lastModified ?? new Date(0),
+        })),
+        continuationToken: page?.continuationToken || undefined,
+      };
+    },
+
+    async acquireLock(key, ttlSeconds) {
+      const client = await blob(key);
+      try {
+        await client.getProperties();
+      } catch (error) {
+        if (statusOf(error) !== 404) throw error;
+        try {
+          await client.uploadData(Buffer.alloc(0), { conditions: { ifNoneMatch: "*" } });
+        } catch (createError) {
+          const status = statusOf(createError);
+          // Another instance created it (409) or holds it already (412).
+          if (status !== 409 && status !== 412) throw createError;
+        }
+      }
+      const lease = client.getBlobLeaseClient();
+      try {
+        await lease.acquireLease(ttlSeconds);
+      } catch (error) {
+        // 409 LeaseAlreadyPresent: another instance has the lock.
+        if (statusOf(error) === 409) return undefined;
+        throw error;
+      }
+      const conditions = { leaseId: lease.leaseId };
+      let metadata: Record<string, string> = {};
+      try {
+        metadata = lowercaseKeys((await client.getProperties({ conditions })).metadata);
+      } catch (error) {
+        await lease.releaseLease().catch(() => undefined);
+        throw error;
+      }
+      return {
+        metadata,
+        renew: async () => {
+          await lease.renewLease();
+        },
+        setMetadata: async (next) => {
+          await client.setMetadata(next, { conditions });
+        },
+        release: async () => {
+          await lease.releaseLease().catch(() => undefined);
+        },
+      };
+    },
   };
 }

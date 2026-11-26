@@ -19,7 +19,7 @@ import "server-only";
 
 import { HistoryContainer } from "../cosmos";
 import { contentStore } from ".";
-import type { CleanupResult } from "./content-store";
+import type { CleanupOptions, CleanupResult } from "./content-store";
 
 /** True when a row in the scope's partition points to the content. */
 export async function isContentReferenced(scope: string, sha256: string): Promise<boolean> {
@@ -41,11 +41,11 @@ export async function isContentReferenced(scope: string, sha256: string): Promis
 
 /**
  * Deletes content that no row points to and that is older than the grace
- * period (default 7 days). Meant for a scheduled job; nothing calls it on a
- * request path.
+ * period (default 7 days). The scheduled job (cleanup-job.ts) calls it with
+ * bounds per run; nothing calls it on a request path.
  */
 export async function cleanupUnreferencedContent(
-  options: { graceMs?: number; scope?: string; dryRun?: boolean } = {}
+  options: Omit<CleanupOptions, "isReferenced"> = {}
 ): Promise<CleanupResult> {
   return contentStore().cleanup({ ...options, isReferenced: isContentReferenced });
 }

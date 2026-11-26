@@ -508,11 +508,14 @@ export const CreatePersonaChat = async (
             
             // Upload to OpenAI for Code Interpreter once per content: the
             // agent owner's scope (the row's partition) caches the file id,
-            // so the next chat with the same file version reuses it.
+            // so the next chat with the same file version reuses it. As an
+            // agent file it never shares the OpenAI file of an upload of the
+            // owner, which the owner can delete.
             const uploadResult = await UploadFileForCodeInterpreterOnce(doc.userId, {
               name,
               contentType,
               bytes: buffer,
+              use: "agent",
             });
             if (
               uploadResult.status === "OK" &&
