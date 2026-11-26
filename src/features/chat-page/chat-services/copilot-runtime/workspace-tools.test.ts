@@ -1,4 +1,5 @@
 import { describe, it, expect, beforeEach } from "vitest";
+import RE2 from "re2";
 
 import builtin from "./builtin-search-tools.json";
 import { BlobSessionFs } from "./blob-session-fs";
@@ -107,7 +108,7 @@ describe("rg / grep output (ripgrep format)", () => {
     const res = await runRipgrep(ws.fs, { pattern: "(" });
     expect(res.resultType).toBe("failure");
     expect(text(res)).toMatch(/^Error: rg: regex parse error: .*\nNote: patterns run on the RE2 engine/s);
-    expect("error" in (buildSearchRegex("(?x) a b", {}) as object)).toBe(true);
+    expect("error" in (buildSearchRegex("(?x) a b", {}, RE2) as object)).toBe(true);
   });
 
   it("head_limit: files in files mode, matches per file in content mode", async () => {
@@ -322,10 +323,10 @@ describe("namespace jail", () => {
   });
 
   it("globToRegExp basics", () => {
-    expect(globToRegExp("**/*.{md,txt}").test("x/y/z.md")).toBe(true);
-    expect(globToRegExp("file[12].csv").test("file3.csv")).toBe(false);
-    expect(globToRegExp("file[!12].csv").test("file3.csv")).toBe(true);
-    expect(globToRegExp("a}b(c).txt").test("a}b(c).txt")).toBe(true);
+    expect(globToRegExp("**/*.{md,txt}", RE2).test("x/y/z.md")).toBe(true);
+    expect(globToRegExp("file[12].csv", RE2).test("file3.csv")).toBe(false);
+    expect(globToRegExp("file[!12].csv", RE2).test("file3.csv")).toBe(true);
+    expect(globToRegExp("a}b(c).txt", RE2).test("a}b(c).txt")).toBe(true);
   });
 });
 
@@ -357,7 +358,7 @@ describe("model-controlled patterns cannot block the server (ReDoS)", () => {
     // Same in multiline mode (one global pass over the whole file).
     const multi = await runRipgrep(fs, { pattern: EVIL, paths: "/workspace/evil/f0.txt", multiline: true });
     expect(text(multi)).toBe("No matches found.");
-    expect(buildSearchRegex("(x+x+)+y", {})).not.toHaveProperty("error");
+    expect(buildSearchRegex("(x+x+)+y", {}, RE2)).not.toHaveProperty("error");
   });
 
   it("look-around and backreferences fail with the engine note", async () => {
@@ -368,19 +369,19 @@ describe("model-controlled patterns cannot block the server (ReDoS)", () => {
       expect(text(res), pattern).toMatch(/regex parse error: .*\nNote: patterns run on the RE2 engine.*look-around, backreferences/s);
     }
     // An escaped backslash before a digit is a literal, not a backreference.
-    expect(buildSearchRegex("\\\\1", {})).not.toHaveProperty("error");
+    expect(buildSearchRegex("\\\\1", {}, RE2)).not.toHaveProperty("error");
   });
 
   it("inline flags work anywhere (as in ripgrep), (?x) does not", async () => {
     const { fs } = await workspace({ "/workspace/a.txt": "alpha ALPHA\n" });
     expect(text(await runRipgrep(fs, { pattern: "alpha (?i)alpha", output_mode: "content" }))).toBe("./a.txt:alpha ALPHA");
     expect(text(await runRipgrep(fs, { pattern: "(?i:ALPHA) ALPHA", output_mode: "count" }))).toBe("./a.txt:1");
-    expect(buildSearchRegex("(?x)a b", {})).toHaveProperty("error");
+    expect(buildSearchRegex("(?x)a b", {}, RE2)).toHaveProperty("error");
   });
 
   it("rejects patterns over the length cap", async () => {
     const { fs } = await workspace({ "/workspace/a.txt": "a\n" });
-    expect(buildSearchRegex("a".repeat(MAX_PATTERN_CHARS), {})).not.toHaveProperty("error");
+    expect(buildSearchRegex("a".repeat(MAX_PATTERN_CHARS), {}, RE2)).not.toHaveProperty("error");
     const res = await runRipgrep(fs, { pattern: "a".repeat(MAX_PATTERN_CHARS + 1) });
     expect(res.resultType).toBe("failure");
     expect(text(res)).toContain(`longer than ${MAX_PATTERN_CHARS} characters`);
@@ -397,7 +398,7 @@ describe("model-controlled patterns cannot block the server (ReDoS)", () => {
       "a".repeat(GLOB_LIMITS.maxChars + 1),
     ];
     for (const glob of tooMany) {
-      expect(() => globToRegExp(glob), glob.slice(0, 40)).toThrow(GlobPatternError);
+      expect(() => globToRegExp(glob, RE2), glob.slice(0, 40)).toThrow(GlobPatternError);
       const g = await runGlob(fs, { pattern: glob });
       expect(g.resultType).toBe("failure");
       expect(text(g)).toMatch(/^Error: glob: /);

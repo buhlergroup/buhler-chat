@@ -45,10 +45,16 @@
  * Also bounded: glob size (GLOB_LIMITS) and the wall time of one search
  * (SEARCH_TIME_BUDGET_MS, results so far plus a note), and the search yields
  * to the event loop between files and every MB within a file.
+ *
+ * `re2` is a native addon and loads only when a search runs (loadRe2). When
+ * it cannot load (for example a build for another Node.js version), only the
+ * search calls fail, with SEARCH_UNAVAILABLE_TEXT; the module itself, the
+ * turn and the other tools are not affected.
  */
 import type { Readable } from "node:stream";
-import RE2 from "re2";
+import type RE2 from "re2";
 import type { Tool as CopilotTool, ToolResultObject } from "@microsoft/copilot-sdk";
+import { logError } from "@/features/common/services/logger";
 import builtin from "./builtin-search-tools.json";
 import { spillLargeResult } from "./tool-adapter";
 import { normalizeSessionPath, WORKSPACE_ROOT } from "./session-path";
@@ -100,6 +106,53 @@ export const GLOB_LIMITS = {
 /** Wall-time budget of one search call; after it the results so far are returned with a note. */
 export const SEARCH_TIME_BUDGET_MS = 20_000;
 
+// ── regex engine (loaded on first use) ─────────────────────────────────────
+
+/** The RE2 constructor of the `re2` package. */
+export type Re2Constructor = typeof RE2;
+
+/** What the model and the chat get when the regex engine cannot load on this server. */
+export const SEARCH_UNAVAILABLE_TEXT = "Error: search is not available on this server right now.";
+/** After a failed load, the next search tries again no earlier than this. */
+export const RE2_RETRY_MS = 60_000;
+
+let re2Engine: Re2Constructor | undefined;
+let re2Loading: Promise<Re2Constructor | undefined> | undefined;
+let re2FailedAt: number | undefined;
+let re2FailureLogged = false;
+
+/**
+ * Loads the `re2` native addon on first use and keeps the constructor.
+ * Resolves undefined when it cannot load: logged once, tried again after
+ * RE2_RETRY_MS. Never rejects.
+ */
+export function loadRe2(): Promise<Re2Constructor | undefined> {
+  if (re2Engine) return Promise.resolve(re2Engine);
+  if (re2FailedAt !== undefined && Date.now() - re2FailedAt < RE2_RETRY_MS) return Promise.resolve(undefined);
+  re2Loading ??= import("re2")
+    .then((mod) => {
+      const ctor = ((mod as { default?: Re2Constructor }).default ?? mod) as Re2Constructor;
+      if (typeof ctor !== "function") throw new Error("the re2 module has no constructor");
+      re2Engine = ctor;
+      re2FailedAt = undefined;
+      return ctor;
+    })
+    .catch((err: unknown) => {
+      re2FailedAt = Date.now();
+      if (!re2FailureLogged) {
+        re2FailureLogged = true;
+        logError("copilot-runtime: regex engine re2 could not load; workspace search is off", {
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
+      return undefined;
+    })
+    .finally(() => {
+      re2Loading = undefined;
+    });
+  return re2Loading;
+}
+
 // ── glob matching ──────────────────────────────────────────────────────────
 
 /** A glob over the limits in GLOB_LIMITS, or one the engine cannot compile. */
@@ -145,7 +198,7 @@ function checkGlobLimits(glob: string): void {
  * Converts a glob (`**`, `*`, `?`, `{a,b}`, `[abc]`, `[!abc]`) to an anchored
  * RE2 regex. Throws GlobPatternError over GLOB_LIMITS or when it does not compile.
  */
-export function globToRegExp(glob: string): RegExp {
+export function globToRegExp(glob: string, RE2: Re2Constructor): RegExp {
   checkGlobLimits(glob);
   let re = "";
   let inBraces = 0;
@@ -186,9 +239,9 @@ export function globToRegExp(glob: string): RegExp {
 }
 
 /** Matcher with ripgrep semantics: a pattern without "/" matches the file name at any depth. */
-export function globMatcher(pattern: string): (relPath: string) => boolean {
+export function globMatcher(pattern: string, RE2: Re2Constructor): (relPath: string) => boolean {
   const p = pattern.replace(/\\/g, "/").replace(/^\.\//, "");
-  const re = globToRegExp(p);
+  const re = globToRegExp(p, RE2);
   if (!p.includes("/")) return (rel) => re.test(rel.split("/").pop() ?? rel);
   return (rel) => re.test(rel);
 }
@@ -272,6 +325,7 @@ function hasBackreference(pattern: string): boolean {
 export function buildSearchRegex(
   pattern: string,
   opts: { ignoreCase?: boolean; multiline?: boolean },
+  RE2: Re2Constructor,
 ): RegExp | { error: string } {
   if (pattern.length > MAX_PATTERN_CHARS) {
     return regexError(`the pattern is longer than ${MAX_PATTERN_CHARS} characters.`);
@@ -505,15 +559,17 @@ export async function runRipgrep(
   options: { timeBudgetMs?: number; maxScanBytes?: number } = {},
 ): Promise<ToolResultObject> {
   if (!args.pattern) return failure("Error: pattern is required");
+  const RE2 = await loadRe2();
+  if (!RE2) return failure(SEARCH_UNAVAILABLE_TEXT);
   const mode = args.output_mode ?? "files_with_matches";
-  const re = buildSearchRegex(args.pattern, { ignoreCase: args["-i"], multiline: args.multiline });
+  const re = buildSearchRegex(args.pattern, { ignoreCase: args["-i"], multiline: args.multiline }, RE2);
   if ("error" in re) return failure(re.error);
   const type = typeMatcher(args.type);
   if (type === "unknown") return failure(`Error: rg: unrecognized file type: ${args.type}`);
   const single = new RE2(re, re.flags.replace("g", ""));
   let globMatch: ((rel: string) => boolean) | undefined;
   try {
-    globMatch = args.glob ? globMatcher(args.glob) : undefined;
+    globMatch = args.glob ? globMatcher(args.glob, RE2) : undefined;
   } catch (err) {
     return failure(`Error: rg: ${(err as Error).message}`);
   }
@@ -699,6 +755,8 @@ export async function runRipgrep(
 
 export async function runGlob(fs: WorkspaceFiles, args: { pattern?: string; paths?: unknown }): Promise<ToolResultObject> {
   if (!args.pattern) return failure("Error: pattern is required");
+  const RE2 = await loadRe2();
+  if (!RE2) return failure(SEARCH_UNAVAILABLE_TEXT);
   let roots: SearchRoot[];
   try {
     roots = searchRoots(args.paths);
@@ -707,7 +765,7 @@ export async function runGlob(fs: WorkspaceFiles, args: { pattern?: string; path
   }
   let match: (rel: string) => boolean;
   try {
-    match = globMatcher(args.pattern);
+    match = globMatcher(args.pattern, RE2);
   } catch (err) {
     return failure(`Error: glob: ${(err as Error).message}`);
   }
