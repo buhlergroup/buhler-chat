@@ -1,6 +1,7 @@
 import "server-only";
 
 import os from "node:os";
+import { randomUUID } from "node:crypto";
 import path from "node:path";
 import {
   CopilotClient,
@@ -15,9 +16,11 @@ import type { Tool as AiTool } from "@ai-sdk/provider-utils";
 import { logError, logInfo, logWarn } from "@/features/common/services/logger";
 import type { ChatModel } from "../models";
 import { BlobSessionFs, type BlobStore, type SessionFsOpListener } from "./blob-session-fs";
-import { getAgentWorkspaceStore } from "./azure-blob-store";
+import { getAgentWorkspaceLeases, getAgentWorkspaceStore } from "./azure-blob-store";
+import { acquireThreadLease, type LeaseBackend, type ThreadLeaseOptions } from "./thread-lease";
 import { CopilotEventMapper, type MappedTurnResult, type TurnUsage } from "./event-mapper";
 import { buildCopilotInference, copilotModelSelectionId } from "./providers";
+import { resolveCopilotRuntimePath } from "./runtime-path";
 import { buildNamespace, normalizeSessionPath, SESSION_STATE_ROOT, WORKSPACE_ROOT } from "./session-path";
 import { WORKSPACE_TOOL_NAMES, workspaceTools } from "./workspace-tools";
 import { buildCopilotSystemMessage } from "./system-message";
@@ -38,6 +41,10 @@ export type HistoryImportConversationEvent = Parameters<
   CopilotSession["rpc"]["history"]["importConversation"]
 >[0]["events"][number];
 
+/** Share of the prompt limit at which the runtime starts compacting in the background. */
+export const COMPACTION_THRESHOLD = 0.9;
+/** Share at which the runtime blocks the turn until compaction is done. */
+export const COMPACTION_BLOCK_THRESHOLD = 0.97;
 const SESSION_IDLE_EVICT_MS = 20 * 60 * 1000;
 const TURN_TIMEOUT_MS = 590 * 1000;
 const ABORT_GRACE_MS = 10 * 1000;
@@ -58,6 +65,8 @@ interface LiveSession {
 }
 
 interface RuntimeState {
+  /** Id of this server process, recorded on the thread lease blob. */
+  instanceId: string;
   client?: Promise<CopilotClient>;
   sessions: Map<string, LiveSession>;
   sweeper?: ReturnType<typeof setInterval>;
@@ -66,7 +75,7 @@ interface RuntimeState {
 // One client (one runtime child process) per server process. Kept on
 // globalThis so dev-mode module reloads do not spawn more runtimes.
 const g = globalThis as typeof globalThis & { __copilotRuntime?: RuntimeState };
-const state: RuntimeState = (g.__copilotRuntime ??= { sessions: new Map() });
+const state: RuntimeState = (g.__copilotRuntime ??= { instanceId: randomUUID(), sessions: new Map() });
 
 /** Environment of the runtime child process: no app secrets, telemetry off. */
 function runtimeEnv(): Record<string, string> {
@@ -89,6 +98,7 @@ export function getCopilotClient(): Promise<CopilotClient> {
     const client = new CopilotClient({
       mode: "empty",
       runtime: RuntimeConnection.forSpawnedStdio({
+        path: resolveCopilotRuntimePath(),
         env: runtimeEnv(),
         // Runtime config dir. Session state does NOT go here: sessionFs routes it to Blob.
         baseDirectory: process.env.COPILOT_RUNTIME_HOME || path.join(os.tmpdir(), "copilot-runtime-home"),
@@ -275,6 +285,9 @@ export interface CopilotTurnInput {
   /** Tests / smoke: another store, and a view of every file operation. */
   store?: BlobStore;
   onFsOp?: SessionFsOpListener;
+  /** Tests / smoke: another lease backend, other lease timings. */
+  leases?: LeaseBackend;
+  leaseOptions?: Partial<Omit<ThreadLeaseOptions, "holder" | "onLost">>;
 }
 
 export interface CopilotTurnResult extends MappedTurnResult {
@@ -331,7 +344,14 @@ async function openSession(input: CopilotTurnInput): Promise<{ live: LiveSession
     hooks: { handlers: { onPreToolUse: preToolGate(appToolNames) } },
     state: {
       createSessionFsProvider: () => fs,
-      infiniteSessions: { enabled: true },
+      // Compact only near the model's real input limit (maxPromptTokens in
+      // providers.ts): compaction costs a model call and breaks the cache
+      // prefix, and it can drop details.
+      infiniteSessions: {
+        enabled: true,
+        backgroundCompactionThreshold: COMPACTION_THRESHOLD,
+        bufferExhaustionThreshold: COMPACTION_BLOCK_THRESHOLD,
+      },
       enableCrossSessionStore: false,
       skipEmbeddingRetrieval: true,
     },
@@ -385,6 +405,52 @@ async function openSession(input: CopilotTurnInput): Promise<{ live: LiveSession
  * once; `result` settles when the turn is over (finished, failed or aborted).
  */
 export async function runCopilotTurn(input: CopilotTurnInput): Promise<CopilotTurnHandle> {
+  // One session per thread across instances: hold the thread's Blob lease
+  // for the whole turn (thread-lease.ts).
+  const namespace = buildNamespace(input.userKey, input.threadId);
+  const leases = input.leases ?? (await getAgentWorkspaceLeases());
+  const leaseLost = new AbortController();
+  const lease = await acquireThreadLease(leases, `${namespace}/lease`, {
+    ...input.leaseOptions,
+    holder: state.instanceId,
+    onLost: (err) => {
+      logWarn("copilot-runtime: thread lease lost, stopping the turn", {
+        threadId: input.threadId,
+        error: err instanceof Error ? err.message : String(err),
+      });
+      leaseLost.abort();
+    },
+  });
+  try {
+    const sessionId = `thread-${input.threadId}`;
+    const live = state.sessions.get(sessionId);
+    if (live && lease.previousHolder && lease.previousHolder !== state.instanceId) {
+      // Another instance ran this thread since: our in-memory session is stale.
+      state.sessions.delete(sessionId);
+      await live.session.disconnect().catch(() => undefined);
+      logInfo("copilot-runtime: dropped a stale live session", { threadId: input.threadId });
+    }
+    const handle = await runTurnInSession({
+      ...input,
+      abortSignal: AbortSignal.any([input.abortSignal, leaseLost.signal]),
+    });
+    const result = handle.result.then(async (r) => {
+      await lease.release().catch((err) =>
+        logWarn("copilot-runtime: lease release failed", {
+          threadId: input.threadId,
+          error: err instanceof Error ? err.message : String(err),
+        }),
+      );
+      return r;
+    });
+    return { stream: handle.stream, result };
+  } catch (err) {
+    await lease.release().catch(() => undefined);
+    throw err;
+  }
+}
+
+async function runTurnInSession(input: CopilotTurnInput): Promise<CopilotTurnHandle> {
   const { live, mode, seeded } = await openSession(input);
   if (live.busy) throw new Error("A reply is still running in this chat. Wait for it or stop it first.");
   live.busy = true;

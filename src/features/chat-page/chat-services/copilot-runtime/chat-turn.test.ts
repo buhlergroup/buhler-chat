@@ -18,6 +18,7 @@ const upsert = vi.fn(async (_row: unknown) => undefined);
 vi.mock("../chat-message-service", () => ({ UpsertChatMessage: (row: unknown) => upsert(row) }));
 
 import { runCopilotChatTurn } from "./chat-turn";
+import { ThreadBusyError } from "./thread-lease";
 import { abortPublisher, hasActivePublisher, __resetStreamPublishers } from "../chat-api/stream-publisher";
 
 const modelConfig = {
@@ -153,5 +154,20 @@ describe("runCopilotChatTurn", () => {
       expect.objectContaining({ id: "sentinel-turn-1", role: "assistant", content: "friendly: runtime unavailable" }),
     );
     expect(hasActivePublisher("thread-fail")).toBe(false);
+  });
+
+  it("a turn on a thread that another instance or tab is running answers 409", async () => {
+    runCopilotTurn.mockRejectedValue(new ThreadBusyError());
+    const res = await runCopilotChatTurn({
+      ctx: ctx("thread-busy"),
+      payload: { message: "hello" } as never,
+      modelConfig,
+      effectiveModel: "gpt-5.5" as never,
+      systemMessage: "sys",
+      toolset: {},
+    });
+    expect(res.status).toBe(409);
+    expect(await res.text()).toMatch(/still running/);
+    expect(hasActivePublisher("thread-busy")).toBe(false);
   });
 });

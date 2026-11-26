@@ -84,6 +84,12 @@ export function copilotModelSelectionId(modelId: ChatModel): string {
   return `${provider}/${config.id}`;
 }
 
+/** Input budget of a model: context window minus the output reserve. */
+export function copilotPromptLimit(config: { contextWindow: number; maxOutputTokens?: number }): number {
+  const limit = config.contextWindow - (config.maxOutputTokens ?? 0);
+  return limit > 0 ? limit : config.contextWindow;
+}
+
 /** Providers and models for a session. Every deployed model is selectable, so a thread can switch models. */
 export function buildCopilotInference(): {
   providers: NamedProviderConfig[];
@@ -95,7 +101,7 @@ export function buildCopilotInference(): {
   const names = new Set(providers.map((p) => p.name));
   const models: ProviderModelConfig[] = [];
   // Test knob: a small prompt limit makes the runtime compact early.
-  const maxPromptTokens = Number(process.env.COPILOT_MAX_PROMPT_TOKENS) || undefined;
+  const promptLimitOverride = Number(process.env.COPILOT_MAX_PROMPT_TOKENS) || undefined;
   for (const config of Object.values(MODEL_CONFIGS)) {
     const provider = copilotProviderFor(config);
     if (!provider || !names.has(provider) || !config.deploymentName) continue;
@@ -105,7 +111,10 @@ export function buildCopilotInference(): {
       wireModel: config.deploymentName,
       name: config.name,
       maxContextWindowTokens: config.contextWindow,
-      ...(maxPromptTokens ? { maxPromptTokens } : {}),
+      // The runtime compacts relative to this limit (thresholds in
+      // copilot-session.ts), so it is the model's real input budget: the
+      // context window minus the output reserve, from MODEL_CONFIGS.
+      maxPromptTokens: promptLimitOverride ?? copilotPromptLimit(config),
       ...(config.maxOutputTokens ? { maxOutputTokens: config.maxOutputTokens } : {}),
       capabilities: {
         supports: {

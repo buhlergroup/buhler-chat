@@ -110,6 +110,9 @@ async function main() {
   const listener = (ns: string) => (op: string, p: string) => fsOps.push({ ns, op, path: p });
 
   const summary: Json[] = [];
+  // SMOKE_ONLY=A,B,... runs only those sections (A B C D F L E).
+  const only = process.env.SMOKE_ONLY?.split(",").map((x) => x.trim().toUpperCase());
+  const section = (name: string) => !only || only.includes(name);
 
   async function turn(label: string, args: {
     threadId: string;
@@ -202,6 +205,7 @@ async function main() {
   const threadB = `smoke-b-${runId}`;
 
   // ── Thread A: GPT, tools, files, restart, model switch ───────────────────
+  if (section("A")) {
   await turn("A1 time + create file", {
     threadId: threadA,
     user: "alice",
@@ -242,7 +246,10 @@ tools offered to ${gptModel}: ${(await session.liveSessionToolNames(threadA))?.j
     prompt: "Without using any tool: what time did get_current_time return in the first turn? One line.",
   });
 
+  }
+
   // ── Thread B: Claude, another user, isolation + cache ────────────────────
+  if (section("B")) {
   await turn("B1 create own file", {
     threadId: threadB,
     user: "bob",
@@ -276,7 +283,10 @@ tools offered to ${claudeModel}: ${(await session.liveSessionToolNames(threadB))
     prompt: "Without tools: summarise this chat in one sentence.",
   });
 
+  }
+
   // ── Abort ────────────────────────────────────────────────────────────────
+  if (section("C")) {
   await turn("C1 abort after 2.5 s", {
     threadId: `smoke-c-${runId}`,
     user: "carol",
@@ -291,7 +301,10 @@ tools offered to ${claudeModel}: ${(await session.liveSessionToolNames(threadB))
     prompt: "Reply with the single word: ready",
   });
 
+  }
+
   // ── Seeding: a thread with existing (AI SDK path) history ───────────────
+  if (section("D")) {
   await turn("D1 seeded from history", {
     threadId: `smoke-d-${runId}`,
     user: "dave",
@@ -303,37 +316,68 @@ tools offered to ${claudeModel}: ${(await session.liveSessionToolNames(threadB))
     ],
   });
 
-  // ── Compaction: a small prompt limit makes the runtime compact ──────────
-  {
-    process.env.COPILOT_MAX_PROMPT_TOKENS = "6000";
+  }
+
+  // ── Compaction: a fact from turn 1 must survive one compaction ──────────
+  // COPILOT_MAX_PROMPT_TOKENS stands in for a small model so that one
+  // compaction happens after a few turns; the thresholds are the production
+  // ones (copilot-session.ts).
+  if (section("F")) {
+    process.env.COPILOT_MAX_PROMPT_TOKENS = process.env.SMOKE_COMPACTION_LIMIT ?? "12000";
     const threadF = `smoke-f-${runId}`;
     const words = ["pump", "valve", "sensor", "motor", "belt", "silo", "mixer", "dryer", "sieve", "scale"];
     const filler = (n: number) =>
       Array.from({ length: 900 }, (_, i) => words[(i * 7 + n) % words.length]).join(" ");
-    for (let n = 1; n <= 5; n++) {
-      await turn(`F${n} compaction load`, {
-        threadId: threadF,
-        user: "frank",
-        model: gptModel,
-        prompt:
-          (n === 1 ? "Remember the code word: KINGFISHER-58. " : "") +
-          `Note ${n}: ${filler(n)}
-Reply only with: ok ${n}`,
-      });
-    }
-    await turn("F6 recall after compaction", {
+    await turn("F0 fact", {
       threadId: threadF,
       user: "frank",
       model: gptModel,
-      prompt: "Without tools: what was the code word from the first note?",
+      prompt: "Remember this fact for later: the project code word is KINGFISHER-58. Reply only: noted",
+    });
+    for (let n = 1; n <= 12 && (session.liveSessionCompactions(threadF)?.length ?? 0) === 0; n++) {
+      await turn(`F${n} load`, {
+        threadId: threadF,
+        user: "frank",
+        model: gptModel,
+        prompt: `Inspection log ${n}: ${filler(n)}
+Reply only with: ok ${n}`,
+      });
+    }
+    await turn("F recall after compaction", {
+      threadId: threadF,
+      user: "frank",
+      model: gptModel,
+      prompt: "Without tools: what is the project code word?",
     });
     console.log(`
 compactions in thread F: ${JSON.stringify(session.liveSessionCompactions(threadF))}`);
     delete process.env.COPILOT_MAX_PROMPT_TOKENS;
   }
 
+  // ── Lease: a second concurrent turn on the same thread ──────────────────
+  if (section("L")) {
+    const threadL = `smoke-l-${runId}`;
+    const first = turn("L1 long turn", {
+      threadId: threadL,
+      user: "lena",
+      model: gptModel,
+      prompt: "Write 700 words about grain silos.",
+    });
+    await new Promise((r) => setTimeout(r, 1500));
+    const t0 = Date.now();
+    try {
+      await turn("L2 concurrent turn", { threadId: threadL, user: "lena", model: gptModel, prompt: "Say hi" });
+      console.log("L2 unexpectedly ran");
+    } catch (err) {
+      console.log(`
+=== L2 concurrent turn refused after ${Date.now() - t0} ms: ${(err as Error).name}: ${(err as Error).message}`);
+    }
+    await first;
+    await turn("L3 after release", { threadId: threadL, user: "lena", model: gptModel, prompt: "Reply with: free" });
+  }
+
   // ── First call: Copilot path vs AI SDK path, system message modes ──────
-  if (process.env.SMOKE_SKIP_BASELINE !== "true") {
+  if (section("E") && process.env.SMOKE_SKIP_BASELINE !== "true") {
     const { streamText } = await import("ai");
     const { resolveProvider } = await import("@/features/chat-page/chat-services/models/provider-seam");
     for (const model of [gptModel, claudeModel]) {

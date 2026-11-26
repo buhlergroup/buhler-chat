@@ -15,6 +15,7 @@ import { computeRequestUsage, type ChatMessageMetadata } from "../chat-api/usage
 import { startPublisher, unregisterPublisher } from "../chat-api/stream-publisher";
 import { UpdateChatTitle } from "../chat-thread-service";
 import { runCopilotTurn } from "./copilot-session";
+import { ThreadBusyError } from "./thread-lease";
 
 export interface CopilotChatTurnArgs {
   ctx: ThreadContext;
@@ -85,9 +86,12 @@ export async function runCopilotChatTurn(args: CopilotChatTurnArgs): Promise<Res
   } catch (err) {
     unregisterPublisher(threadId);
     const message = err instanceof Error ? err.message : String(err);
-    logError("/api/chat copilot: turn did not start", { threadId, turnId: ctx.turnId, message });
-    await writeSentinel(friendlyErrorMessage({ message, name: "CopilotRuntimeError" })).catch(() => undefined);
-    return new Response(message, { status: 500 });
+    const busy = err instanceof ThreadBusyError;
+    logError("/api/chat copilot: turn did not start", { threadId, turnId: ctx.turnId, message, busy });
+    await writeSentinel(busy ? message : friendlyErrorMessage({ message, name: "CopilotRuntimeError" })).catch(
+      () => undefined,
+    );
+    return new Response(message, { status: busy ? 409 : 500 });
   }
 
   void handle.result

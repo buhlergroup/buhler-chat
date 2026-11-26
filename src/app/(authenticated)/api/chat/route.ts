@@ -72,10 +72,8 @@ import {
 } from "@/features/persona-page/persona-services/skills/skill-models";
 import { loadUsableFileSources } from "@/features/persona-page/persona-services/sharepoint-files/sharepoint-file-store";
 import { type UserPrompt } from "@/features/chat-page/chat-services/models";
-import {
-  copilotProviderFor,
-  getAgentRuntime,
-} from "@/features/chat-page/chat-services/copilot-runtime/runtime-flag";
+import { copilotProviderFor } from "@/features/chat-page/chat-services/copilot-runtime/runtime-flag";
+import { resolveAgentRuntimeForCurrentUser } from "@/features/chat-page/chat-services/copilot-runtime/runtime-selection";
 
 // Allow streaming responses to run for up to 10 minutes (600 seconds)
 export const maxDuration = 600;
@@ -233,10 +231,12 @@ export async function POST(req: Request) {
   // Idempotent, and a no-op when the two already agree.
   ctx = applyDocumentHintPlacement(ctx, modelConfig.provider);
 
-  // AGENT_RUNTIME=copilot runs this turn on the Copilot runtime
-  // (copilot-runtime/). Models it cannot serve stay on the AI SDK path.
+  // The Copilot runtime (copilot-runtime/) serves this turn when AGENT_RUNTIME
+  // is "copilot" or the user is opted in (runtime-selection.ts). Models it
+  // cannot serve stay on the AI SDK path.
   const useCopilotRuntime =
-    getAgentRuntime() === "copilot" && copilotProviderFor(modelConfig) !== undefined;
+    copilotProviderFor(modelConfig) !== undefined &&
+    (await resolveAgentRuntimeForCurrentUser()) === "copilot";
   if (ctx.documentHintPlacement !== "none") {
     logInfo("/api/chat document hint placement", {
       threadId: ctx.thread.id,

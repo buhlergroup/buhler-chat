@@ -4,6 +4,7 @@ import { BlobServiceClient, RestError, type ContainerClient } from "@azure/stora
 import { getAzureDefaultCredential } from "@/features/common/services/azure-default-credential";
 import { logInfo } from "@/features/common/services/logger";
 import type { BlobProps, BlobStore } from "./blob-session-fs";
+import type { LeaseBackend } from "./thread-lease";
 
 /** Container for the agent workspaces and Copilot session state. */
 export const agentWorkspaceContainerName = (): string =>
@@ -109,7 +110,56 @@ export class AzureBlobStore implements BlobStore {
   }
 }
 
+/** Blob leases on the same container (one lease blob per thread). */
+export class AzureLeaseBackend implements LeaseBackend {
+  constructor(private readonly container: ContainerClient) {}
+
+  async ensureBlob(name: string): Promise<void> {
+    try {
+      await this.container.getBlockBlobClient(name).upload(Buffer.alloc(0), 0, {
+        conditions: { ifNoneMatch: "*" },
+      });
+    } catch (err) {
+      // Exists already (possibly leased): that is the normal case.
+      if (err instanceof RestError && (err.statusCode === 409 || err.statusCode === 412)) return;
+      throw err;
+    }
+  }
+
+  async acquire(name: string, durationSeconds: number): Promise<string | undefined> {
+    try {
+      const res = await this.container.getBlobClient(name).getBlobLeaseClient().acquireLease(durationSeconds);
+      return res.leaseId;
+    } catch (err) {
+      if (err instanceof RestError && err.statusCode === 409) return undefined;
+      throw err;
+    }
+  }
+
+  async renew(name: string, leaseId: string): Promise<void> {
+    await this.container.getBlobClient(name).getBlobLeaseClient(leaseId).renewLease();
+  }
+
+  async release(name: string, leaseId: string, metadata: Record<string, string>): Promise<void> {
+    const blob = this.container.getBlobClient(name);
+    await blob.setMetadata(metadata, { conditions: { leaseId } });
+    await blob.getBlobLeaseClient(leaseId).releaseLease();
+  }
+
+  async readMetadata(name: string): Promise<Record<string, string>> {
+    return (await this.container.getBlobClient(name).getProperties()).metadata ?? {};
+  }
+}
+
 let cached: Promise<AzureBlobStore> | undefined;
+let leaseBackend: AzureLeaseBackend | undefined;
+
+/** Lease backend on the workspace container (after getAgentWorkspaceStore). */
+export async function getAgentWorkspaceLeases(): Promise<AzureLeaseBackend> {
+  await getAgentWorkspaceStore();
+  if (!leaseBackend) throw new Error("Agent workspace store is not initialised");
+  return leaseBackend;
+}
 
 /**
  * The workspace store on the app's storage account (AZURE_STORAGE_ACCOUNT_NAME,
@@ -134,6 +184,7 @@ export function getAgentWorkspaceStore(): Promise<AzureBlobStore> {
         });
       }
     }
+    leaseBackend = new AzureLeaseBackend(container);
     return new AzureBlobStore(container);
   })().catch((err) => {
     cached = undefined;

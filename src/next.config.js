@@ -14,6 +14,13 @@ const nextConfig = {
     "@opentelemetry/instrumentation",
     "@opentelemetry/sdk-trace-base",
   ],
+  // The Copilot runtime path (AGENT_RUNTIME / COPILOT_RUNTIME_*) spawns the
+  // runtime binary from the SDK's platform package, which the file trace does
+  // not see (the SDK resolves it by name at run time). Ship the Linux x64
+  // package with /api/chat so it is in the standalone output for App Service.
+  outputFileTracingIncludes: {
+    "/api/chat": ["./node_modules/@microsoft/copilot-sdk-linux-x64/**/*"],
+  },
   images: {
     imageSizes: [16, 32, 48, 64, 96, 128, 256, 384],
     qualities: [75, 100],
