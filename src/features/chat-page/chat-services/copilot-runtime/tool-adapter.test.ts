@@ -1,4 +1,5 @@
 import { describe, it, expect, vi } from "vitest";
+import { AsyncLocalStorage, AsyncResource } from "node:async_hooks";
 import { jsonSchema, tool } from "ai";
 import { z } from "zod";
 
@@ -182,6 +183,31 @@ describe("runAppTool", () => {
     await runAppTool("slow", {}, { toolCallId: "c", signal: runtimeAbort.signal }, { toolset, abortSignal: new AbortController().signal });
     runtimeAbort.abort();
     expect(seen?.aborted).toBe(true);
+  });
+});
+
+describe("request context of tool calls", () => {
+  it("a tool runs in the context of the CURRENT turn, not of the request that started the runtime", async () => {
+    const requestContext = new AsyncLocalStorage<{ user: string }>();
+    // The runtime's stdio pipe was created while request A was running, so its
+    // callbacks (the tool calls) run in A's context.
+    const pipe = requestContext.run({ user: "A" }, () => new AsyncResource("stdio-pipe"));
+    const seen: Array<string | undefined> = [];
+    const toolset = {
+      who: tool({
+        description: "",
+        inputSchema: z.object({}),
+        execute: async () => {
+          seen.push(requestContext.getStore()?.user);
+          return "ok";
+        },
+      }),
+    };
+    // Turn of request B.
+    const run = requestContext.run({ user: "B" }, () => AsyncLocalStorage.snapshot());
+    await pipe.runInAsyncScope(() => runAppTool("who", {}, { toolCallId: "1" }, { toolset }));
+    await pipe.runInAsyncScope(() => runAppTool("who", {}, { toolCallId: "2" }, { toolset, run }));
+    expect(seen).toEqual(["A", "B"]);
   });
 });
 

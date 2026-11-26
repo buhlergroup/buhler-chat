@@ -6,7 +6,7 @@ import { HistoryContainer } from "@/features/common/services/cosmos";
 
 import { RevalidateCache } from "@/features/common/navigation-helpers";
 import { ServerActionResponse } from "@/features/common/server-action-response";
-import { DocumentIntelligenceInstance } from "@/features/common/services/document-intelligence";
+import { extractDocumentParagraphs } from "./document-text-extraction";
 import { uniqueId } from "@/features/common/util";
 import { SqlQuerySpec } from "@azure/cosmos";
 import {
@@ -121,35 +121,8 @@ const LoadFile = async (
     const fileSize = getMaxUploadDocumentSize();
 
     if (file && file.size < fileSize) {
-      logDebug("Initializing Document Intelligence client");
-      const client = DocumentIntelligenceInstance();
-
       const blob = new Blob([file], { type: file.type });
-
-      logDebug("Starting Document Intelligence analysis", {
-        model: "prebuilt-read",
-        blobSize: blob.size,
-      });
-
-      const poller = await client.beginAnalyzeDocument(
-        "prebuilt-read",
-        await blob.arrayBuffer()
-      );
-      
-      logDebug("Polling Document Intelligence for completion");
-      const { paragraphs } = await poller.pollUntilDone();
-      
-      logDebug("Document Intelligence analysis completed", {
-        paragraphCount: paragraphs?.length || 0,
-      });
-
-      const docs: Array<string> = [];
-
-      if (paragraphs) {
-        for (const paragraph of paragraphs) {
-          docs.push(paragraph.content);
-        }
-      }
+      const docs = await extractDocumentParagraphs(await blob.arrayBuffer());
 
       return {
         status: "OK",

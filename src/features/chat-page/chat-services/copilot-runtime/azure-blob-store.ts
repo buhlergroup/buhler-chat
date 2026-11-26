@@ -200,3 +200,17 @@ export function getAgentWorkspaceStore(): Promise<AzureBlobStore> {
   });
   return cached;
 }
+
+/**
+ * The workspace store only when its container exists (never creates it).
+ * For clean-up paths (deleting chat documents or a thread), which also run
+ * in deployments that never used the Copilot path.
+ */
+export async function getExistingAgentWorkspaceStore(): Promise<AzureBlobStore | undefined> {
+  const account = process.env.AZURE_STORAGE_ACCOUNT_NAME;
+  if (!account) return undefined;
+  const service = new BlobServiceClient(`https://${account}.blob.core.windows.net`, getAzureDefaultCredential());
+  const container = service.getContainerClient(agentWorkspaceContainerName());
+  if (!(await container.exists())) return undefined;
+  return new AzureBlobStore(container);
+}

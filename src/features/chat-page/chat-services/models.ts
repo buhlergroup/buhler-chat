@@ -1317,6 +1317,10 @@ export interface ChatDocumentModel {
   isDeleted: boolean;
   createdAt: Date;
   type: typeof CHAT_DOCUMENT_ATTRIBUTE;
+  /** Copilot path (index_document): workspace path of the indexed file. */
+  workspacePath?: string;
+  /** Copilot path: chunks the file has in AI Search. */
+  chunkCount?: number;
 }
 
 export interface ToolsInterface {

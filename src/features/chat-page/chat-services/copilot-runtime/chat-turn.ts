@@ -15,7 +15,11 @@ import { computeRequestUsage, type ChatMessageMetadata } from "../chat-api/usage
 import { startPublisher, unregisterPublisher } from "../chat-api/stream-publisher";
 import { UpdateChatTitle } from "../chat-thread-service";
 import { runCopilotTurn } from "./copilot-session";
+import { indexDocumentTool } from "./index-document";
+import { chatDocumentIndexDeps, threadWorkspace, workspaceUploadsNote } from "./workspace-files";
 import { ThreadBusyError } from "./thread-lease";
+
+const NOTE_SEPARATOR = String.fromCharCode(10, 10);
 
 export interface CopilotChatTurnArgs {
   ctx: ThreadContext;
@@ -58,18 +62,28 @@ export async function runCopilotChatTurn(args: CopilotChatTurnArgs): Promise<Res
 
   let handle: Awaited<ReturnType<typeof runCopilotTurn>>;
   try {
+    const userKey = await userHashedId();
+    // The thread's workspace: index_document works on it, and the model is
+    // told which uploads it holds (sent again only when the list changes).
+    const { fs } = await threadWorkspace(userKey, threadId);
+    const toolset: Record<string, AiTool> = {
+      ...args.toolset,
+      index_document: indexDocumentTool(chatDocumentIndexDeps({ fs, threadId, userKey })),
+    };
+    const uploads = await workspaceUploadsNote(fs).catch(() => undefined);
+    const contextNote = [ctx.documentHintText, uploads].filter(Boolean).join(NOTE_SEPARATOR) || undefined;
     handle = await runCopilotTurn({
       threadId,
-      userKey: await userHashedId(),
+      userKey,
       modelId: args.effectiveModel,
       reasoningEffort: args.reasoningEffort,
       systemMessage: args.systemMessage,
-      toolset: args.toolset,
+      toolset,
       // History before this turn: ctx.history ends with this turn's user message.
       priorHistory: ctx.history.slice(0, -1),
       prompt: payload.message,
       images: payload.multimodalImages,
-      contextNote: ctx.documentHintText,
+      contextNote,
       abortSignal: abortController.signal,
       finishMetadata: (usage): ChatMessageMetadata => ({
         usage: computeRequestUsage({

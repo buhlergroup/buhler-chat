@@ -15,7 +15,8 @@
  * file operations the runtime sent to the Blob provider. Values of secrets
  * are never printed.
  */
-import { readFileSync } from "node:fs";
+import { readFileSync, writeFileSync } from "node:fs";
+import os from "node:os";
 import { execSync } from "node:child_process";
 import path from "node:path";
 import { createHash } from "node:crypto";
@@ -52,6 +53,31 @@ function loadEnvFile(file: string) {
   }
 }
 loadEnvFile(path.resolve(process.cwd(), ".env.local"));
+
+// Section U writes CHAT_DOCUMENT rows and AI Search chunks, which read the
+// signed-in user. The smoke has none: the auth helpers resolve to a stub whose
+// user is SMOKE_USER_KEY (a hashed id made up for this run), never a real user.
+const authStub = path.join(os.tmpdir(), `copilot-smoke-auth-${process.pid}.cjs`);
+writeFileSync(
+  authStub,
+  [
+    'const crypto = require("node:crypto");',
+    'const user = () => ({ name: "smoke", email: "smoke@example.invalid", image: "", isAdmin: false, token: "", isLocalDevUser: true });',
+    "module.exports = {",
+    '  userHashedId: async () => { if (!process.env.SMOKE_USER_KEY) throw new Error("no smoke user"); return process.env.SMOKE_USER_KEY; },',
+    "  getCurrentUser: async () => user(),",
+    "  userSession: async () => user(),",
+    '  hashValue: (v) => crypto.createHash("sha256").update(v).digest("hex"),',
+    "};",
+  ].join(String.fromCharCode(10)),
+);
+const resolveWithAuthStub = moduleWithResolve._resolveFilename;
+const AUTH_HELPERS = path.join("features", "auth-page", "helpers.ts");
+moduleWithResolve._resolveFilename = function (request: string, ...rest: unknown[]) {
+  const resolved = resolveWithAuthStub.call(this, request, ...rest);
+  return resolved.endsWith(AUTH_HELPERS) ? authStub : resolved;
+};
+
 
 type Json = Record<string, unknown>;
 
@@ -103,6 +129,9 @@ async function main() {
       extensions: [{ extension: mcpExtension as any, headerSecrets: {}, mcp: { url: mcpUrl, transport: "auto", headers: {} } }],
       clientDateTime: new Date().toISOString(),
       depth: 0,
+      // As the route does on the Copilot path.
+      mcpOutputLimit: Number.POSITIVE_INFINITY,
+      searchDocumentsAlways: true,
     });
 
   const userKey = (name: string) => createHash("sha256").update(`${name}-${runId}`).digest("hex");
@@ -110,7 +139,7 @@ async function main() {
   const listener = (ns: string) => (op: string, p: string) => fsOps.push({ ns, op, path: p });
 
   const summary: Json[] = [];
-  // SMOKE_ONLY=A,B,... runs only those sections (A B C D F L E).
+  // SMOKE_ONLY=A,B,... runs only those sections (A B C D F L E U M).
   const only = process.env.SMOKE_ONLY?.split(",").map((x) => x.trim().toUpperCase());
   const section = (name: string) => !only || only.includes(name);
 
@@ -121,8 +150,10 @@ async function main() {
     prompt: string;
     abortAfterMs?: number;
     history?: Parameters<typeof session.runCopilotTurn>[0]["priorHistory"];
+    extraTools?: Record<string, unknown>;
+    contextNote?: string;
   }) {
-    const toolset = await toolsetFor(args.threadId);
+    const toolset = { ...(await toolsetFor(args.threadId)), ...(args.extraTools ?? {}) } as Awaited<ReturnType<typeof toolsetFor>>;
     const abort = new AbortController();
     const opsBefore = fsOps.length;
     const started = Date.now();
@@ -134,6 +165,7 @@ async function main() {
       systemMessage: system,
       toolset,
       priorHistory: args.history ?? [],
+      ...(args.contextNote ? { contextNote: args.contextNote } : {}),
       prompt: args.prompt,
       abortSignal: abort.signal,
       store,
@@ -420,6 +452,93 @@ compactions in thread F: ${JSON.stringify(session.liveSessionCompactions(threadF
     }
   }
 
+  // ── U: chat uploads into the workspace, rg/view on them, index on request ─
+  if (section("U")) {
+    const files = await import("@/features/chat-page/chat-services/copilot-runtime/workspace-files");
+    const { indexDocumentTool } = await import("@/features/chat-page/chat-services/copilot-runtime/index-document");
+    const { DeleteDocumentsOfChatThread } = await import("@/features/chat-page/chat-services/azure-ai-search/azure-ai-search");
+    const { HistoryContainer } = await import("@/features/common/services/cosmos");
+    const sharp = (await import("sharp")).default;
+    const user = userKey("ursula");
+    process.env.SMOKE_USER_KEY = user;
+    const threadU = `smoke-u-${runId}`;
+    // The upload path of the chat UI: UploadFileToAgentWorkspace -> uploadToThreadWorkspace.
+    const pdf = minimalPdf(["Recipe notes for the spring batch.", "The secret ingredient is cardamom.", "Batch code: QX-7731"]);
+    const png = await sharp(
+      Buffer.from(
+        '<svg xmlns="http://www.w3.org/2000/svg" width="240" height="240"><rect width="240" height="240" fill="white"/><circle cx="120" cy="120" r="90" fill="red"/></svg>',
+      ),
+    )
+      .png()
+      .toBuffer();
+    const t0 = Date.now();
+    const upPdf = await files.uploadToThreadWorkspace(user, threadU, "Recipe Notes.pdf", pdf);
+    const upPdf2 = await files.uploadToThreadWorkspace(user, threadU, "Recipe Notes.pdf", pdf);
+    const upPng = await files.uploadToThreadWorkspace(user, threadU, "shape.png", png);
+    console.log(`\n=== U uploads (${Date.now() - t0} ms): ${JSON.stringify([upPdf, upPdf2, upPng])}`);
+    const { fs } = await files.threadWorkspace(user, threadU);
+    console.log(`extracted text: ${JSON.stringify((await fs.readFile(upPdf.markdownPath!)).slice(0, 200))}`);
+    const extra = { index_document: indexDocumentTool(files.chatDocumentIndexDeps({ fs, threadId: threadU, userKey: user })) };
+    const note = await files.workspaceUploadsNote(fs);
+    console.log(`context note: ${note}`);
+    await turn("U1 rg in the PDF text + view the image", {
+      threadId: threadU,
+      user: "ursula",
+      model: gptModel,
+      extraTools: extra,
+      contextNote: note,
+      prompt:
+        "Without indexing anything: use rg to find the batch code in my uploaded recipe notes, then use view on /workspace/uploads/shape.png and say what shape and colour it shows.",
+    });
+    await turn("U2 index on request + search_documents", {
+      threadId: threadU,
+      user: "ursula",
+      model: gptModel,
+      extraTools: extra,
+      contextNote: note,
+      prompt: "Index the recipe notes with index_document, then answer with search_documents: what is the secret ingredient?",
+    });
+    const row = await files.chatDocumentIndexDeps({ fs, threadId: threadU, userKey: user }).findRow("uploads/Recipe Notes.pdf");
+    console.log(`CHAT_DOCUMENT row: ${row ? "created" : "missing"}`);
+    await turn("U3 index again (replaces)", {
+      threadId: threadU,
+      user: "ursula",
+      model: gptModel,
+      extraTools: extra,
+      contextNote: note,
+      prompt: "Index /workspace/uploads/Recipe Notes.pdf again and tell me the status and chunk count it returned.",
+    });
+    // Deleting the chat documents removes the uploads (SoftDeleteChatDocumentsForCurrentUser calls this).
+    const removed = await files.removeThreadWorkspaceFiles(user, threadU, "uploads");
+    console.log(`removed ${removed} upload blobs; uploads left: ${(await fs.listEntries("/workspace/uploads")).length}`);
+    await DeleteDocumentsOfChatThread(threadU);
+    const { resources } = await HistoryContainer()
+      .items.query({ query: "SELECT r.id FROM r WHERE r.chatThreadId=@t", parameters: [{ name: "@t", value: threadU }] })
+      .fetchAll();
+    for (const r of resources as Array<{ id: string }>) await HistoryContainer().item(r.id, user).delete().catch(() => undefined);
+    console.log(`cleaned ${resources.length} smoke rows`);
+  }
+
+  // ── M: a large MCP result goes to a workspace file and survives a restart ─
+  if (section("M")) {
+    const threadM = `smoke-m-${runId}`;
+    await turn("M1 large MCP result -> file, rg in the same turn", {
+      threadId: threadM,
+      user: "mia",
+      model: gptModel,
+      prompt:
+        "Use the docs fetch tool on https://learn.microsoft.com/en-us/azure/storage/blobs/storage-blobs-introduction . The result is saved to a file: use rg on that file to find one line that mentions 'append blob' and quote it.",
+    });
+    await session.shutdownCopilotRuntime();
+    console.log("\n--- runtime stopped ---");
+    await turn("M2 after restart: rg on the saved result", {
+      threadId: threadM,
+      user: "mia",
+      model: gptModel,
+      prompt: "Without fetching again: use rg on the saved docs result file from before to find a line that mentions 'block blob' and quote it.",
+    });
+  }
+
   // ── Runtime process memory ──────────────────────────────────────────────
   try {
     const cmd =
@@ -442,6 +561,37 @@ compactions in thread F: ${JSON.stringify(session.liveSessionCompactions(threadF
 
   console.log("\nSUMMARY " + JSON.stringify(summary, null, 1));
   await session.shutdownCopilotRuntime();
+}
+
+/** A one-page PDF with the given lines of text (Helvetica), for the upload smoke. */
+function minimalPdf(lines: string[]): Buffer {
+  const NL = String.fromCharCode(10);
+  const esc = (t: string) => t.replace(/[()\\]/g, (c) => `\\${c}`);
+  const body = ["BT", "/F1 14 Tf", "72 720 Td"];
+  lines.forEach((l, i) => {
+    if (i > 0) body.push("0 -24 Td");
+    body.push(`(${esc(l)}) Tj`);
+  });
+  body.push("ET");
+  const stream = body.join(NL);
+  const objs = [
+    "<< /Type /Catalog /Pages 2 0 R >>",
+    "<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+    "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents 4 0 R /Resources << /Font << /F1 5 0 R >> >> >>",
+    `<< /Length ${Buffer.byteLength(stream)} >>${NL}stream${NL}${stream}${NL}endstream`,
+    "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>",
+  ];
+  let out = `%PDF-1.4${NL}`;
+  const offsets: number[] = [];
+  objs.forEach((o, i) => {
+    offsets.push(Buffer.byteLength(out));
+    out += `${i + 1} 0 obj${NL}${o}${NL}endobj${NL}`;
+  });
+  const xref = Buffer.byteLength(out);
+  out += `xref${NL}0 ${objs.length + 1}${NL}0000000000 65535 f ${NL}`;
+  out += offsets.map((o) => `${String(o).padStart(10, "0")} 00000 n ${NL}`).join("");
+  out += `trailer${NL}<< /Size ${objs.length + 1} /Root 1 0 R >>${NL}startxref${NL}${xref}${NL}%%EOF${NL}`;
+  return Buffer.from(out, "latin1");
 }
 
 main().then(

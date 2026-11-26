@@ -12,6 +12,11 @@ vi.mock("../chat-api/persist-assistant", () => ({
   persistAssistantFromFinishEvent: (args: unknown) => persist(args),
   friendlyErrorMessage: (e: { message: string }) => `friendly: ${e.message}`,
 }));
+vi.mock("./workspace-files", () => ({
+  threadWorkspace: async () => ({ fs: {} }),
+  chatDocumentIndexDeps: () => ({}),
+  workspaceUploadsNote: async () => "Files the user uploaded to this chat: /workspace/uploads/a.pdf",
+}));
 const updateTitle = vi.fn(async () => undefined);
 vi.mock("../chat-thread-service", () => ({ UpdateChatTitle: () => updateTitle() }));
 const upsert = vi.fn(async (_row: unknown) => undefined);
@@ -89,6 +94,10 @@ describe("runCopilotChatTurn", () => {
     const input = runCopilotTurn.mock.calls[0][0] as { abortSignal: AbortSignal; priorHistory: unknown[]; userKey: string };
     expect(input.userKey).toBe("hashed-user");
     expect(input.priorHistory).toEqual([]);
+    // Copilot path only: index_document joins the app tools, uploads are named.
+    const full = runCopilotTurn.mock.calls[0][0] as { toolset: Record<string, unknown>; contextNote?: string };
+    expect(Object.keys(full.toolset)).toContain("index_document");
+    expect(full.contextNote).toContain("/workspace/uploads/a.pdf");
     expect(input.abortSignal.aborted).toBe(false);
     expect(hasActivePublisher("thread-stop")).toBe(true);
 

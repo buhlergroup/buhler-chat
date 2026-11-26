@@ -343,11 +343,26 @@ export async function POST(req: Request) {
 
   // SharePoint files for the model (personas only): the folders/files the
   // agent links. Only loaded when the code interpreter runs in this turn,
-  // because fetched files go into its container. What the user may read in
+  // because fetched files go into its container — or on the Copilot path,
+  // where they go into the chat's file workspace. What the user may read in
   // them is decided by SharePoint at fetch time, with the user's token.
-  const fileSources = effectiveToolsSafe.codeInterpreter
-    ? await loadUsableFileSources(ctx.thread.personaId)
-    : undefined;
+  const fileSources =
+    effectiveToolsSafe.codeInterpreter || useCopilotRuntime
+      ? await loadUsableFileSources(ctx.thread.personaId)
+      : undefined;
+  const uploadToWorkspace =
+    fileSources && useCopilotRuntime
+      ? await (async () => {
+          const [{ uploadToThreadWorkspace }, { userHashedId }] = await Promise.all([
+            import("@/features/chat-page/chat-services/copilot-runtime/workspace-files"),
+            import("@/features/auth-page/helpers"),
+          ]);
+          const userKey = await userHashedId();
+          return async (fileName: string, data: Buffer) => ({
+            path: (await uploadToThreadWorkspace(userKey, ctx.thread.id, fileName, data)).path,
+          });
+        })()
+      : undefined;
 
   // ── prompt prefix assembly (cache-stability critical) ──────────────────
   // The generative-UI block is process-constant, so it is handed to
@@ -396,6 +411,10 @@ export async function POST(req: Request) {
     defaultTools: ctx.defaultTools ?? {},
     extensions: resolvedExtensions,
     subAgentIds: ctx.thread.subAgentIds,
+    // Copilot path: no MCP output cap; large results become workspace files.
+    ...(useCopilotRuntime
+      ? { mcpOutputLimit: Number.POSITIVE_INFINITY, searchDocumentsAlways: true }
+      : {}),
     // Browser-local datetime for the get_current_time tool (server UTC fallback).
     clientDateTime: req.headers.get("x-client-datetime") ?? undefined,
     depth: 0,
@@ -409,6 +428,7 @@ export async function POST(req: Request) {
         // Read when the model calls the tool: the container is created
         // (or replaced) further down, after the toolset.
         getContainerId: () => ctx.thread.codeInterpreterContainerId,
+        ...(uploadToWorkspace ? { uploadToWorkspace } : {}),
       },
     }),
   });

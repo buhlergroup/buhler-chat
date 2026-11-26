@@ -2,6 +2,7 @@ import "server-only";
 
 import os from "node:os";
 import { randomUUID } from "node:crypto";
+import { AsyncLocalStorage } from "node:async_hooks";
 import path from "node:path";
 import {
   CopilotClient,
@@ -492,6 +493,10 @@ async function runTurnInSession(input: CopilotTurnInput): Promise<CopilotTurnHan
   const rawResults = new Map<string, ToolCallRecord>();
   live.binding.current = {
     toolset: input.toolset,
+    // Tools run in THIS request's async context (see TurnToolBinding.run).
+    run: AsyncLocalStorage.snapshot(),
+    // Large results go to /workspace/tool-results/ in the thread's namespace.
+    spill: (path, content) => live.fs.writeFile(path, content),
     abortSignal: input.abortSignal,
     onResult: (record) => rawResults.set(record.toolCallId, record),
   };

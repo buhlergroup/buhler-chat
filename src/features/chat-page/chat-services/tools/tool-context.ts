@@ -48,6 +48,17 @@ export interface ToolContext {
    */
   subAgentIds?: string[];
   /**
+   * Cap on MCP tool output characters. Unset: the default (100,000). The
+   * Copilot path passes Infinity: its tool adapter writes large results to a
+   * workspace file instead.
+   */
+  mcpOutputLimit?: number;
+  /**
+   * Copilot path: search_documents is always offered, because the agent can
+   * index workspace files (index_document) during the turn.
+   */
+  searchDocumentsAlways?: boolean;
+  /**
    * Recursion guard for buildToolset.
    * 0 = top-level call; sub-agent contexts use depth + 1.
    * Max depth before tools are omitted: 2.
@@ -82,6 +93,11 @@ export interface ToolContext {
      * creates the container after the toolset is built.
      */
     getContainerId: () => string | undefined;
+    /**
+     * Copilot path: fetched files go to the chat's file workspace
+     * (/workspace/uploads/) instead of the code interpreter container.
+     */
+    uploadToWorkspace?: (fileName: string, data: Buffer) => Promise<{ path: string }>;
   };
 }
 

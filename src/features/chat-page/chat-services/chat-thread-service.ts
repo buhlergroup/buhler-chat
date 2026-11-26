@@ -206,6 +206,9 @@ export const SoftDeleteChatContentsForCurrentUser = async (
         await HistoryContainer().items.upsert(itemToUpdate);
       });
 
+      // The chat's workspace uploads go with its documents (Copilot path).
+      await removeAgentWorkspaceFiles(chatThreadID, "uploads");
+
       // Drop the history-compaction row with the messages it describes. It
       // holds both a summary of trimmed turns and the watermark marking where
       // the prompt resumes; keeping either after a rewind would let the model
@@ -223,6 +226,20 @@ export const SoftDeleteChatContentsForCurrentUser = async (
   }
 };
 
+/**
+ * Removes the thread's files in the agent workspace (Copilot path). A no-op
+ * where the Copilot path is not configured; never fails the caller.
+ */
+const removeAgentWorkspaceFiles = async (
+  chatThreadId: string,
+  scope: "uploads" | "all",
+): Promise<void> => {
+  const { removeThreadWorkspaceFilesQuietly } = await import(
+    "./copilot-runtime/workspace-files"
+  );
+  await removeThreadWorkspaceFilesQuietly(await userHashedId(), chatThreadId, scope);
+};
+
 export const SoftDeleteChatThreadForCurrentUser = async (
   chatThreadID: string
 ): Promise<ServerActionResponse<ChatThreadModel>> => {
@@ -236,6 +253,8 @@ export const SoftDeleteChatThreadForCurrentUser = async (
       }
       chatThreadResponse.response.isDeleted = true;
       await HistoryContainer().items.upsert(chatThreadResponse.response);
+      // The whole agent workspace and session state of the thread (Copilot path).
+      await removeAgentWorkspaceFiles(chatThreadID, "all");
     }
 
     return chatThreadResponse;
@@ -270,6 +289,9 @@ export const SoftDeleteChatDocumentsForCurrentUser = async (
       itemToUpdate.isDeleted = true;
       await HistoryContainer().items.upsert(itemToUpdate);
     });
+
+    // The uploads in the chat's agent workspace go with the documents (Copilot path).
+    await removeAgentWorkspaceFiles(chatThreadId, "uploads");
 
     return {
       status: "OK",
