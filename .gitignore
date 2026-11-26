@@ -50,3 +50,6 @@ src/.env.local.bak
 .agents/
 .claude/skills/
 skills-lock.json
+
+# Written by `next dev` (Next.js agent rules); regenerated on every start
+/src/AGENTS.md
