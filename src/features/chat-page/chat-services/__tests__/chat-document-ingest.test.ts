@@ -44,6 +44,9 @@ vi.mock("@/features/common/services/document-extraction", () => ({
 
 const indexed: Array<{ chunks: string[]; fileName?: string; threadId?: string; user?: string }> = [];
 const deletedChunkIds: string[][] = [];
+// Set to make the next IndexDocuments call fail (it has deleted its own
+// chunks again, like the real one).
+let failNextIndexing: string | undefined;
 vi.mock("@/features/chat-page/chat-services/azure-ai-search/azure-ai-search", () => ({
   EnsureIndexIsCreated: async () => ({ status: "OK", response: {} }),
   IndexDocuments: async (
@@ -54,6 +57,11 @@ vi.mock("@/features/chat-page/chat-services/azure-ai-search/azure-ai-search", ()
     user?: string
   ) => {
     indexed.push({ chunks, fileName, threadId, user });
+    if (failNextIndexing) {
+      const message = failNextIndexing;
+      failNextIndexing = undefined;
+      return [{ status: "ERROR", errors: [{ message }] }];
+    }
     return chunks.map(() => ({ status: "OK", response: true }));
   },
   FindChatDocumentChunkIds: async () => ["old-chunk-1"],
@@ -94,6 +102,8 @@ beforeEach(() => {
   rows = [];
   indexed.length = 0;
   deletedChunkIds.length = 0;
+  failNextIndexing = undefined;
+  vi.unstubAllEnvs();
   extract.mockClear();
   register(SERVICE_KEYS.contentBlobs, createMemoryContentBlobBackend);
 });
@@ -160,6 +170,43 @@ describe("chat-page.unit.document-ingest — content store", () => {
     expect(res.status).toBe("ERROR");
     expect(rows).toHaveLength(0);
     expect(indexed).toHaveLength(0);
+  });
+
+  it("a document over MAX_DOCUMENT_CHUNKS is refused before indexing, with a hint to split it", async () => {
+    vi.stubEnv("MAX_DOCUMENT_CHUNKS", "3");
+    // 4 chunks of 2300 characters with 25 % overlap: 1725 new characters each.
+    const text = Buffer.from("x".repeat(1725 * 3 + 10));
+    const res = await upload(userA, "thread1", text, "long.txt");
+
+    expect(res.status).toBe("ERROR");
+    if (res.status === "OK") return;
+    expect(res.errors[0].message).toMatch(/^long\.txt: The document is too long to index/);
+    expect(res.errors[0].message).toContain("Split the document");
+    expect(indexed).toHaveLength(0);
+    expect(rows).toHaveLength(0);
+  });
+
+  it("a failed replacement keeps the old chunks and row; a later success replaces them", async () => {
+    await upload(userA, "thread1", Buffer.from("version one"), "notes.txt");
+    const oldRow = rows.find((r) => r.type === "CHAT_DOCUMENT");
+
+    failNextIndexing = "429 Too Many Requests";
+    const failed = await upload(userA, "thread1", Buffer.from("version two"), "notes.txt");
+
+    expect(failed.status).toBe("ERROR");
+    if (failed.status === "OK") return;
+    expect(failed.errors[0].message).toContain("notes.txt: The document was not indexed.");
+    expect(failed.errors[0].message).toContain("429");
+    expect(deletedChunkIds).toEqual([]);
+    const live = rows.filter((r) => r.type === "CHAT_DOCUMENT" && !r.isDeleted);
+    expect(live.map((r) => r.id)).toEqual([oldRow?.id]);
+
+    const retried = await upload(userA, "thread1", Buffer.from("version two"), "notes.txt");
+    expect(retried.status).toBe("OK");
+    expect(deletedChunkIds).toEqual([["old-chunk-1"]]);
+    const liveAfter = rows.filter((r) => r.type === "CHAT_DOCUMENT" && !r.isDeleted);
+    expect(liveAfter).toHaveLength(1);
+    expect(liveAfter[0].id).not.toBe(oldRow?.id);
   });
 
   it("refuses an unsupported file type", async () => {

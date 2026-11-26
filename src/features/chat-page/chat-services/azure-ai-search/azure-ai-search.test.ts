@@ -46,6 +46,19 @@ vi.mock("@/features/common/services/logger", () => ({
   logWarn: vi.fn(),
 }));
 
+// Counts the ids handed out, i.e. the index documents built.
+const idsCreated = vi.hoisted(() => ({ count: 0 }));
+vi.mock("@/features/common/util", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@/features/common/util")>();
+  return {
+    ...actual,
+    uniqueId: () => {
+      idsCreated.count++;
+      return actual.uniqueId();
+    },
+  };
+});
+
 vi.mock("@/features/common/services/azure-default-credential", () => ({
   getAzureDefaultCredential: vi.fn(() => ({})),
 }));
@@ -58,6 +71,8 @@ import {
   EnsureIndexIsCreated,
   ExtensionSimilaritySearch,
   PersonaDocumentExistsInIndex,
+  DeleteChunksByIds,
+  FindChatDocumentChunkIds,
 } from "./azure-ai-search";
 import * as azureSearchModule from "./azure-ai-search";
 
@@ -159,20 +174,28 @@ describe("chat-page.unit.search.005b — IndexDocuments sends chunks in batches 
     expect(results.every((r) => r.status === "OK")).toBe(true);
   });
 
-  it("keeps earlier OK results when a later upload throws", async () => {
+  it("deletes the chunks of earlier batches and of the batch whose upload throws", async () => {
     mockEmbeddingsCreate.mockImplementation(async ({ input }: any) => ({
       data: input.map(() => ({ embedding: [0.1] })),
     }));
+    const uploaded: string[][] = [];
     mockUpload
-      .mockImplementationOnce(async (docs: any[]) => ({
-        results: docs.map(() => ({ succeeded: true })),
-      }))
-      .mockRejectedValueOnce(new Error("413 Request Entity Too Large"));
+      .mockImplementationOnce(async (docs: any[]) => {
+        uploaded.push(docs.map((d) => d.id));
+        return { results: docs.map((d) => ({ key: d.id, succeeded: true })) };
+      })
+      .mockImplementationOnce(async (docs: any[]) => {
+        uploaded.push(docs.map((d) => d.id));
+        throw new Error("413 Request Entity Too Large");
+      });
     const chunks = Array.from({ length: 150 }, (_, i) => `chunk ${i}`);
 
     const results = await IndexDocuments(chunks);
 
-    expect(results.filter((r) => r.status === "OK")).toHaveLength(100);
+    // The thrown batch may be written in part: its ids are deleted too.
+    expect(mockDelete).toHaveBeenCalledTimes(1);
+    expect(mockDelete).toHaveBeenCalledWith("id", [...uploaded[0], ...uploaded[1]]);
+    expect(results.some((r) => r.status === "OK")).toBe(false);
     const last = results[results.length - 1];
     expect(last.status).toBe("ERROR");
     expect((last as any).errors[0].message).toContain("413");
@@ -193,6 +216,7 @@ describe("chat-page.unit.search.005b — IndexDocuments sends chunks in batches 
 
     expect(mockEmbeddingsCreate).toHaveBeenCalledTimes(2);
     expect(mockUpload).toHaveBeenCalledTimes(1);
+    expect(results).toHaveLength(1);
     const last = results[results.length - 1];
     expect(last.status).toBe("ERROR");
     expect((last as any).errors[0].message).toContain("400 Invalid 'input'");
@@ -420,5 +444,217 @@ describe("chat-page.unit.search.016 — persona document chunks carry the agent 
     mockDelete.mockResolvedValueOnce({ results: [{ succeeded: false, errorMessage: "busy" }] } as any);
     const res = await DeleteSearchDocumentByPersonaDocumentId("pd-1", "owner-hash");
     expect(res).toEqual({ status: "ERROR", errors: [{ message: "busy" }] });
+  });
+});
+
+// Embedding and upload fakes for the big-document cases: one vector per
+// input, every upload succeeds and reports the key of each document.
+const embedEachInput = () =>
+  mockEmbeddingsCreate.mockImplementation(async ({ input }: any) => ({
+    data: input.map(() => ({ embedding: new Array(8).fill(0.5) })),
+  }));
+const uploadAllOk = () =>
+  mockUpload.mockImplementation(async (docs: any[]) => ({
+    results: docs.map((d) => ({ key: d.id, succeeded: true })),
+  }));
+
+describe("chat-page.unit.search.005d — IndexDocuments keeps at most one batch of embeddings", () => {
+  it("documents of earlier batches hold no embedding while the next batch is embedded", async () => {
+    const uploaded: any[] = [];
+    const retainedAtEachEmbedCall: number[] = [];
+    mockEmbeddingsCreate.mockImplementation(async ({ input }: any) => {
+      retainedAtEachEmbedCall.push(uploaded.filter((d) => d.embedding !== undefined).length);
+      return { data: input.map(() => ({ embedding: new Array(8).fill(0.5) })) };
+    });
+    mockUpload.mockImplementation(async (docs: any[]) => {
+      // Every document of the batch carries its vector at upload time.
+      expect(docs.every((d) => Array.isArray(d.embedding) && d.embedding.length === 8)).toBe(true);
+      uploaded.push(...docs);
+      return { results: docs.map((d) => ({ key: d.id, succeeded: true })) };
+    });
+
+    const results = await IndexDocuments(Array.from({ length: 450 }, (_, i) => `chunk ${i}`));
+
+    expect(results).toHaveLength(450);
+    expect(retainedAtEachEmbedCall).toEqual([0, 0, 0, 0, 0]);
+    expect(uploaded).toHaveLength(450);
+    expect(uploaded.filter((d) => d.embedding !== undefined)).toHaveLength(0);
+  });
+
+  it("builds the documents of a batch only when that batch is embedded", async () => {
+    // Every index document gets its id from uniqueId when it is built.
+    const builtAtEachEmbedCall: number[] = [];
+    mockEmbeddingsCreate.mockImplementation(async ({ input }: any) => {
+      builtAtEachEmbedCall.push(idsCreated.count);
+      return { data: input.map(() => ({ embedding: [0.1] })) };
+    });
+    uploadAllOk();
+    idsCreated.count = 0;
+
+    await IndexDocuments(Array.from({ length: 250 }, (_, i) => `chunk ${i}`));
+
+    expect(builtAtEachEmbedCall).toEqual([100, 200, 250]);
+  });
+});
+
+describe("chat-page.unit.search.005e — IndexDocuments refuses a document over MAX_DOCUMENT_CHUNKS", () => {
+  it("returns a user-facing error before any embedding call", async () => {
+    vi.stubEnv("MAX_DOCUMENT_CHUNKS", "120");
+    try {
+      const results = await IndexDocuments(Array.from({ length: 121 }, (_, i) => `chunk ${i}`));
+      expect(results).toHaveLength(1);
+      expect(results[0].status).toBe("ERROR");
+      const message = (results[0] as any).errors[0].message as string;
+      expect(message).toContain("too long to index");
+      expect(message).toContain("121");
+      expect(message).toContain("Split the document");
+      expect(mockEmbeddingsCreate).not.toHaveBeenCalled();
+      expect(mockUpload).not.toHaveBeenCalled();
+      expect(mockDelete).not.toHaveBeenCalled();
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
+  it("indexes a document of exactly MAX_DOCUMENT_CHUNKS chunks", async () => {
+    vi.stubEnv("MAX_DOCUMENT_CHUNKS", "120");
+    embedEachInput();
+    uploadAllOk();
+    try {
+      const results = await IndexDocuments(Array.from({ length: 120 }, (_, i) => `chunk ${i}`));
+      expect(results).toHaveLength(120);
+      expect(results.every((r) => r.status === "OK")).toBe(true);
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
+  it("default limit is 4000 chunks; empty chunks do not count", async () => {
+    const { DEFAULT_MAX_DOCUMENT_CHUNKS, maxDocumentChunks } = await import("../chat-document-chunks");
+    expect(DEFAULT_MAX_DOCUMENT_CHUNKS).toBe(4000);
+    vi.stubEnv("MAX_DOCUMENT_CHUNKS", "not a number");
+    expect(maxDocumentChunks()).toBe(4000);
+    vi.stubEnv("MAX_DOCUMENT_CHUNKS", "2");
+    try {
+      embedEachInput();
+      uploadAllOk();
+      const results = await IndexDocuments(["a", " ", "", "b"]);
+      expect(results).toHaveLength(2);
+      expect(results.every((r) => r.status === "OK")).toBe(true);
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+});
+
+describe("chat-page.unit.search.005f — a failed batch deletes the chunks this call wrote", () => {
+  it("embedding error in batch 3: deletes exactly the ids of batches 1 and 2", async () => {
+    const written: string[] = [];
+    mockEmbeddingsCreate
+      .mockImplementationOnce(async ({ input }: any) => ({ data: input.map(() => ({ embedding: [0.1] })) }))
+      .mockImplementationOnce(async ({ input }: any) => ({ data: input.map(() => ({ embedding: [0.1] })) }))
+      .mockRejectedValueOnce(new Error("429 Too Many Requests"));
+    mockUpload.mockImplementation(async (docs: any[]) => {
+      written.push(...docs.map((d) => d.id));
+      return { results: docs.map((d) => ({ key: d.id, succeeded: true })) };
+    });
+
+    const results = await IndexDocuments(Array.from({ length: 250 }, (_, i) => `chunk ${i}`));
+
+    expect(written).toHaveLength(200);
+    expect(mockDelete).toHaveBeenCalledTimes(1);
+    expect(mockDelete).toHaveBeenCalledWith("id", written);
+    expect(results).toHaveLength(1);
+    expect(results[0].status).toBe("ERROR");
+    expect((results[0] as any).errors[0].message).toContain("429");
+  });
+
+  it("upload with failed results: deletes earlier batches and the succeeded ids of the failing batch only", async () => {
+    embedEachInput();
+    const firstBatch: string[] = [];
+    let secondOk: string[] = [];
+    mockUpload
+      .mockImplementationOnce(async (docs: any[]) => {
+        firstBatch.push(...docs.map((d) => d.id));
+        return { results: docs.map((d) => ({ key: d.id, succeeded: true })) };
+      })
+      .mockImplementationOnce(async (docs: any[]) => {
+        // The first 10 documents fail, the rest are written.
+        secondOk = docs.slice(10).map((d) => d.id);
+        return {
+          results: docs.map((d, i) =>
+            i < 10
+              ? { key: d.id, succeeded: false, errorMessage: "document too large" }
+              : { key: d.id, succeeded: true }
+          ),
+        };
+      });
+
+    const results = await IndexDocuments(Array.from({ length: 300 }, (_, i) => `chunk ${i}`));
+
+    expect(mockUpload).toHaveBeenCalledTimes(2);
+    expect(mockDelete).toHaveBeenCalledTimes(1);
+    expect(mockDelete).toHaveBeenCalledWith("id", [...firstBatch, ...secondOk]);
+    expect(results).toHaveLength(10);
+    expect(results.every((r) => r.status === "ERROR")).toBe(true);
+    expect((results[0] as any).errors[0].message).toBe("document too large");
+  });
+
+  it("a failure in the first batch before any write deletes nothing", async () => {
+    mockEmbeddingsCreate.mockRejectedValueOnce(new Error("500 Internal Server Error"));
+    const results = await IndexDocuments(["only chunk"]);
+    expect(results[0].status).toBe("ERROR");
+    expect(mockDelete).not.toHaveBeenCalled();
+  });
+
+  it("reports when the written chunks cannot be deleted", async () => {
+    embedEachInput();
+    mockUpload
+      .mockImplementationOnce(async (docs: any[]) => ({
+        results: docs.map((d) => ({ key: d.id, succeeded: true })),
+      }))
+      .mockImplementationOnce(async (docs: any[]) => ({
+        results: docs.map((d) => ({ key: d.id, succeeded: false, errorMessage: "quota" })),
+      }));
+    mockDelete.mockResolvedValueOnce({ results: [{ succeeded: false, errorMessage: "busy" }] } as any);
+
+    const results = await IndexDocuments(Array.from({ length: 101 }, (_, i) => `chunk ${i}`));
+
+    const messages = results.flatMap((r) => (r.status === "OK" ? [] : r.errors.map((e) => e.message)));
+    expect(messages).toContain("quota");
+    expect(
+      messages.some((m) => m.includes("100 chunks written before the error could not be deleted") && m.includes("busy"))
+    ).toBe(true);
+  });
+});
+
+describe("chat-page.unit.search.005g — chunk ids of big documents are found and deleted whole", () => {
+  it("DeleteChunksByIds deletes in requests of at most 1000 ids", async () => {
+    mockDelete.mockImplementation((async (_key: string, ids: string[]) => ({
+      results: ids.map(() => ({ succeeded: true })),
+    })) as any);
+    const ids = Array.from({ length: 2500 }, (_, i) => `id${i}`);
+    await DeleteChunksByIds(ids);
+    const calls = mockDelete.mock.calls as unknown as Array<[string, string[]]>;
+    expect(calls.map((c) => c[1].length)).toEqual([1000, 1000, 500]);
+    expect(calls.flatMap((c) => c[1])).toEqual(ids);
+  });
+
+  it("FindChatDocumentChunkIds asks for more than 1000 results (the client follows the pages)", async () => {
+    let options: any;
+    mockSearch.mockImplementationOnce(async (_t: any, opts: any) => {
+      options = opts;
+      return {
+        results: makeSearchResultsGen(
+          Array.from({ length: 1500 }, (_, i) => ({
+            score: 1,
+            document: { id: `c${i}`, metadata: i % 3 === 0 ? "other.txt" : "big.txt" },
+          }))
+        ),
+      };
+    });
+    const ids = await FindChatDocumentChunkIds("t1", "u1", "big.txt");
+    expect(options.top).toBeGreaterThan(1000);
+    expect(ids).toHaveLength(1000);
   });
 });
