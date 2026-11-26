@@ -39,38 +39,6 @@ export const PersonaDetail: FC<Props> = ({ chatThread }) => {
   const { personaMessageTitle, personaMessage, personaId, id } = chatThread;
   const router = useRouter();
 
-  useEffect(() => {
-    if (personaId) fetchDocumentMetadata(id);
-  }, [id, personaId]);
-
-  // The thread holds only the agent id. The server loads the agent's Search
-  // files (with the open rule and the access rule of each file) and reads
-  // the details from SharePoint with the user's token; files the user cannot
-  // use come back as a number only (no name, no id).
-  const fetchDocumentMetadata = async (chatThreadId: string): Promise<void> => {
-    try {
-      const response = await AgentDocumentDetailsForThread(chatThreadId);
-
-      if (response.status === "OK") {
-        setDocuments(response.response.documents);
-        setNoAccessDocumentsCount(response.response.notAvailableCount);
-        if (response.response.notAvailableCount > 0) {
-          displayToastWarning(
-            "Some documents are not accessible",
-            "Your agent chat experience may suffer from the lack of documents."
-          );
-        }
-      } else {
-        displayError(
-          response.errors,
-          "Error fetching document details. Please try again."
-        );
-      }
-    } catch {
-      displayToastError("An unexpected error occurred. Please try again.");
-    }
-  };
-
   const handleDuplicateAndCustomize = async () => {
     try {
       const chatThread = await FindChatThreadForCurrentUser(id);
@@ -114,6 +82,43 @@ export const PersonaDetail: FC<Props> = ({ chatThread }) => {
       variant: "default",
     });
   };
+
+  // The thread holds only the agent id. The server loads the agent's Search
+  // files (with the open rule and the access rule of each file) and reads
+  // the details from SharePoint with the user's token; files the user cannot
+  // use come back as a number only (no name, no id). After the helpers
+  // above: the effect calls them.
+  useEffect(() => {
+    if (!personaId) return;
+    let active = true;
+    AgentDocumentDetailsForThread(id)
+      .then((response) => {
+        if (!active) return;
+        if (response.status === "OK") {
+          setDocuments(response.response.documents);
+          setNoAccessDocumentsCount(response.response.notAvailableCount);
+          if (response.response.notAvailableCount > 0) {
+            displayToastWarning(
+              "Some documents are not accessible",
+              "Your agent chat experience may suffer from the lack of documents."
+            );
+          }
+        } else {
+          displayError(
+            response.errors,
+            "Error fetching document details. Please try again."
+          );
+        }
+      })
+      .catch(() => {
+        if (active) {
+          displayToastError("An unexpected error occurred. Please try again.");
+        }
+      });
+    return () => {
+      active = false;
+    };
+  }, [id, personaId]);
 
   return (
     <Sheet>
