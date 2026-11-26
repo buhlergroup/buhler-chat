@@ -60,6 +60,57 @@ export const threadBlobPath = (threadId: unknown, fileName: unknown): string => 
   return path;
 };
 
+const SHA256_HEX = /^[0-9a-f]{64}$/;
+
+/** A lowercase hex SHA-256 digest (64 characters). */
+export const isSha256Hex = (value: unknown): value is string =>
+  typeof value === "string" && SHA256_HEX.test(value);
+
+/** Suffixes of the blobs the content store keeps next to the content. */
+export type ContentBlobSuffix = "" | ".md";
+
+export const CONTENT_BLOB_PREFIX = "content";
+
+/**
+ * `content/${scope}/sha256/${hash}${suffix}` for the content store. Throws
+ * when the scope is not an id of this app (a user hash), the hash is not a
+ * lowercase SHA-256 hex digest, the suffix is unknown, or the normalised
+ * result does not stay under `content/${scope}/sha256/`.
+ */
+export const contentBlobPath = (
+  scope: unknown,
+  sha256: unknown,
+  suffix: ContentBlobSuffix = ""
+): string => {
+  if (!isValidId(scope)) {
+    throw new Error("Invalid scope for content blob path");
+  }
+  if (!isSha256Hex(sha256)) {
+    throw new Error("Invalid hash for content blob path");
+  }
+  if (suffix !== "" && suffix !== ".md") {
+    throw new Error("Invalid suffix for content blob path");
+  }
+  const prefix = `${CONTENT_BLOB_PREFIX}/${scope}/sha256/`;
+  const path = `${prefix}${sha256}${suffix}`;
+  if (!isSafeBlobPath(path) || !normalisePosix(path).startsWith(prefix)) {
+    throw new Error("Blob path leaves its prefix");
+  }
+  return path;
+};
+
+/**
+ * The parts of a content store blob name, or undefined when the name is not
+ * one contentBlobPath builds (the cleanup skips such blobs).
+ */
+export const parseContentBlobPath = (
+  path: string
+): { scope: string; sha256: string; suffix: ContentBlobSuffix } | undefined => {
+  const match = /^content\/([^/]+)\/sha256\/([0-9a-f]{64})(\.md)?$/.exec(path);
+  if (!match || !isValidId(match[1])) return undefined;
+  return { scope: match[1], sha256: match[2], suffix: (match[3] ?? "") as ContentBlobSuffix };
+};
+
 /**
  * Turns any file name (for example one the code interpreter chose) into a
  * safe single blob file name: the last path segment, control characters and
