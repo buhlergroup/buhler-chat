@@ -611,7 +611,9 @@ export const MODEL_CONFIGS: Record<ChatModel, ModelConfig> = {
     contextWindow: 262144,
     maxOutputTokens: 8000,
     hardCapEligible: true,
-    capabilities: ["vision", "imageGen", "code"],
+    // No "vision": the Foundry deployment rejects image input, although the
+    // catalog lists the model as multimodal.
+    capabilities: ["imageGen", "code"],
   },
   "grok-4.3": {
     id: "grok-4.3",
@@ -932,6 +934,21 @@ export function resolveDefaultModel(
 }
 
 export const DEFAULT_MODEL: ChatModel = resolveDefaultModel();
+
+/**
+ * Whether a model accepts image input ("vision" capability). An unknown id
+ * counts as the default model, the same way the composer resolves it.
+ */
+export function modelAcceptsImages(id: string | null | undefined): boolean {
+  const config = (id && MODEL_CONFIGS[id as ChatModel]) || MODEL_CONFIGS[DEFAULT_MODEL];
+  return config?.capabilities?.includes("vision") ?? false;
+}
+
+/** Message shown when the user attaches an image for a model without vision. */
+export function imageInputNotSupportedMessage(id: string | null | undefined): string {
+  const config = (id && MODEL_CONFIGS[id as ChatModel]) || MODEL_CONFIGS[DEFAULT_MODEL];
+  return `${config?.name ?? "This model"} accepts text only. Select a model with image input, or remove the image.`;
+}
 
 /** Models the user can't currently select (e.g. over budget), with the reason. */
 export type DisabledModels = Partial<Record<ChatModel, { reason: string }>>;
