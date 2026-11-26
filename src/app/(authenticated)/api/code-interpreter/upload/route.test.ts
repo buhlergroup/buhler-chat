@@ -1,3 +1,5 @@
+// @vitest-environment node
+// (node: the route reads the upload with File.arrayBuffer, which jsdom lacks)
 import { describe, it, expect, vi, beforeEach } from "vitest";
 
 vi.mock("@/features/chat-page/chat-services/code-interpreter-service", () => ({
