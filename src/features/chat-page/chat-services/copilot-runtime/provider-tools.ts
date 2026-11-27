@@ -18,8 +18,10 @@
  *                   inputs, skill files or Python caches), each with its
  *                   download URL; stdout is returned (capped).
  *
- * Each tool is registered only when its chat toggle (or the agent's default
- * tool) is on. They are AI SDK tools, so tool-adapter.ts gives them schema
+ * Each tool is registered only when its toggle in `deps.toggles` is on. For
+ * web_search the caller sets it on every turn by default
+ * (web-search-default.ts); generate_image and run_code follow the chat
+ * toggle (or the agent's default tool). They are AI SDK tools, so tool-adapter.ts gives them schema
  * validation, the turn's request context, large-result spill and the
  * ToolUserError rule like every other app tool.
  *
@@ -155,6 +157,9 @@ export interface ModelChoice {
   provider?: string;
 }
 
+/** The setting that names the web_search tool's model. */
+export const WEB_SEARCH_MODEL_ENV = "COPILOT_WEB_SEARCH_MODEL";
+
 /**
  * Model for web_search / run_code: the model named in `envValue` when it is
  * deployed and serves the Responses API, else the first such model of
@@ -263,7 +268,9 @@ export interface WebSearchOutput {
 function webSearchTool(clients: () => Promise<ProviderClients>) {
   return tool({
     description:
-      "Search the web for current or public information. Returns a short answer and its source URLs. " +
+      "Search the web for current or public information. Each search has a cost: use it only when the answer needs " +
+      "recent facts or sources that are not in the chat, its files or your own knowledge. " +
+      "Returns a short answer and its source URLs. " +
       "Cite the sources in your reply as markdown links [title](url).",
     inputSchema: z.object({
       query: z.string().min(1).max(2000).describe("What to find out, as a full question or search query."),
@@ -587,7 +594,7 @@ function runCodeTool(deps: ProviderToolDeps, clients: () => Promise<ProviderClie
 
 // ── assembly ───────────────────────────────────────────────────────────────
 
-/** The provider built-in tools whose toggles are on. */
+/** The provider built-in tools whose toggles are on (web_search: see web-search-default.ts). */
 export function providerTools(deps: ProviderToolDeps): Record<string, AiTool> {
   let loaded: Promise<ProviderClients> | undefined;
   const clients = () =>

@@ -159,6 +159,9 @@ export async function resolveModelAndLimits(
     // (1) Per-user budget cap — highest precedence, OVERRIDES an explicit pick.
     const budget = await CheckUserBudget(userId);
     if (budget.exceeded) {
+      // The toggles, not the offered tools: on the Copilot path web_search is
+      // offered on every turn, but it runs on its own Responses model
+      // (provider-tools.ts), so the chat model needs no Responses support for it.
       const wantsBuiltInTools = !!(
         (payload.codeInterpreterEnabled ?? thread.defaultTools?.codeInterpreter) ||
         (payload.imageGenerationEnabled ?? thread.defaultTools?.imageGeneration) ||
