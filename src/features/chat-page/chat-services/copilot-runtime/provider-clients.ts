@@ -15,6 +15,7 @@ import { ensureCodeInterpreterContainer } from "../code-interpreter-container";
 import { ToolUserError } from "../tools/tool-user-error";
 import {
   resolveResponsesModel,
+  RUN_CODE_MODEL_ENV,
   WEB_SEARCH_MODEL_ENV,
   type CodeRunResult,
   type ContainerFile,
@@ -179,7 +180,7 @@ export function productionProviderClients(deps: Pick<ProviderToolDeps, "threadId
     },
 
     async runCode(containerId, { instructions, input }, signal): Promise<CodeRunResult> {
-      const model = responsesModel("COPILOT_RUN_CODE_MODEL");
+      const model = responsesModel(RUN_CODE_MODEL_ENV);
       const res = await responses().create(
         {
           model: model.deployment,

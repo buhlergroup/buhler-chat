@@ -75,6 +75,7 @@ import { type UserPrompt } from "@/features/chat-page/chat-services/models";
 import { copilotProviderFor } from "@/features/chat-page/chat-services/copilot-runtime/runtime-flag";
 import { resolveAgentRuntimeForCurrentUser } from "@/features/chat-page/chat-services/copilot-runtime/runtime-selection";
 import { copilotCodeInterpreterPlan } from "@/features/chat-page/chat-services/copilot-runtime/agent-code-interpreter";
+import { copilotRunCodeToggle } from "@/features/chat-page/chat-services/copilot-runtime/tool-defaults";
 
 // Allow streaming responses to run for up to 10 minutes (600 seconds)
 export const maxDuration = 600;
@@ -353,9 +354,13 @@ export async function POST(req: Request) {
   // Copilot path: run_code (provider-tools.ts) is the code interpreter. It is
   // on for the toggle or for an agent whose files need it, and its container
   // gets the agent's skill archives and Code files (agent-code-interpreter.ts).
+  // The toggle: the request's, else the thread's (agent) default, else the
+  // Copilot default (on unless COPILOT_RUN_CODE_DEFAULT is off, tool-defaults.ts).
   const copilotCodeInterpreter = useCopilotRuntime
     ? copilotCodeInterpreterPlan({
-        toggle: effectiveTools.codeInterpreter,
+        toggle: copilotRunCodeToggle({
+          toggle: payload.codeInterpreterEnabled ?? ctx.defaultTools?.codeInterpreter,
+        }),
         isAgentChat: !!ctx.thread.personaId,
         skills: agentSkills,
         attachedFiles: ciAttachedFiles,
@@ -479,10 +484,14 @@ export async function POST(req: Request) {
       systemMessage: system,
       toolset: tools,
       // The provider-hosted built-ins become our own tools on this path.
-      // webSearch is the user's toggle: chat-turn offers web_search on every
-      // turn by default and turns the toggle into a note on the user message
-      // (web-search-default.ts).
-      builtInToggles: { ...effectiveTools, codeInterpreter: codeInterpreterOn },
+      // webSearch: the request's toggle, else the thread's (agent) default,
+      // else undefined = no choice, and the Copilot default (on unless
+      // COPILOT_WEB_SEARCH_DEFAULT is off) decides (tool-defaults.ts).
+      builtInToggles: {
+        ...effectiveTools,
+        webSearch: payload.webSearchEnabled ?? ctx.defaultTools?.webSearch,
+        codeInterpreter: codeInterpreterOn,
+      },
       // The thread's code interpreter files (agent Code files, skill
       // archives, uploads) for the run_code container.
       codeInterpreterFiles: copilotCodeInterpreter?.files ?? [],

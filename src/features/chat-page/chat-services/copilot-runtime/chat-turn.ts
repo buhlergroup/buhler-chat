@@ -29,7 +29,7 @@ import {
 } from "./workspace-files";
 import { storeUpload } from "./workspace-uploads";
 import { spillLargePrompt } from "./prompt-spill";
-import { copilotOffersWebSearch, withWebSearchRequestNote } from "./web-search-default";
+import { copilotOffersWebSearch } from "./tool-defaults";
 import { copilotOffersSearchDocuments, withSearchNextMessageNote, withUploadsSearchHint } from "./search-documents-hint";
 import { THREAD_BUSY_TEXT, ThreadBusyError } from "./thread-lease";
 import { TURN_LIMIT_TEXTS, TurnLimitError } from "./runtime-limits";
@@ -52,10 +52,10 @@ export interface CopilotChatTurnArgs {
   toolset: Record<string, AiTool>;
   /**
    * The user's built-in toggles: served by our own tools (provider-tools.ts).
-   * web_search is offered on every turn by default; its toggle adds a note
-   * to the user message (web-search-default.ts).
+   * webSearch is the turn's choice (request, else thread); undefined = no
+   * choice, and COPILOT_WEB_SEARCH_DEFAULT decides (tool-defaults.ts).
    */
-  builtInToggles?: ProviderToolToggles;
+  builtInToggles?: Omit<ProviderToolToggles, "webSearch"> & { webSearch: boolean | undefined };
   /** The run_code container's files: the thread's code interpreter files (agent-code-interpreter.ts). */
   codeInterpreterFiles?: ContainerInputFile[];
   /** Browser-local datetime (get_current_time of persona sub-agents). */
@@ -145,8 +145,9 @@ export async function runCopilotChatTurn(args: CopilotChatTurnArgs): Promise<Res
         : {}),
       extract_text: extractTextTool(workspaceExtractDeps({ fs, userKey })),
       index_document: offerSearch ? indexDocument : withSearchNextMessageNote(indexDocument),
-      // generate_image / run_code when their toggle is on; web_search on
-      // every turn by default (COPILOT_WEB_SEARCH_ALWAYS), else with its toggle.
+      // generate_image / run_code when their toggle is on (the route sets
+      // run_code's: agent-code-interpreter.ts); web_search when its toggle
+      // is on, or with no choice by default (tool-defaults.ts).
       ...(args.builtInToggles
         ? providerTools({
             fs,
@@ -179,9 +180,7 @@ export async function runCopilotChatTurn(args: CopilotChatTurnArgs): Promise<Res
       toolset,
       // History before this turn: ctx.history ends with this turn's user message.
       priorHistory: ctx.history.slice(0, -1),
-      // The Web toggle of this turn: a static note at the end of the user
-      // message (never in the system message, which stays the same).
-      prompt: withWebSearchRequestNote(spilled.prompt, !!args.builtInToggles?.webSearch),
+      prompt: spilled.prompt,
       images: payload.multimodalImages,
       contextNote,
       abortSignal: abortController.signal,

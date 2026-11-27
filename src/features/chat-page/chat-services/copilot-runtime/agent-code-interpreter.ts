@@ -30,7 +30,7 @@ import {
 import { codeInterpreterPathOf } from "../chat-api/code-interpreter-files-prompt";
 
 export interface CopilotCodeInterpreterInput {
-  /** The composer toggle (payload, else the thread's default tools). */
+  /** The Code toggle (payload, else the thread's default tools, else the Copilot default: tool-defaults.ts). */
   toggle: boolean;
   /** The chat runs an agent (thread.personaId). */
   isAgentChat: boolean;
