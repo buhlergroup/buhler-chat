@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { render, screen } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 
 // The real ChatPage, with what needs a browser session or the network mocked.
 vi.mock("@ai-sdk/react", () => ({
@@ -37,6 +37,15 @@ vi.mock("@/features/chat-page/chat-services/models", async (importOriginal) => {
 import { ChatPage } from "../chat-page";
 import type { ChatThreadModel } from "../chat-services/models";
 import { DEFAULT_MODEL } from "../chat-services/models";
+
+/** jsdom's File has no text(). */
+const readText = (file: Blob) =>
+  new Promise<string>((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onerror = () => reject(reader.error);
+    reader.onload = () => resolve(String(reader.result));
+    reader.readAsText(file, "utf-8");
+  });
 
 const thread = {
   id: "thread1",
@@ -76,6 +85,45 @@ describe("ChatPage: chat workspace chips and Files panel", () => {
     );
     expect(screen.getByTestId("workspace-upload-chips")).toHaveTextContent("plan.docxUploaded");
     expect(screen.getByRole("button", { name: "Files of this chat" })).toHaveTextContent("Files (4)");
+  });
+
+  it("Copilot path: a paste over the limit becomes a text file upload with a chip, a small paste stays text", async () => {
+    const { UploadFileToAgentWorkspace } = await import(
+      "@/features/chat-page/chat-services/copilot-runtime/workspace-upload-actions"
+    );
+    const upload = vi.mocked(UploadFileToAgentWorkspace);
+    upload.mockImplementation(async (fd: FormData) => {
+      const file = fd.get("file") as File;
+      return {
+        status: "OK",
+        response: { handled: true, path: `/workspace/uploads/${file.name}`, size: file.size, modified: "2026-01-01T00:00:00.000Z" },
+      };
+    });
+    render(<ChatPage {...pageProps} workspace={{ uploads: [], fileCount: 0, pastedTextLimitBytes: 100 }} />);
+    const input = screen.getByPlaceholderText("Type your message...");
+    const clipboard = (text: string) => ({ getData: (t: string) => (t === "text/plain" ? text : ""), items: [], files: [] });
+
+    // At the limit: the browser pastes it as text.
+    expect(fireEvent.paste(input, { clipboardData: clipboard("a".repeat(100)) })).toBe(true);
+    expect(upload).not.toHaveBeenCalled();
+
+    // Over the limit: no text paste, the same upload as a picked .txt file.
+    const big = "ä".repeat(51);
+    expect(fireEvent.paste(input, { clipboardData: clipboard(big) })).toBe(false);
+    await waitFor(() => expect(upload).toHaveBeenCalledTimes(1));
+    const file = upload.mock.calls[0][0].get("file") as File;
+    expect(file.name).toMatch(/^pasted-text-\d{8}-\d{6}\.txt$/);
+    expect(await readText(file)).toBe(big);
+    expect(upload.mock.calls[0][0].get("id")).toBe("thread1");
+    await waitFor(() => expect(screen.getByTestId("workspace-upload-chips")).toHaveTextContent(file.name));
+    expect(input).toHaveValue("");
+  });
+
+  it("AI SDK path: a big paste stays text", () => {
+    render(<ChatPage {...pageProps} workspace={null} />);
+    const input = screen.getByPlaceholderText("Type your message...");
+    const clipboardData = { getData: (t: string) => (t === "text/plain" ? "a".repeat(100_000) : ""), items: [], files: [] };
+    expect(fireEvent.paste(input, { clipboardData })).toBe(true);
   });
 
   it("AI SDK path: no chips and no Files button", () => {

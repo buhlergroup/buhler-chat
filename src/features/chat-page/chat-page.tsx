@@ -59,6 +59,7 @@ import { useEmbedMode } from "@/features/embed/embed-mode-context";
 import type { WorkspaceSummary } from "./chat-services/workspace-file-model";
 import { WorkspaceUploadChips } from "./workspace-files/workspace-upload-chips";
 import { WorkspaceFilesPanel } from "./workspace-files/workspace-files-panel";
+import { pastedTextFile } from "./chat-input/pasted-text-file";
 
 interface ChatPageProps {
   messages: Array<ChatMessageModel>;
@@ -67,8 +68,9 @@ interface ChatPageProps {
   extensions: Array<ExtensionModel>;
   /**
    * The chat workspace (Copilot path only): the user's uploads for the input
-   * field chips and the file count for the Files panel. Null or absent on
-   * the AI SDK path: no chips, no panel.
+   * field chips, the file count for the Files panel and the size above which
+   * a paste becomes a text file. Null or absent on the AI SDK path: no chips,
+   * no panel, a paste stays text.
    */
   workspace?: WorkspaceSummary | null;
   /**
@@ -546,6 +548,16 @@ const ChatPageInner = (props: ChatPageProps) => {
   const handlePaste = async (e: React.ClipboardEvent<HTMLTextAreaElement>) => {
     const clipboard = e.clipboardData;
     if (!clipboard) return;
+
+    // A big paste becomes a text file upload, like a picked .txt file (same
+    // chip, /workspace/uploads on the Copilot path). The limit is the
+    // server's inline limit for large tool results; null on the AI SDK path.
+    const pastedFile = pastedTextFile(clipboard.getData("text/plain"), props.workspace?.pastedTextLimitBytes);
+    if (pastedFile) {
+      e.preventDefault();
+      await uploadFile(pastedFile);
+      return;
+    }
 
     const hasMeaningfulText = (() => {
       const plain = clipboard.getData("text/plain");

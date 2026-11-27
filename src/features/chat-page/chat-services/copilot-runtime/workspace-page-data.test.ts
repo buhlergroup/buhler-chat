@@ -30,9 +30,18 @@ describe("FindWorkspaceSummaryForCurrentUser (chat page data)", () => {
     mockSummary.mockResolvedValue(summary);
   });
 
-  it("gives the uploads and the file count of the thread on the Copilot path", async () => {
-    expect(await FindWorkspaceSummaryForCurrentUser("thread1")).toEqual(summary);
+  it("gives the uploads, the file count and the paste limit of the thread on the Copilot path", async () => {
+    expect(await FindWorkspaceSummaryForCurrentUser("thread1")).toEqual({ ...summary, pastedTextLimitBytes: 16 * 1024 });
     expect(mockSummary).toHaveBeenCalledWith("user-hash", "thread1");
+  });
+
+  it("the paste limit is the tool result inline limit (COPILOT_TOOL_RESULT_INLINE_BYTES)", async () => {
+    vi.stubEnv("COPILOT_TOOL_RESULT_INLINE_BYTES", "5000");
+    try {
+      expect((await FindWorkspaceSummaryForCurrentUser("thread1"))?.pastedTextLimitBytes).toBe(5000);
+    } finally {
+      vi.unstubAllEnvs();
+    }
   });
 
   it("gives null on the AI SDK path, without a workspace read", async () => {
@@ -55,6 +64,6 @@ describe("FindWorkspaceSummaryForCurrentUser (chat page data)", () => {
 
   it("gives an empty workspace when the read fails", async () => {
     mockSummary.mockRejectedValue(new Error("blob down"));
-    expect(await FindWorkspaceSummaryForCurrentUser("thread1")).toEqual({ uploads: [], fileCount: 0 });
+    expect(await FindWorkspaceSummaryForCurrentUser("thread1")).toEqual({ uploads: [], fileCount: 0, pastedTextLimitBytes: 16 * 1024 });
   });
 });

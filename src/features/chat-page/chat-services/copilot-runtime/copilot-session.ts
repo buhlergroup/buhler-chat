@@ -50,7 +50,11 @@ import {
 
 export { COPILOT_FILE_TOOLS } from "./session-gates";
 
-/** Share of the prompt limit at which the runtime starts compacting in the background. */
+/**
+ * Share of the prompt limit at which the runtime starts compacting in the
+ * background. The limit is the history budget (copilotMaxPromptTokens in
+ * providers.ts), not the context window.
+ */
 export const COMPACTION_THRESHOLD = 0.9;
 /** Share at which the runtime blocks the turn until compaction is done. */
 export const COMPACTION_BLOCK_THRESHOLD = 0.97;
@@ -559,9 +563,11 @@ async function openSession(
     },
     state: {
       createSessionFsProvider: () => fs,
-      // Compact only near the model's real input limit (maxPromptTokens in
-      // providers.ts): compaction costs a model call and breaks the cache
-      // prefix, and it can drop details.
+      // Compact only near the history budget (maxPromptTokens in
+      // providers.ts: HISTORY_TOKEN_BUDGET, capped below the model's
+      // long-context billing threshold and its input limit). Compaction costs
+      // a model call, breaks the cache prefix and can drop details, so it
+      // must not run earlier; the budget keeps prompts in the cheaper tier.
       infiniteSessions: {
         enabled: true,
         backgroundCompactionThreshold: COMPACTION_THRESHOLD,

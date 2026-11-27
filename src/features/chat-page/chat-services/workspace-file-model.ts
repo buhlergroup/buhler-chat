@@ -21,6 +21,12 @@ export interface WorkspaceSummary {
   uploads: WorkspaceFileInfo[];
   /** Files under /workspace (all groups). */
   fileCount: number;
+  /**
+   * Pasted text over this many UTF-8 bytes becomes a text file upload, not
+   * message text. The server's inline limit (inline-limit.ts), passed here
+   * because the browser cannot read the setting.
+   */
+  pastedTextLimitBytes?: number;
 }
 
 /** The Files panel: newest first, bounded. */

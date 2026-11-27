@@ -27,6 +27,8 @@ import {
   workspaceUploadEntries,
   workspaceUploadsNote,
 } from "./workspace-files";
+import { storeUpload } from "./workspace-uploads";
+import { spillLargePrompt } from "./prompt-spill";
 import { copilotOffersSearchDocuments, withSearchNextMessageNote, withUploadsSearchHint } from "./search-documents-hint";
 import { THREAD_BUSY_TEXT, ThreadBusyError } from "./thread-lease";
 import { TURN_LIMIT_TEXTS, TurnLimitError } from "./runtime-limits";
@@ -97,6 +99,23 @@ export async function runCopilotChatTurn(args: CopilotChatTurnArgs): Promise<Res
     // The thread's workspace: extract_text and index_document work on it, and the model is
     // told which uploads it holds (sent again only when the list changes).
     const { fs } = await threadWorkspace(userKey, threadId);
+    // A message over the inline limit reaches the model as a file in
+    // /workspace/uploads plus a short note in the user message
+    // (prompt-spill.ts); Cosmos keeps the full text. Saved before the uploads
+    // listing, so the uploads note names the file too.
+    const spilled = await spillLargePrompt(payload.message, {
+      id: ctx.turnId,
+      store: (name, data) => storeUpload({ fs }, name, data),
+    }).catch((err: unknown) => {
+      logWarn("/api/chat copilot: large message not saved as a file", {
+        threadId,
+        error: err instanceof Error ? err.message : String(err),
+      });
+      return { prompt: payload.message, savedTo: undefined, bytes: undefined };
+    });
+    if (spilled.savedTo) {
+      logInfo("/api/chat copilot: large message saved as a file", { threadId, bytes: spilled.bytes });
+    }
     const uploadEntries = await workspaceUploadEntries(fs);
     // search_documents: only with indexed chat documents, agent documents or
     // uploads to index (copilotOffersSearchDocuments); it names the uploads
@@ -151,7 +170,7 @@ export async function runCopilotChatTurn(args: CopilotChatTurnArgs): Promise<Res
       toolset,
       // History before this turn: ctx.history ends with this turn's user message.
       priorHistory: ctx.history.slice(0, -1),
-      prompt: payload.message,
+      prompt: spilled.prompt,
       images: payload.multimodalImages,
       contextNote,
       abortSignal: abortController.signal,

@@ -20,11 +20,20 @@ const uploads = vi.hoisted(() => ({
     lastModified: Date;
     size?: number;
   }>,
+  /** Files written to the thread's workspace (path -> text). */
+  written: new Map<string, string>(),
 }));
 vi.mock("./workspace-files", async () => {
   const { uploadsNote } = await import("./workspace-uploads");
   return {
-    threadWorkspace: async () => ({ fs: {} }),
+    threadWorkspace: async () => ({
+      fs: {
+        listEntries: async () => uploads.entries,
+        writeFileBytes: async (path: string, content: Uint8Array) => {
+          uploads.written.set(path, Buffer.from(content).toString("utf8"));
+        },
+      },
+    }),
     chatDocumentIndexDeps: () => ({}),
     workspaceExtractDeps: () => ({}),
     workspaceUploadEntries: async () => uploads.entries,
@@ -318,13 +327,20 @@ describe("runCopilotChatTurn: search_documents, uploads and run_code", () => {
     personaDocumentIds?: string[];
     builtInToggles?: { imageGeneration: boolean; webSearch: boolean; codeInterpreter: boolean };
     systemMessage?: string;
+    message?: string;
+    turnId?: string;
   }) {
     uploads.entries = opts.uploads;
     fakeTurnUntilAbort();
     const base = ctx(opts.threadId) as Record<string, unknown>;
     await runCopilotChatTurn({
-      ctx: { ...base, threadDocumentIds: opts.threadDocumentIds ?? [], personaDocumentIds: opts.personaDocumentIds ?? [] } as never,
-      payload: { message: "hello" } as never,
+      ctx: {
+        ...base,
+        threadDocumentIds: opts.threadDocumentIds ?? [],
+        personaDocumentIds: opts.personaDocumentIds ?? [],
+        ...(opts.turnId ? { turnId: opts.turnId } : {}),
+      } as never,
+      payload: { message: opts.message ?? "hello" } as never,
       modelConfig,
       effectiveModel: "gpt-5.5" as never,
       systemMessage: opts.systemMessage ?? "sys",
@@ -336,6 +352,7 @@ describe("runCopilotChatTurn: search_documents, uploads and run_code", () => {
       toolset: Record<string, { description?: string; execute?: (a: unknown, o: unknown) => Promise<unknown> }>;
       contextNote?: string;
       systemMessage: string;
+      prompt: string;
     };
   }
 
@@ -389,5 +406,58 @@ describe("runCopilotChatTurn: search_documents, uploads and run_code", () => {
     expect(second.toolset.run_code.description).toBe(first.toolset.run_code.description);
     // The new upload reaches the model in the turn's own message.
     expect(second.contextNote).toContain("/workspace/uploads/new.xlsx");
+  });
+});
+
+describe("runCopilotChatTurn: a very large user message", () => {
+  beforeEach(() => {
+    __resetStreamPublishers();
+    runCopilotTurn.mockReset();
+    uploads.written.clear();
+    uploads.entries = [];
+  });
+
+  async function turn(threadId: string, message: string, turnId = "turn-1") {
+    fakeTurnUntilAbort();
+    const base = ctx(threadId) as Record<string, unknown>;
+    await runCopilotChatTurn({
+      ctx: { ...base, turnId } as never,
+      payload: { message } as never,
+      modelConfig,
+      effectiveModel: "gpt-5.5" as never,
+      systemMessage: "sys",
+      toolset: {},
+    });
+    abortPublisher(threadId);
+    return runCopilotTurn.mock.calls.at(-1)![0] as { prompt: string; systemMessage: string; contextNote?: string };
+  }
+
+  it("is saved to /workspace/uploads and the model gets a note with the path, size and a preview", async () => {
+    const big = "Line of pasted log text.\n".repeat(1000) + "QUESTION: what failed?";
+    const input = await turn("t-big", big, "turn-big1");
+    const path = "/workspace/uploads/pasted-text-turn-big1.txt";
+    expect(uploads.written.get(path)).toBe(big);
+    expect(input.prompt).toContain(path);
+    expect(input.prompt).toContain(`(${Buffer.byteLength(big, "utf8")} bytes)`);
+    expect(input.prompt.startsWith("The user's message was too long")).toBe(true);
+    expect(input.prompt).toContain("Line of pasted log text.");
+    expect(input.prompt.length).toBeLessThan(5 * 1024);
+  });
+
+  it("a message at the limit goes to the model as it is, and nothing is written", async () => {
+    const atLimit = "x".repeat(16 * 1024);
+    const input = await turn("t-limit", atLimit);
+    expect(input.prompt).toBe(atLimit);
+    expect(uploads.written.size).toBe(0);
+  });
+
+  it("the system message is the same with and without a saved paste", async () => {
+    const small = await turn("t-sys", "hello", "turn-a");
+    const big = await turn("t-sys", "y".repeat(20_000), "turn-b");
+    expect(uploads.written.has("/workspace/uploads/pasted-text-turn-b.txt")).toBe(true);
+    expect(big.systemMessage).toBe(small.systemMessage);
+    expect(big.systemMessage).not.toContain("pasted-text");
+    // The note is in the user message only.
+    expect(big.prompt).toContain("/workspace/uploads/pasted-text-turn-b.txt");
   });
 });

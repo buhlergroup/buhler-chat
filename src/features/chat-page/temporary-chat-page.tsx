@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef, useState, type ComponentProps } from "react";
+import { useEffect, useMemo, useRef, useState, type ComponentProps } from "react";
 import { Loader } from "@/components/ai-elements/loader";
 import { DisplayError } from "@/features/ui/error/display-error";
 import { ChatPage } from "./chat-page";
@@ -41,6 +41,12 @@ export const TemporaryChatPage = (props: TemporaryChatPageProps) => {
     resetOnEntry ? "resetting" : "ready",
   );
   const [errorMessage, setErrorMessage] = useState("");
+  // The entry render hides the earlier uploads but keeps the paste limit.
+  const pastedTextLimitBytes = pageProps.workspace?.pastedTextLimitBytes;
+  const entryWorkspace = useMemo(
+    () => (pastedTextLimitBytes === undefined ? NO_WORKSPACE : { ...NO_WORKSPACE, pastedTextLimitBytes }),
+    [pastedTextLimitBytes],
+  );
 
   useEffect(() => {
     if (!resetOnEntry) return;
@@ -88,7 +94,7 @@ export const TemporaryChatPage = (props: TemporaryChatPageProps) => {
       {...pageProps}
       messages={showsEntryContent ? NO_MESSAGES : pageProps.messages}
       chatDocuments={showsEntryContent ? NO_DOCUMENTS : pageProps.chatDocuments}
-      workspace={showsEntryContent && pageProps.workspace ? NO_WORKSPACE : pageProps.workspace}
+      workspace={showsEntryContent && pageProps.workspace ? entryWorkspace : pageProps.workspace}
     />
   );
 };
