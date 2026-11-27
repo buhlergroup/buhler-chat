@@ -27,6 +27,13 @@ export interface WorkspaceSummary {
    * because the browser cannot read the setting.
    */
   pastedTextLimitBytes?: number;
+  /**
+   * The Web / Code toggles' state when the chat has no choice of its own (no
+   * agent default): the server's web_search / run_code defaults
+   * (tool-defaults.ts), so the toggles show whether the tool is offered.
+   */
+  webSearchDefault?: boolean;
+  runCodeDefault?: boolean;
 }
 
 /** The Files panel: newest first, bounded. */

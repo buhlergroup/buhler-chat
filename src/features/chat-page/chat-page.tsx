@@ -935,6 +935,9 @@ export const ChatPage = (props: ChatPageProps) => {
       threadId={props.chatThread.id}
       chatThread={props.chatThread}
       initialAiMessages={initialAiMessages}
+      // Copilot path: the server's web_search / run_code defaults; else off.
+      webSearchDefault={props.workspace?.webSearchDefault}
+      runCodeDefault={props.workspace?.runCodeDefault}
     >
       <ChatPageInner {...props} />
     </ChatStoreProvider>

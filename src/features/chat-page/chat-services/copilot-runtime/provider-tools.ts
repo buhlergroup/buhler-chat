@@ -18,10 +18,10 @@
  *                   inputs, skill files or Python caches), each with its
  *                   download URL; stdout is returned (capped).
  *
- * Each tool is registered only when its toggle in `deps.toggles` is on. For
- * web_search the caller sets it on every turn by default
- * (web-search-default.ts); generate_image and run_code follow the chat
- * toggle (or the agent's default tool). They are AI SDK tools, so tool-adapter.ts gives them schema
+ * Each tool is registered only when its toggle in `deps.toggles` is on: the
+ * chat toggle (or the agent's default tool). The Web and Code toggles are on
+ * by default (tool-defaults.ts); run_code is also on for a chat whose files
+ * need it (agent-code-interpreter.ts). They are AI SDK tools, so tool-adapter.ts gives them schema
  * validation, the turn's request context, large-result spill and the
  * ToolUserError rule like every other app tool.
  *
@@ -159,6 +159,8 @@ export interface ModelChoice {
 
 /** The setting that names the web_search tool's model. */
 export const WEB_SEARCH_MODEL_ENV = "COPILOT_WEB_SEARCH_MODEL";
+/** The setting that names the run_code tool's model. */
+export const RUN_CODE_MODEL_ENV = "COPILOT_RUN_CODE_MODEL";
 
 /**
  * Model for web_search / run_code: the model named in `envValue` when it is
@@ -594,7 +596,7 @@ function runCodeTool(deps: ProviderToolDeps, clients: () => Promise<ProviderClie
 
 // ── assembly ───────────────────────────────────────────────────────────────
 
-/** The provider built-in tools whose toggles are on (web_search: see web-search-default.ts). */
+/** The provider built-in tools whose toggles are on (web_search: see tool-defaults.ts). */
 export function providerTools(deps: ProviderToolDeps): Record<string, AiTool> {
   let loaded: Promise<ProviderClients> | undefined;
   const clients = () =>

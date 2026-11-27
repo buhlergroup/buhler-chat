@@ -132,4 +132,23 @@ describe("ChatPage: chat workspace chips and Files panel", () => {
     expect(screen.queryByRole("button", { name: "Files of this chat" })).toBeNull();
     expect(screen.getByRole("button", { name: "Upload file" })).toBeInTheDocument();
   });
+
+  it("Copilot path: the Web and Code toggles start as the server's defaults", () => {
+    render(
+      <ChatPage
+        {...pageProps}
+        workspace={{ uploads: [], fileCount: 0, webSearchDefault: true, runCodeDefault: true }}
+      />,
+    );
+    expect(screen.getByRole("button", { name: "Web search" })).toHaveAttribute("aria-pressed", "true");
+    expect(screen.getByRole("button", { name: "Code interpreter" })).toHaveAttribute("aria-pressed", "true");
+    // Image generation keeps its own default (no change).
+    expect(screen.getByRole("button", { name: "Image generation" })).toBeInTheDocument();
+  });
+
+  it("AI SDK path: the Web and Code toggles start off", () => {
+    render(<ChatPage {...pageProps} workspace={null} />);
+    expect(screen.getByRole("button", { name: "Web search" })).toHaveAttribute("aria-pressed", "false");
+    expect(screen.getByRole("button", { name: "Code interpreter" })).toHaveAttribute("aria-pressed", "false");
+  });
 });

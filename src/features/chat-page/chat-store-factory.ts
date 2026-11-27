@@ -100,10 +100,17 @@ export interface CreateChatStoreOptions {
   threadId: string;
   userName?: string;
   chatThread?: ChatThreadModel;
+  /**
+   * The Web / Code toggles' state when the thread has no choice of its own
+   * (WorkspaceSummary.webSearchDefault / runCodeDefault; Copilot path only).
+   * Omitted: off.
+   */
+  webSearchDefault?: boolean;
+  runCodeDefault?: boolean;
 }
 
 export function createChatStore(options: CreateChatStoreOptions) {
-  const { threadId, userName = "", chatThread } = options;
+  const { threadId, userName = "", chatThread, webSearchDefault = false, runCodeDefault = false } = options;
 
   // Resolve initial model from thread
   const threadModel = chatThread?.selectedModel;
@@ -170,10 +177,14 @@ export function createChatStore(options: CreateChatStoreOptions) {
       chatThread?.reasoningEffort ?? modelCfg?.defaultReasoningEffort ?? "low",
 
     // --- tool toggles ---
-    webSearchEnabled: dt?.webSearch ?? false,
+    // Web / Code: the agent's choice, else the server's default (Copilot
+    // path). The store value goes with every request, so a request with
+    // false is the user's (or the agent's) off, and an untouched toggle sends
+    // the default.
+    webSearchEnabled: dt?.webSearch ?? webSearchDefault,
     imageGenerationEnabled: dt?.imageGeneration ?? !!modelCfg?.supportsImageGeneration,
     companyContentEnabled: dt?.companyContent ?? false,
-    codeInterpreterEnabled: dt?.codeInterpreter ?? hasCodeInterpreterFiles,
+    codeInterpreterEnabled: dt?.codeInterpreter ?? (hasCodeInterpreterFiles || runCodeDefault),
 
     // --- files ---
     attachedFiles: chatThread?.attachedFiles ?? [],

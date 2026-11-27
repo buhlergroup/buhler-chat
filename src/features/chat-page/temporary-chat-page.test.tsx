@@ -12,8 +12,8 @@ vi.mock("./chat-services/chat-thread-service", () => ({
 // The real ChatPage needs the chat store, the AI SDK and a session. These
 // tests only check what the temporary page hands to it.
 vi.mock("./chat-page", () => ({
-  ChatPage: (props: { messages: unknown[]; chatDocuments: unknown[] }) => (
-    <div data-testid="chat-page">
+  ChatPage: (props: { messages: unknown[]; chatDocuments: unknown[]; workspace?: unknown }) => (
+    <div data-testid="chat-page" data-workspace={JSON.stringify(props.workspace ?? null)}>
       {props.messages.length} messages, {props.chatDocuments.length} documents
     </div>
   ),
@@ -79,6 +79,26 @@ describe("chat-page.unit.components — TemporaryChatPage", () => {
 
     expect(screen.getByTestId("chat-page")).toHaveTextContent("0 messages");
     expect(mockResetChatThread).not.toHaveBeenCalled();
+  });
+
+  it("the entry render hides earlier uploads but keeps the paste limit and the Web / Code defaults", async () => {
+    const workspace = {
+      uploads: [{ path: "uploads/old.pdf", name: "old.pdf", modified: "2026-01-01T00:00:00.000Z", group: "uploaded" }],
+      fileCount: 1,
+      pastedTextLimitBytes: 100,
+      webSearchDefault: true,
+      runCodeDefault: true,
+    };
+    render(<TemporaryChatPage resetOnEntry {...pageProps([{ id: "old-1" }])} workspace={workspace as never} />);
+
+    const page = await screen.findByTestId("chat-page");
+    expect(JSON.parse(page.getAttribute("data-workspace") ?? "null")).toEqual({
+      uploads: [],
+      fileCount: 0,
+      pastedTextLimitBytes: 100,
+      webSearchDefault: true,
+      runCodeDefault: true,
+    });
   });
 
   it("shows an error when the reset fails", async () => {

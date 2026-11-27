@@ -41,11 +41,19 @@ export const TemporaryChatPage = (props: TemporaryChatPageProps) => {
     resetOnEntry ? "resetting" : "ready",
   );
   const [errorMessage, setErrorMessage] = useState("");
-  // The entry render hides the earlier uploads but keeps the paste limit.
+  // The entry render hides the earlier uploads but keeps the paste limit and
+  // the Web / Code toggles' defaults.
   const pastedTextLimitBytes = pageProps.workspace?.pastedTextLimitBytes;
+  const webSearchDefault = pageProps.workspace?.webSearchDefault;
+  const runCodeDefault = pageProps.workspace?.runCodeDefault;
   const entryWorkspace = useMemo(
-    () => (pastedTextLimitBytes === undefined ? NO_WORKSPACE : { ...NO_WORKSPACE, pastedTextLimitBytes }),
-    [pastedTextLimitBytes],
+    () => ({
+      ...NO_WORKSPACE,
+      ...(pastedTextLimitBytes === undefined ? {} : { pastedTextLimitBytes }),
+      ...(webSearchDefault === undefined ? {} : { webSearchDefault }),
+      ...(runCodeDefault === undefined ? {} : { runCodeDefault }),
+    }),
+    [pastedTextLimitBytes, webSearchDefault, runCodeDefault],
   );
 
   useEffect(() => {

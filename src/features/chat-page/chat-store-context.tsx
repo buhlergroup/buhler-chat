@@ -87,6 +87,9 @@ export interface ChatStoreProviderProps {
   initialAiMessages?: UIMessage[];
   userName?: string;
   chatThread?: ChatThreadModel;
+  /** The Web / Code toggles' defaults (WorkspaceSummary); read once, when the store is made. */
+  webSearchDefault?: boolean;
+  runCodeDefault?: boolean;
   children: ReactNode;
 }
 
@@ -135,6 +138,8 @@ export function ChatStoreProvider({
   initialAiMessages,
   userName,
   chatThread,
+  webSearchDefault,
+  runCodeDefault,
   children,
 }: ChatStoreProviderProps) {
   // Lazily create the store once per mount (React key handles resets).
@@ -144,6 +149,8 @@ export function ChatStoreProvider({
       threadId,
       userName,
       chatThread,
+      webSearchDefault,
+      runCodeDefault,
     });
   }
   const store = storeRef.current;

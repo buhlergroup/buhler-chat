@@ -79,3 +79,63 @@ describe("createChatStore — isolation", () => {
   // (architect review SERIOUS finding). Tool calls are rendered from
   // UIMessage.parts as DynamicToolUIPart, not from a Zustand cache.
 });
+
+describe("createChatStore — Web / Code toggle defaults", () => {
+  it("Copilot path (defaults from the workspace summary): Web and Code start on", () => {
+    const s = createChatStore({
+      threadId: "A",
+      chatThread: baseThread(),
+      webSearchDefault: true,
+      runCodeDefault: true,
+    }).getState();
+    expect(s.webSearchEnabled).toBe(true);
+    expect(s.codeInterpreterEnabled).toBe(true);
+  });
+
+  it("without the summary (AI SDK path): Web and Code start off, as before", () => {
+    const s = createChatStore({ threadId: "A", chatThread: baseThread() }).getState();
+    expect(s.webSearchEnabled).toBe(false);
+    expect(s.codeInterpreterEnabled).toBe(false);
+  });
+
+  it("an agent's explicit false wins over the default", () => {
+    const s = createChatStore({
+      threadId: "A",
+      chatThread: { ...baseThread(), defaultTools: { webSearch: false, codeInterpreter: false } },
+      webSearchDefault: true,
+      runCodeDefault: true,
+    }).getState();
+    expect(s.webSearchEnabled).toBe(false);
+    expect(s.codeInterpreterEnabled).toBe(false);
+  });
+
+  it("an agent's explicit true wins over a default off", () => {
+    const s = createChatStore({
+      threadId: "A",
+      chatThread: { ...baseThread(), defaultTools: { webSearch: true, codeInterpreter: true } },
+      webSearchDefault: false,
+      runCodeDefault: false,
+    }).getState();
+    expect(s.webSearchEnabled).toBe(true);
+    expect(s.codeInterpreterEnabled).toBe(true);
+  });
+
+  it("the Code toggle still starts on for a thread with code interpreter files", () => {
+    const s = createChatStore({
+      threadId: "A",
+      chatThread: {
+        ...baseThread(),
+        attachedFiles: [{ id: "f1", name: "a.csv", type: "code-interpreter" } as never],
+      },
+    }).getState();
+    expect(s.codeInterpreterEnabled).toBe(true);
+  });
+
+  it("the user's off stays off (the request then carries false)", () => {
+    const store = createChatStore({ threadId: "A", webSearchDefault: true, runCodeDefault: true });
+    store.getState().toggleWebSearch(false);
+    store.getState().toggleCodeInterpreter(false);
+    expect(store.getState().webSearchEnabled).toBe(false);
+    expect(store.getState().codeInterpreterEnabled).toBe(false);
+  });
+});

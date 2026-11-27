@@ -56,7 +56,6 @@ const upsert = vi.fn(async (_row: unknown) => undefined);
 vi.mock("../chat-message-service", () => ({ UpsertChatMessage: (row: unknown) => upsert(row) }));
 
 import { recordSubAgentInteractions, runCopilotChatTurn, TURN_START_FAILED } from "./chat-turn";
-import { WEB_SEARCH_REQUESTED_NOTE } from "./web-search-default";
 import { ThreadBusyError } from "./thread-lease";
 import { TurnLimitError } from "./runtime-limits";
 import { MODEL_CONFIGS } from "../models";
@@ -517,7 +516,7 @@ describe("runCopilotChatTurn: a very large user message", () => {
   });
 });
 
-describe("runCopilotChatTurn: web_search on every turn (COPILOT_WEB_SEARCH_ALWAYS)", () => {
+describe("runCopilotChatTurn: the Web toggle (COPILOT_WEB_SEARCH_DEFAULT)", () => {
   const luna = MODEL_CONFIGS["gpt-5.6-luna" as keyof typeof MODEL_CONFIGS] as { deploymentName?: string };
   let deployment: string | undefined;
 
@@ -533,13 +532,13 @@ describe("runCopilotChatTurn: web_search on every turn (COPILOT_WEB_SEARCH_ALWAY
     __resetStreamPublishers();
     runCopilotTurn.mockReset();
     uploads.entries = [];
-    vi.stubEnv("COPILOT_WEB_SEARCH_ALWAYS", "");
+    vi.stubEnv("COPILOT_WEB_SEARCH_DEFAULT", "");
   });
   afterEach(() => {
     vi.unstubAllEnvs();
   });
 
-  async function webTurn(threadId: string, webSearch: boolean, message = "What changed in the standard?") {
+  async function webTurn(threadId: string, webSearch: boolean | undefined, message = "What changed in the standard?") {
     fakeTurnUntilAbort();
     await runCopilotChatTurn({
       ctx: ctx(threadId),
@@ -558,40 +557,46 @@ describe("runCopilotChatTurn: web_search on every turn (COPILOT_WEB_SEARCH_ALWAY
     };
   }
 
-  it("toggle off, setting unset: web_search is offered", async () => {
-    const input = await webTurn("t-web-default", false);
+  it("no choice (undefined), setting unset: web_search is offered", async () => {
+    const input = await webTurn("t-web-default", undefined);
     expect(Object.keys(input.toolset)).toContain("web_search");
   });
 
-  it("toggle off, setting false: web_search is not offered", async () => {
-    vi.stubEnv("COPILOT_WEB_SEARCH_ALWAYS", "false");
-    const input = await webTurn("t-web-off", false);
+  it("explicit off: web_search is not offered", async () => {
+    const input = await webTurn("t-web-explicit-off", false);
     expect(Object.keys(input.toolset)).not.toContain("web_search");
   });
 
-  it("toggle on: web_search is offered, also with the setting false", async () => {
+  it("no choice, setting false: web_search is not offered (the old default off)", async () => {
+    vi.stubEnv("COPILOT_WEB_SEARCH_DEFAULT", "false");
+    const input = await webTurn("t-web-setting-off", undefined);
+    expect(Object.keys(input.toolset)).not.toContain("web_search");
+  });
+
+  it("explicit on: web_search is offered, also with the setting false", async () => {
     expect(Object.keys((await webTurn("t-web-on", true)).toolset)).toContain("web_search");
-    vi.stubEnv("COPILOT_WEB_SEARCH_ALWAYS", "false");
+    vi.stubEnv("COPILOT_WEB_SEARCH_DEFAULT", "false");
     expect(Object.keys((await webTurn("t-web-on-off", true)).toolset)).toContain("web_search");
   });
 
-  it("the user message gets the web search note only when the toggle is on", async () => {
-    const off = await webTurn("t-web-note", false, "What is new?");
-    expect(off.prompt).toBe("What is new?");
-    const on = await webTurn("t-web-note", true, "What is new?");
-    expect(on.prompt.startsWith("What is new?")).toBe(true);
-    expect(on.prompt.endsWith(WEB_SEARCH_REQUESTED_NOTE)).toBe(true);
+  it("the user message is the user's text for every toggle state (no web search note)", async () => {
+    for (const toggle of [true, false, undefined]) {
+      expect((await webTurn("t-web-note", toggle, "What is new?")).prompt).toBe("What is new?");
+    }
   });
 
-  it("the system message and the tool list are the same for toggle on and off turns", async () => {
+  it("the system message is the same for toggle on and off turns", async () => {
     const off = await webTurn("t-web-stable", false);
     const on = await webTurn("t-web-stable", true);
-    const off2 = await webTurn("t-web-stable", false);
+    const none = await webTurn("t-web-stable", undefined);
     expect(on.systemMessage).toBe(off.systemMessage);
-    expect(on.systemMessage).not.toContain(WEB_SEARCH_REQUESTED_NOTE);
-    expect(Object.keys(on.toolset)).toEqual(Object.keys(off.toolset));
-    expect(Object.keys(off2.toolset)).toEqual(Object.keys(off.toolset));
-    // Static tool description: the same definition on every turn.
-    expect(on.toolset.web_search.description).toBe(off.toolset.web_search.description);
+    expect(none.systemMessage).toBe(off.systemMessage);
+    expect(on.systemMessage).toBe("sys");
+  });
+
+  it("the web_search description is static", async () => {
+    const a = await webTurn("t-web-desc", true, "first");
+    const b = await webTurn("t-web-desc", undefined, "second");
+    expect(a.toolset.web_search.description).toBe(b.toolset.web_search.description);
   });
 });
