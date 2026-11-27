@@ -6,6 +6,7 @@ import {
   getAzureCognitiveServicesTokenProvider,
 } from "@/features/common/services/azure-default-credential";
 import { MODEL_CONFIGS, type ChatModel } from "../models";
+import { resolveHistoryBudget } from "../chat-api/history-budget";
 import { copilotProviderFor } from "./runtime-flag";
 
 /**
@@ -90,6 +91,39 @@ export function copilotPromptLimit(config: { contextWindow: number; maxOutputTok
   return limit > 0 ? limit : config.contextWindow;
 }
 
+/**
+ * maxPromptTokens of a model on the Copilot path: the history budget
+ * (resolveHistoryBudget, the same setting the AI SDK path trims history to),
+ * never more than the model's input limit (copilotPromptLimit).
+ *
+ * The runtime compacts at COMPACTION_THRESHOLD of this number and does not
+ * send a larger prompt, so a thread stays below the long-context billing
+ * threshold of a model that has one (GPT models bill input 2x above it).
+ *
+ * COPILOT_MAX_PROMPT_TOKENS is a test knob only (the smoke script sets a small
+ * value to force an early compaction); when set, it wins.
+ */
+export function copilotMaxPromptTokens(
+  config: {
+    contextWindow: number;
+    maxOutputTokens?: number;
+    longContextThresholdTokens?: number;
+    historyTokenBudget?: number;
+  },
+  env: Record<string, string | undefined> = process.env,
+): number {
+  const override = Number(env.COPILOT_MAX_PROMPT_TOKENS);
+  if (Number.isFinite(override) && override > 0) return Math.floor(override);
+  const { budget } = resolveHistoryBudget({
+    modelBudget: config.historyTokenBudget,
+    envBudget: env.HISTORY_TOKEN_BUDGET,
+    longContextThresholdTokens: config.longContextThresholdTokens,
+    contextWindow: config.contextWindow,
+    envReserve: env.HISTORY_LONG_CONTEXT_RESERVE,
+  });
+  return Math.min(budget, copilotPromptLimit(config));
+}
+
 /** Providers and models for a session. Every deployed model is selectable, so a thread can switch models. */
 export function buildCopilotInference(): {
   providers: NamedProviderConfig[];
@@ -100,8 +134,6 @@ export function buildCopilotInference(): {
   );
   const names = new Set(providers.map((p) => p.name));
   const models: ProviderModelConfig[] = [];
-  // Test knob: a small prompt limit makes the runtime compact early.
-  const promptLimitOverride = Number(process.env.COPILOT_MAX_PROMPT_TOKENS) || undefined;
   for (const config of Object.values(MODEL_CONFIGS)) {
     const provider = copilotProviderFor(config);
     if (!provider || !names.has(provider) || !config.deploymentName) continue;
@@ -112,9 +144,9 @@ export function buildCopilotInference(): {
       name: config.name,
       maxContextWindowTokens: config.contextWindow,
       // The runtime compacts relative to this limit (thresholds in
-      // copilot-session.ts), so it is the model's real input budget: the
-      // context window minus the output reserve, from MODEL_CONFIGS.
-      maxPromptTokens: promptLimitOverride ?? copilotPromptLimit(config),
+      // copilot-session.ts), so it is the history budget, not the context
+      // window: see copilotMaxPromptTokens.
+      maxPromptTokens: copilotMaxPromptTokens(config),
       ...(config.maxOutputTokens ? { maxOutputTokens: config.maxOutputTokens } : {}),
       capabilities: {
         supports: {

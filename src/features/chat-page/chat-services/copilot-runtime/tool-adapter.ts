@@ -13,6 +13,7 @@ import { asSchema } from "ai";
 import type { Tool as AiTool } from "@ai-sdk/provider-utils";
 import type { Tool as CopilotTool, ToolInvocation, ToolResultObject } from "@microsoft/copilot-sdk";
 import { uiErrorText } from "../tools/tool-user-error";
+import { inlineResultLimit } from "./inline-limit";
 
 /** One finished call of an app tool, with the RAW output (not the model text). */
 export interface ToolCallRecord {
@@ -49,11 +50,9 @@ export interface TurnToolBinding {
   spill?: (path: string, content: string) => Promise<void>;
 }
 
-/** Results up to this many bytes stay inline (COPILOT_TOOL_RESULT_INLINE_BYTES). */
-export const inlineResultLimit = (env: Record<string, string | undefined> = process.env): number => {
-  const configured = Number(env.COPILOT_TOOL_RESULT_INLINE_BYTES);
-  return Number.isFinite(configured) && configured > 0 ? configured : 16 * 1024;
-};
+// Results up to this many bytes stay inline (COPILOT_TOOL_RESULT_INLINE_BYTES).
+// The same limit applies to large user text: see inline-limit.ts.
+export { inlineResultLimit };
 export const TOOL_RESULTS_DIR = "/workspace/tool-results";
 export const RESULT_PREVIEW_BYTES = 4 * 1024;
 
