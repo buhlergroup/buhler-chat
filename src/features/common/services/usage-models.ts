@@ -8,6 +8,20 @@ export interface ModelUsageBreakdown {
   requestCount: number;
 }
 
+/**
+ * One model's share of a turn: its tokens and its cost at its own price.
+ * A turn can use several models (the chat model, sub-agents, the tools'
+ * own model calls); each is counted under its own model id.
+ */
+export interface ModelUsageIncrement {
+  model: string;
+  inputTokens: number;
+  outputTokens: number;
+  cachedTokens: number;
+  cacheWriteTokens?: number;
+  costUsd: number;
+}
+
 export interface UserUsageModel {
   id: string;
   userId: string;

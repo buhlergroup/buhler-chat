@@ -33,7 +33,7 @@ import { copilotOffersSearchDocuments, withSearchNextMessageNote, withUploadsSea
 import { THREAD_BUSY_TEXT, ThreadBusyError } from "./thread-lease";
 import { TURN_LIMIT_TEXTS, TurnLimitError } from "./runtime-limits";
 import { canUsePersona, resolveSubAgents } from "./subagent-resolver";
-import { turnCostUsd } from "./usage-cost";
+import { turnCostUsd, turnUsageByModel } from "./usage-cost";
 import { compactionPart, type TurnUsage } from "./event-mapper";
 import { RecordAgentInteraction } from "@/features/common/services/agent-stats-service";
 
@@ -225,6 +225,9 @@ export async function runCopilotChatTurn(args: CopilotChatTurnArgs): Promise<Res
         cacheReadTokens: result.turnUsage.cacheReadTokens,
         firstChunkMs: result.firstChunkMs,
       });
+      // Each model of the turn (chat model, sub-agents, the tools' own model
+      // calls) at its own price; the usage row and metrics count each under its id.
+      const byModel = turnUsageByModel(result.turnUsage, modelConfig, MODEL_CONFIGS);
       await persistAssistantFromFinishEvent({
         threadId,
         turnId: ctx.turnId,
@@ -236,7 +239,8 @@ export async function runCopilotChatTurn(args: CopilotChatTurnArgs): Promise<Res
         streamError: result.error,
         reasoningDurationMs: result.reasoningDurationMs,
         personaId: ctx.thread.isTemporary ? undefined : ctx.thread.personaId,
-        costUsd: turnCostUsd(result.turnUsage, modelConfig, MODEL_CONFIGS),
+        costUsd: byModel.reduce((sum, m) => sum + m.costUsd, 0),
+        byModel,
         ...(result.compactionNotice ? { compaction: compactionPart(result.compactionNotice).data } : {}),
       });
       recordSubAgentInteractions(result.turnUsage, result.subAgentPersonas ?? {});

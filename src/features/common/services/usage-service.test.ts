@@ -102,7 +102,7 @@ describe("common.unit.usage — IncrementUsage", () => {
     mockUpsert.mockResolvedValueOnce({ resource: {} });
 
     const { IncrementUsage } = await import("./usage-service");
-    await IncrementUsage("u", "gpt-5.4", 2, 3, 1, 0.5);
+    await IncrementUsage("u", [{ model: "gpt-5.4", inputTokens: 2, outputTokens: 3, cachedTokens: 1, costUsd: 0.5 }]);
 
     expect(mockUpsert).toHaveBeenCalledOnce();
     const upsertedDoc = mockUpsert.mock.calls[0][0];
@@ -121,7 +121,47 @@ describe("common.unit.usage — IncrementUsage", () => {
     mockRead.mockResolvedValueOnce({ resource: makeUsageDoc("u", "2026-05-15") });
     mockUpsert.mockRejectedValueOnce(new Error("Cosmos exploded"));
     const { IncrementUsage } = await import("./usage-service");
-    await expect(IncrementUsage("u", "gpt-5.4", 1, 1, 0, 0.1)).resolves.toBeUndefined();
+    await expect(
+      IncrementUsage("u", [{ model: "gpt-5.4", inputTokens: 1, outputTokens: 1, cachedTokens: 0, costUsd: 0.1 }]),
+    ).resolves.toBeUndefined();
+  });
+
+  it("common.unit.usage.008: counts each model of a turn under its own id, in one write", async () => {
+    const existing = makeUsageDoc("u", "2026-05-15", {
+      models: {
+        "gpt-6-luna": { inputTokens: 100, outputTokens: 10, cachedTokens: 0, costUsd: 0.001, requestCount: 1 },
+      },
+      totalInputTokens: 100,
+      totalOutputTokens: 10,
+      totalCachedTokens: 0,
+      totalCostUsd: 0.001,
+    });
+    mockRead.mockResolvedValueOnce({ resource: existing });
+    mockUpsert.mockResolvedValueOnce({ resource: {} });
+
+    const { IncrementUsage } = await import("./usage-service");
+    await IncrementUsage("u", [
+      { model: "gpt-6.2-sol", inputTokens: 1000, outputTokens: 200, cachedTokens: 500, costUsd: 0.02 },
+      { model: "gpt-6-luna", inputTokens: 4000, outputTokens: 300, cachedTokens: 1000, costUsd: 0.0005 },
+    ]);
+
+    expect(mockRead).toHaveBeenCalledOnce();
+    expect(mockUpsert).toHaveBeenCalledOnce();
+    const doc = mockUpsert.mock.calls[0][0];
+    expect(doc.models["gpt-6.2-sol"]).toEqual({ inputTokens: 1000, outputTokens: 200, cachedTokens: 500, costUsd: 0.02, requestCount: 1 });
+    expect(doc.models["gpt-6-luna"].inputTokens).toBe(4100);
+    expect(doc.models["gpt-6-luna"].requestCount).toBe(2);
+    expect(parseFloat(doc.models["gpt-6-luna"].costUsd.toFixed(4))).toBe(0.0015);
+    // The daily total (cost cap, downgrade) holds every model's cost.
+    expect(doc.totalInputTokens).toBe(5100);
+    expect(parseFloat(doc.totalCostUsd.toFixed(4))).toBe(0.0215);
+  });
+
+  it("common.unit.usage.009: writes nothing for a turn without models (negative)", async () => {
+    const { IncrementUsage } = await import("./usage-service");
+    await IncrementUsage("u", []);
+    expect(mockRead).not.toHaveBeenCalled();
+    expect(mockUpsert).not.toHaveBeenCalled();
   });
 });
 

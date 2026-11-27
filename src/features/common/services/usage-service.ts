@@ -10,6 +10,7 @@ import {
   USER_USAGE_ATTRIBUTE,
   UserUsageModel,
   LimitCheckResult,
+  type ModelUsageIncrement,
 } from "./usage-models";
 
 function getTodayDateString(): string {
@@ -54,40 +55,45 @@ export async function GetOrCreateDailyUsage(
   return newDoc;
 }
 
+/**
+ * Adds one turn to the user's daily usage: each model the turn used under
+ * its own id, with its own cost (one read-modify-write for all of them, so
+ * the models of one turn cannot overwrite each other). Each model's
+ * requestCount grows by one: the number of turns that used it.
+ */
 export async function IncrementUsage(
   userId: string,
-  model: string,
-  inputTokens: number,
-  outputTokens: number,
-  cachedTokens: number,
-  costUsd: number
+  entries: ReadonlyArray<ModelUsageIncrement>
 ): Promise<void> {
   try {
+    if (entries.length === 0) return;
     const usage = await GetOrCreateDailyUsage(userId);
 
-    const existing = usage.models[model] || {
-      inputTokens: 0,
-      outputTokens: 0,
-      cachedTokens: 0,
-      costUsd: 0,
-      requestCount: 0,
-    };
+    for (const { model, inputTokens, outputTokens, cachedTokens, costUsd } of entries) {
+      const existing = usage.models[model] || {
+        inputTokens: 0,
+        outputTokens: 0,
+        cachedTokens: 0,
+        costUsd: 0,
+        requestCount: 0,
+      };
 
-    usage.models[model] = {
-      inputTokens: existing.inputTokens + inputTokens,
-      outputTokens: existing.outputTokens + outputTokens,
-      cachedTokens: existing.cachedTokens + cachedTokens,
-      costUsd: existing.costUsd + costUsd,
-      requestCount: existing.requestCount + 1,
-    };
+      usage.models[model] = {
+        inputTokens: existing.inputTokens + inputTokens,
+        outputTokens: existing.outputTokens + outputTokens,
+        cachedTokens: existing.cachedTokens + cachedTokens,
+        costUsd: existing.costUsd + costUsd,
+        requestCount: existing.requestCount + 1,
+      };
 
-    usage.totalInputTokens += inputTokens;
-    usage.totalOutputTokens += outputTokens;
-    usage.totalCachedTokens += cachedTokens;
-    usage.totalCostUsd += costUsd;
+      usage.totalInputTokens += inputTokens;
+      usage.totalOutputTokens += outputTokens;
+      usage.totalCachedTokens += cachedTokens;
+      usage.totalCostUsd += costUsd;
+    }
 
     await HistoryContainer().items.upsert(usage);
-    logInfo("Updated daily usage", { userId, model, date: usage.date });
+    logInfo("Updated daily usage", { userId, models: entries.map((e) => e.model), date: usage.date });
   } catch (error) {
     logError("Failed to increment usage", {
       error: error instanceof Error ? error.message : String(error),

@@ -14,6 +14,7 @@ import type { Tool as AiTool } from "@ai-sdk/provider-utils";
 import type { Tool as CopilotTool, ToolInvocation, ToolResultObject } from "@microsoft/copilot-sdk";
 import { uiErrorText } from "../tools/tool-user-error";
 import { inlineResultLimit } from "./inline-limit";
+import { withModelUsageSink, type ModelUsageSink } from "./tool-model-usage";
 
 /** One finished call of an app tool, with the RAW output (not the model text). */
 export interface ToolCallRecord {
@@ -48,6 +49,11 @@ export interface TurnToolBinding {
    * /workspace/tool-results/ and the model gets a preview and the path.
    */
   spill?: (path: string, content: string) => Promise<void>;
+  /**
+   * Receives the model calls a tool makes itself (web_search, run_code), so
+   * they count in the turn usage under their own model (tool-model-usage.ts).
+   */
+  onModelUsage?: ModelUsageSink;
 }
 
 // Results up to this many bytes stay inline (COPILOT_TOOL_RESULT_INLINE_BYTES).
@@ -240,7 +246,9 @@ export async function runAppTool(
       abortSignal: anySignal([binding?.abortSignal, invocation.signal]),
       context: undefined,
     };
-    let output = binding?.run ? await binding.run(() => execute(input, options)) : await execute(input, options);
+    // In the turn's request context, with the turn's sink for the tool's own model calls.
+    const call = () => withModelUsageSink(binding?.onModelUsage, () => execute(input, options));
+    let output = binding?.run ? await binding.run(call) : await call();
     if (isAsyncIterable(output)) {
       // Streaming tool: the last value is the final output.
       let last: unknown;

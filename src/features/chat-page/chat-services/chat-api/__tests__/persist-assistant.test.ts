@@ -145,14 +145,16 @@ describe("persistThread — usage counters", () => {
       (200 / 1_000_000) * pricing.cachedInputPerMillion +
       (500 / 1_000_000) * pricing.outputPerMillion;
 
-    expect(mockIncrementUsage).toHaveBeenCalledWith(
-      "user-hash",
-      MINI_MODEL_ID,
-      1000,
-      500,
-      200,
-      expectedCost
-    );
+    expect(mockIncrementUsage).toHaveBeenCalledWith("user-hash", [
+      {
+        model: MINI_MODEL_ID,
+        inputTokens: 1000,
+        outputTokens: 500,
+        cachedTokens: 200,
+        cacheWriteTokens: 0,
+        costUsd: expectedCost,
+      },
+    ]);
     expect(mockUpdateThreadUsage).toHaveBeenCalledWith(
       "thread-persist-001",
       1000,
@@ -499,6 +501,64 @@ describe("persistThread — turn-shape metric dimensions", () => {
       stepCount: 0,
       toolCallCount: 0,
     });
+  });
+});
+
+describe("persistThread — a turn on several models", () => {
+  // The chat model plus a sub-agent / web_search on another model, each
+  // priced by the caller (copilot-runtime/usage-cost.ts).
+  const LUNA = "gpt-5.6-luna";
+  const byModel = [
+    { model: MINI_MODEL_ID, inputTokens: 1000, outputTokens: 500, cachedTokens: 200, cacheWriteTokens: 0, costUsd: 0.003 },
+    { model: LUNA, inputTokens: 4000, outputTokens: 300, cachedTokens: 1000, cacheWriteTokens: 0, costUsd: 0.001 },
+  ];
+  const payload = {
+    ...BASE_PAYLOAD,
+    threadId: "thread-multi-001",
+    usage: { inputTokens: 5000, outputTokens: 800, cachedTokens: 1200, costUsd: 0.004, byModel },
+  };
+
+  it("counts each model under its own id in one IncrementUsage call", async () => {
+    mockIncrementUsage.mockClear();
+    mockUpdateThreadUsage.mockClear();
+    mockUpsert.mockResolvedValue({ status: "OK" as const });
+
+    await persistThread({ ...payload, messages: makeMessages() });
+    await new Promise((r) => setTimeout(r, 0));
+
+    expect(mockIncrementUsage).toHaveBeenCalledTimes(1);
+    expect(mockIncrementUsage).toHaveBeenCalledWith("user-hash", byModel);
+    // The thread row keeps the turn totals and the whole cost.
+    expect(mockUpdateThreadUsage).toHaveBeenCalledWith("thread-multi-001", 5000, 800, 1200, 0.004, 0, undefined);
+  });
+
+  it("emits the token metrics once per model with that model as chatModel, and one userChatMessage", async () => {
+    mockReportPromptTokens.mockClear();
+    mockReportCompletionTokens.mockClear();
+    mockReportCachedTokens.mockClear();
+    mockReportCacheWriteTokens.mockClear();
+    mockReportUserChatMessage.mockClear();
+    mockUpsert.mockResolvedValue({ status: "OK" as const });
+
+    await persistThread({ ...payload, messages: makeMessages() });
+    await new Promise((r) => setTimeout(r, 0));
+
+    const attrs = { threadId: "thread-multi-001", stepCount: 0, toolCallCount: 0 };
+    expect(mockReportPromptTokens.mock.calls).toEqual([
+      [1000, MINI_MODEL_ID, "user", attrs],
+      [4000, LUNA, "user", attrs],
+    ]);
+    expect(mockReportCompletionTokens.mock.calls).toEqual([
+      [500, MINI_MODEL_ID, { ...attrs, totalTokens: 1500, inputTokens: 1000 }],
+      [300, LUNA, { ...attrs, totalTokens: 4300, inputTokens: 4000 }],
+    ]);
+    expect(mockReportCachedTokens.mock.calls).toEqual([
+      [200, MINI_MODEL_ID, attrs],
+      [1000, LUNA, attrs],
+    ]);
+    expect(mockReportCacheWriteTokens).toHaveBeenCalledTimes(2);
+    // One user message per turn, under the chat model: the prompt count is not inflated.
+    expect(mockReportUserChatMessage.mock.calls).toEqual([[MINI_MODEL_ID, attrs]]);
   });
 });
 

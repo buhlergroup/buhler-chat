@@ -9,18 +9,19 @@ import { AzureOpenAI, toFile } from "openai";
 import { OpenAIV1Instance } from "@/features/common/services/openai";
 import { getAzureCognitiveServicesTokenProvider } from "@/features/common/services/azure-default-credential";
 import { logInfo, logWarn } from "@/features/common/services/logger";
-import { MODEL_CONFIGS } from "../models";
+import { FALLBACK_MODEL_CHAIN, MODEL_CONFIGS } from "../models";
 import { persistBase64Image } from "../chat-image-persistence-service";
 import { ensureCodeInterpreterContainer } from "../code-interpreter-container";
 import { ToolUserError } from "../tools/tool-user-error";
 import {
-  resolveResponsesDeployment,
+  resolveResponsesModel,
   type CodeRunResult,
   type ContainerFile,
   type ProviderClients,
   type ProviderToolDeps,
   type WebCitation,
 } from "./provider-tools";
+import { responsesCallUsage } from "./tool-model-usage";
 
 const RUN_CODE_TIMEOUT_MS = 5 * 60 * 1000;
 const WEB_SEARCH_TIMEOUT_MS = 90 * 1000;
@@ -90,6 +91,7 @@ type Responses = {
   create(body: Record<string, unknown>, options?: { signal?: AbortSignal }): Promise<{
     output?: Array<Record<string, unknown>>;
     output_text?: string;
+    usage?: unknown;
   }>;
 };
 
@@ -114,10 +116,11 @@ function textAndCitations(output: Array<Record<string, unknown>> | undefined): {
 export function productionProviderClients(deps: Pick<ProviderToolDeps, "threadId" | "userKey" | "containerFiles">): ProviderClients {
   const containerKey = `${deps.userKey}/${deps.threadId}`;
   const responses = () => (OpenAIV1Instance() as unknown as { responses: Responses }).responses;
-  const deployment = (envName: string) => {
-    const d = resolveResponsesDeployment(MODEL_CONFIGS, process.env[envName]);
-    if (!d) throw new ToolUserError("No model for this tool is deployed here.");
-    return d;
+  // The env setting when deployed, else the fallback chain (GPT-6 Luna first).
+  const responsesModel = (envName: string) => {
+    const m = resolveResponsesModel(MODEL_CONFIGS, process.env[envName], FALLBACK_MODEL_CHAIN);
+    if (!m) throw new ToolUserError("No model for this tool is deployed here.");
+    return m;
   };
 
   return {
@@ -133,9 +136,10 @@ export function productionProviderClients(deps: Pick<ProviderToolDeps, "threadId
     },
 
     async webSearch({ query }, signal) {
+      const model = responsesModel("COPILOT_WEB_SEARCH_MODEL");
       const res = await responses().create(
         {
-          model: deployment("COPILOT_WEB_SEARCH_MODEL"),
+          model: model.deployment,
           instructions:
             "Answer the question with a web search. Be short and factual. Cite every source you use.",
           input: query,
@@ -146,7 +150,8 @@ export function productionProviderClients(deps: Pick<ProviderToolDeps, "threadId
         { signal: withTimeout(signal, WEB_SEARCH_TIMEOUT_MS) },
       );
       const parsed = textAndCitations(res.output);
-      return { text: parsed.text || res.output_text || "", citations: parsed.citations };
+      const usage = responsesCallUsage(model.id, res.usage);
+      return { text: parsed.text || res.output_text || "", citations: parsed.citations, ...(usage ? { usage } : {}) };
     },
 
     async ensureContainer() {
@@ -173,9 +178,10 @@ export function productionProviderClients(deps: Pick<ProviderToolDeps, "threadId
     },
 
     async runCode(containerId, { instructions, input }, signal): Promise<CodeRunResult> {
+      const model = responsesModel("COPILOT_RUN_CODE_MODEL");
       const res = await responses().create(
         {
-          model: deployment("COPILOT_RUN_CODE_MODEL"),
+          model: model.deployment,
           instructions,
           input,
           tools: [{ type: "code_interpreter", container: containerId }],
@@ -196,7 +202,8 @@ export function productionProviderClients(deps: Pick<ProviderToolDeps, "threadId
         }
       }
       result.text = textAndCitations(res.output).text || res.output_text || "";
-      return result;
+      const usage = responsesCallUsage(model.id, res.usage);
+      return usage ? { ...result, usage } : result;
     },
 
     async persistImage(dataUrl) {

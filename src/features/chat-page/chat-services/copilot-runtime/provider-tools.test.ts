@@ -6,12 +6,15 @@ import {
   OUTPUTS_DIR,
   RUN_CODE_STDOUT_INLINE_BYTES,
   providerTools,
-  resolveResponsesDeployment,
+  resolveResponsesModel,
   type ContainerFile,
   type ProviderClients,
   type ProviderToolToggles,
   type ProviderToolDeps,
 } from "./provider-tools";
+import { CopilotEventMapper } from "./event-mapper";
+import { responsesCallUsage } from "./tool-model-usage";
+import { FALLBACK_MODEL_CHAIN } from "../models";
 import { stripExtensionKeyPrefix } from "../../tool-display-name";
 
 /** A PNG signature plus some bytes: enough for the type sniffing. */
@@ -485,18 +488,114 @@ describe("run_code: only the files the code created or changed come back", () =>
   });
 });
 
-describe("resolveResponsesDeployment", () => {
+describe("resolveResponsesModel", () => {
   const configs = {
-    "gpt-5.6-luna": { deploymentName: "luna-dep", supportsResponsesAPI: true },
+    "gpt-5.6-luna": { deploymentName: "luna56-dep", supportsResponsesAPI: true },
     "gpt-6-sol": { deploymentName: "sol-dep", supportsResponsesAPI: true },
     "claude-x": { deploymentName: "claude-dep", supportsResponsesAPI: false, provider: "anthropic" },
     "gpt-undeployed": { deploymentName: "", supportsResponsesAPI: true },
   };
-  it("prefers the env model, then the fast default, then any deployed Responses model", () => {
-    expect(resolveResponsesDeployment(configs, "gpt-6-sol")).toBe("sol-dep");
-    expect(resolveResponsesDeployment(configs, undefined)).toBe("luna-dep");
-    expect(resolveResponsesDeployment(configs, "claude-x")).toBe("luna-dep");
-    expect(resolveResponsesDeployment({ ...configs, "gpt-5.6-luna": { deploymentName: "" } }, "gpt-undeployed")).toBe("sol-dep");
-    expect(resolveResponsesDeployment({ "claude-x": configs["claude-x"] }, undefined)).toBeUndefined();
+  const withLuna6 = { "gpt-6-luna": { deploymentName: "luna6-dep", supportsResponsesAPI: true }, ...configs };
+
+  it("defaults to the first deployed model of the fallback chain: GPT-6 Luna", () => {
+    expect(FALLBACK_MODEL_CHAIN[0]).toBe("gpt-6-luna");
+    expect(resolveResponsesModel(withLuna6, undefined, FALLBACK_MODEL_CHAIN)).toEqual({ id: "gpt-6-luna", deployment: "luna6-dep" });
+  });
+
+  it("falls back to gpt-5.6-luna when GPT-6 Luna is not deployed", () => {
+    expect(resolveResponsesModel(configs, undefined, FALLBACK_MODEL_CHAIN)).toEqual({ id: "gpt-5.6-luna", deployment: "luna56-dep" });
+    expect(
+      resolveResponsesModel({ ...withLuna6, "gpt-6-luna": { deploymentName: "", supportsResponsesAPI: true } }, undefined, FALLBACK_MODEL_CHAIN),
+    ).toEqual({ id: "gpt-5.6-luna", deployment: "luna56-dep" });
+  });
+
+  it("an env model that is deployed and serves the Responses API wins", () => {
+    expect(resolveResponsesModel(withLuna6, "gpt-6-sol", FALLBACK_MODEL_CHAIN)).toEqual({ id: "gpt-6-sol", deployment: "sol-dep" });
+    expect(resolveResponsesModel(withLuna6, " gpt-5.6-luna ", FALLBACK_MODEL_CHAIN)?.id).toBe("gpt-5.6-luna");
+  });
+
+  it("skips an env model that is not usable, then takes any deployed Responses model (negative)", () => {
+    expect(resolveResponsesModel(withLuna6, "claude-x", FALLBACK_MODEL_CHAIN)?.id).toBe("gpt-6-luna");
+    expect(resolveResponsesModel(withLuna6, "toString", FALLBACK_MODEL_CHAIN)?.id).toBe("gpt-6-luna");
+    expect(resolveResponsesModel({ ...configs, "gpt-5.6-luna": { deploymentName: "" } }, "gpt-undeployed", FALLBACK_MODEL_CHAIN)).toEqual({
+      id: "gpt-6-sol",
+      deployment: "sol-dep",
+    });
+    expect(resolveResponsesModel({ "claude-x": configs["claude-x"] }, undefined, FALLBACK_MODEL_CHAIN)).toBeUndefined();
+  });
+});
+
+describe("tool model usage (web_search, run_code)", () => {
+  const lunaUsage = { model: "gpt-6-luna", inputTokens: 5000, outputTokens: 400, cacheReadTokens: 1000 };
+  const noSignal = undefined as unknown as AbortSignal;
+
+  it("a web_search call with usage adds a GPT-6 Luna bucket to the turn usage", async () => {
+    const mapper = new CopilotEventMapper(() => undefined, { appToolNames: new Set(["web_search"]) });
+    const t = setup(ALL, {
+      webSearch: vi.fn(async () => ({ text: "Answer", citations: [], usage: lunaUsage })),
+    });
+    const out = await runAppTool(
+      "web_search",
+      { query: "q" },
+      { toolCallId: "ws-1", signal: noSignal },
+      { toolset: t.tools, onModelUsage: (u) => mapper.addToolModelUsage(u) },
+    );
+    expect(out.resultType).toBe("success");
+    // The main model's own call, as the runtime reports it.
+    mapper.handle({ type: "assistant.usage", data: { model: "openai/gpt-6.2-sol", inputTokens: 100, outputTokens: 10 } });
+    const usage = mapper.turnUsage;
+    expect(usage.byModel["gpt-6-luna"]).toEqual({ inputTokens: 5000, outputTokens: 400, cacheReadTokens: 1000, cacheWriteTokens: 0, calls: 1 });
+    expect(usage.inputTokens).toBe(5100);
+    expect(usage.outputTokens).toBe(410);
+    expect(usage.cacheReadTokens).toBe(1000);
+    // Not a call of the main agent: no step, no context size.
+    expect(usage.calls).toBe(1);
+    expect(usage.lastInputTokens).toBe(100);
+  });
+
+  it("a run_code call reports its usage the same way", async () => {
+    const reported: unknown[] = [];
+    const t = setup(ALL, {
+      runCode: vi.fn(async () => ({ logs: "ok", text: "", code: [], images: [], usage: lunaUsage })),
+    });
+    await runAppTool("run_code", { code: "print(1)" }, { toolCallId: "rc-1", signal: noSignal }, { toolset: t.tools, onModelUsage: (u) => reported.push(u) });
+    expect(reported).toEqual([lunaUsage]);
+  });
+
+  it("reports nothing without usage, and drops usage outside a turn (negative)", async () => {
+    const reported: unknown[] = [];
+    const t = setup(ALL, { webSearch: vi.fn(async () => ({ text: "Answer", citations: [] })) });
+    await runAppTool("web_search", { query: "q" }, { toolCallId: "ws-2", signal: noSignal }, { toolset: t.tools, onModelUsage: (u) => reported.push(u) });
+    const withUsage = setup(ALL, { webSearch: vi.fn(async () => ({ text: "Answer", citations: [], usage: lunaUsage })) });
+    const out = await runAppTool("web_search", { query: "q" }, { toolCallId: "ws-3", signal: noSignal }, { toolset: withUsage.tools });
+    expect(out.resultType).toBe("success");
+    expect(reported).toEqual([]);
+  });
+
+  it("the mapper ignores tool usage after the turn is over (negative)", () => {
+    const mapper = new CopilotEventMapper(() => undefined, { appToolNames: new Set() });
+    mapper.handle({ type: "session.idle", data: {} });
+    mapper.addToolModelUsage(lunaUsage);
+    expect(mapper.turnUsage.byModel).toEqual({});
+    expect(mapper.turnUsage.inputTokens).toBe(0);
+  });
+});
+
+describe("responsesCallUsage", () => {
+  it("maps the Responses usage (input incl. cached, output, cached, reasoning) under the model id", () => {
+    expect(
+      responsesCallUsage("gpt-6-luna", {
+        input_tokens: 1200,
+        output_tokens: 80,
+        input_tokens_details: { cached_tokens: 1024 },
+        output_tokens_details: { reasoning_tokens: 30 },
+      }),
+    ).toEqual({ model: "gpt-6-luna", inputTokens: 1200, outputTokens: 80, cacheReadTokens: 1024, cacheWriteTokens: 0, reasoningTokens: 30 });
+  });
+
+  it("is undefined without usage or with zero tokens (negative)", () => {
+    expect(responsesCallUsage("gpt-6-luna", undefined)).toBeUndefined();
+    expect(responsesCallUsage("gpt-6-luna", { input_tokens: 0, output_tokens: 0 })).toBeUndefined();
+    expect(responsesCallUsage("gpt-6-luna", { input_tokens: "12" })).toBeUndefined();
   });
 });
