@@ -30,6 +30,7 @@ import { userHashedId } from "@/features/auth-page/helpers";
 import { logError, logInfo, logWarn } from "@/features/common/services/logger";
 import { RecordAgentInteraction } from "@/features/common/services/agent-stats-service";
 import { IncrementUsage } from "@/features/common/services/usage-service";
+import type { ModelUsageIncrement } from "@/features/common/services/usage-models";
 import {
   reportPromptTokens,
   reportCompletionTokens,
@@ -188,6 +189,13 @@ export interface UsagePayload {
    * Absent: computed from the tokens with `modelConfig.pricing`.
    */
   costUsd?: number;
+  /**
+   * The turn per model, each at its own price (the Copilot path: chat model,
+   * sub-agents and the tools' own model calls). The user's usage row and
+   * the token metrics count each model under its own id. The entries add up
+   * to the totals above. Absent: one entry for `modelConfig` with the totals.
+   */
+  byModel?: ReadonlyArray<ModelUsageIncrement>;
 }
 
 export interface PersistPayload {
@@ -419,17 +427,19 @@ export async function persistThread({
     });
   }
 
+  // The turn per model: each model the turn used is counted under its own id
+  // (usage row and metrics), so a sub-agent's or a tool's model calls show
+  // up as that model and not as the chat model.
+  const perModel: ReadonlyArray<ModelUsageIncrement> =
+    usage.byModel && usage.byModel.length > 0
+      ? usage.byModel
+      : [{ model: modelConfig.id, inputTokens, outputTokens, cachedTokens, cacheWriteTokens, costUsd }];
+
   // IncrementUsage writes to a different document (the per-user usage
   // counter, not the thread); no race with the mutex release, so
-  // fire-and-forget is still fine.
-  IncrementUsage(
-    userId,
-    modelConfig.id,
-    inputTokens,
-    outputTokens,
-    cachedTokens,
-    costUsd
-  ).catch((err: unknown) =>
+  // fire-and-forget is still fine. One call for all models of the turn: one
+  // read-modify-write of the day's row.
+  IncrementUsage(userId, perModel).catch((err: unknown) =>
     logError("Failed to increment user usage", {
       error: err instanceof Error ? err.message : String(err),
     })
@@ -469,14 +479,18 @@ export async function persistThread({
     toolCallCount: turnShape?.toolCallCount ?? 0,
   };
   Promise.all([
-    reportPromptTokens(inputTokens, model, "user", metricAttrs),
-    reportCompletionTokens(outputTokens, model, {
-      ...metricAttrs,
-      totalTokens: inputTokens + outputTokens,
-      inputTokens,
-    }),
-    reportCachedTokens(cachedTokens, model, metricAttrs),
-    reportCacheWriteTokens(cacheWriteTokens, model, metricAttrs),
+    // Token metrics once per model, with that model as chatModel.
+    ...perModel.flatMap((m) => [
+      reportPromptTokens(m.inputTokens, m.model, "user", metricAttrs),
+      reportCompletionTokens(m.outputTokens, m.model, {
+        ...metricAttrs,
+        totalTokens: m.inputTokens + m.outputTokens,
+        inputTokens: m.inputTokens,
+      }),
+      reportCachedTokens(m.cachedTokens, m.model, metricAttrs),
+      reportCacheWriteTokens(m.cacheWriteTokens ?? 0, m.model, metricAttrs),
+    ]),
+    // One user message per turn, under the chat model.
     reportUserChatMessage(model, metricAttrs),
     // Only on a truncated turn, so the counter reads as a count of
     // truncations and not as a series with a lot of zeroes in it.
@@ -669,6 +683,8 @@ export interface PersistAssistantFromFinishParams<TOOLS extends ToolSet> {
   personaId?: string;
   /** Turn cost priced by the caller (see UsagePayload.costUsd). */
   costUsd?: number;
+  /** The turn per model, priced by the caller (see UsagePayload.byModel). */
+  byModel?: ReadonlyArray<ModelUsageIncrement>;
   /**
    * A context compaction that ran in this turn (Copilot path: the runtime
    * compacts on its own). Stored on the assistant row, so the notice comes
@@ -693,6 +709,7 @@ export async function persistAssistantFromFinishEvent<TOOLS extends ToolSet>({
   reasoningDurationMs,
   personaId,
   costUsd,
+  byModel,
   compaction,
 }: PersistAssistantFromFinishParams<TOOLS>): Promise<void> {
   // Detect an empty finish — Azure content-filter trips, aborted streams
@@ -874,6 +891,7 @@ export async function persistAssistantFromFinishEvent<TOOLS extends ToolSet>({
       cacheWriteTokens,
       ...(typeof lastPromptTokens === "number" ? { lastPromptTokens } : {}),
       ...(typeof costUsd === "number" ? { costUsd } : {}),
+      ...(byModel && byModel.length > 0 ? { byModel } : {}),
     },
     personaId,
     turnShape: deriveTurnShape(event.steps),

@@ -279,6 +279,60 @@ describe("runCopilotChatTurn", () => {
     abortPublisher("thread-cost");
   });
 
+  it("persists the turn per model: chat model, sub-agent and web_search model, each at its own price", async () => {
+    const bucket = (input: number, output: number) => ({ inputTokens: input, outputTokens: output, cacheReadTokens: 0, cacheWriteTokens: 0, calls: 1 });
+    const turnUsage = {
+      inputTokens: 3_000_000,
+      outputTokens: 300_000,
+      cacheReadTokens: 0,
+      cacheWriteTokens: 0,
+      reasoningTokens: 0,
+      calls: 1,
+      // The main model as the runtime names it, the `general` sub-agent on
+      // gpt-5.6-luna, and a web_search call on GPT-6 Luna (plain model id).
+      byModel: {
+        "azure/gpt-5.5": bucket(1_000_000, 100_000),
+        "openai/gpt-5.6-luna": bucket(1_000_000, 100_000),
+        "gpt-6-luna": bucket(1_000_000, 100_000),
+      },
+      bySubAgent: { general: bucket(1_000_000, 100_000) },
+    };
+    runCopilotTurn.mockImplementation(async () => ({
+      stream: new ReadableStream<UIMessageChunk>({ start: (c) => c.close() }),
+      result: Promise.resolve({
+        text: "done",
+        toolResults: [],
+        steps: [{ text: "done", reasoningText: "", toolCalls: [], toolResults: [] }],
+        finishReason: "stop",
+        usage: { inputTokens: 3_000_000, outputTokens: 300_000, totalTokens: 3_300_000, inputTokenDetails: { cacheReadTokens: 0, cacheWriteTokens: 0 }, outputTokenDetails: { reasoningTokens: 0 } },
+        aborted: false,
+        sessionMode: "live",
+        seededEvents: 0,
+        turnUsage,
+        subAgentPersonas: {},
+      }),
+    }));
+    persist.mockClear();
+    await runCopilotChatTurn({
+      ctx: ctx("thread-per-model"),
+      payload: { message: "hello" } as never,
+      modelConfig,
+      effectiveModel: "gpt-5.5" as never,
+      systemMessage: "sys",
+      toolset: {},
+    });
+    await vi.waitFor(() => expect(persist).toHaveBeenCalled());
+    const persisted = persist.mock.calls[0][0] as { costUsd: number; byModel: Array<{ model: string; inputTokens: number; costUsd: number }> };
+    expect(persisted.byModel.map((m) => m.model)).toEqual(["gpt-5.5", "gpt-5.6-luna", "gpt-6-luna"]);
+    // 1M input + 100k output per model, each at its own MODEL_CONFIGS price.
+    const cost = (id: "gpt-5.5" | "gpt-5.6-luna" | "gpt-6-luna") =>
+      MODEL_CONFIGS[id].pricing.inputPerMillion + 0.1 * MODEL_CONFIGS[id].pricing.outputPerMillion;
+    expect(persisted.byModel[0].costUsd).toBeCloseTo(cost("gpt-5.5"), 10);
+    expect(persisted.byModel[1].costUsd).toBeCloseTo(cost("gpt-5.6-luna"), 10);
+    expect(persisted.byModel[2].costUsd).toBeCloseTo(cost("gpt-6-luna"), 10);
+    expect(persisted.costUsd).toBeCloseTo(persisted.byModel.reduce((s, m) => s + m.costUsd, 0), 10);
+  });
+
   it("records per-agent stats for persona sub-agents with their own tokens", () => {
     const record = vi.fn(async () => undefined);
     recordSubAgentInteractions(

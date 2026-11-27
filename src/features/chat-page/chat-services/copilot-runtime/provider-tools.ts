@@ -34,7 +34,9 @@ import { sniffRasterImageType } from "@/features/common/safe-content-type";
 import { ToolUserError } from "../tools/tool-user-error";
 import type { WorkspaceEntry } from "./blob-session-fs";
 import { normalizeSessionPath, WORKSPACE_ROOT } from "./session-path";
+import type { ModelCallUsage } from "./event-mapper";
 import { TOOL_RESULTS_DIR } from "./tool-adapter";
+import { reportToolModelUsage } from "./tool-model-usage";
 import { workspaceFileUrl } from "./workspace-file-url";
 import { sanitizeUploadName, uniqueUploadName, UPLOADS_DIR } from "./workspace-uploads";
 
@@ -90,12 +92,15 @@ export interface CodeRunResult {
   code: string[];
   /** Inline image outputs (data: URLs), e.g. a displayed plot. */
   images: string[];
+  /** Tokens of the Responses call, under the model that served it. */
+  usage?: ModelCallUsage;
 }
 
 /** The provider calls the tools need (production: provider-clients.ts). */
 export interface ProviderClients {
   generateImage(args: { prompt: string; size?: string }, signal?: AbortSignal): Promise<{ base64: string; revisedPrompt?: string }>;
-  webSearch(args: { query: string }, signal?: AbortSignal): Promise<{ text: string; citations: WebCitation[] }>;
+  /** `usage`: tokens of the Responses call, under the model that served it. */
+  webSearch(args: { query: string }, signal?: AbortSignal): Promise<{ text: string; citations: WebCitation[]; usage?: ModelCallUsage }>;
   /** The thread's code interpreter container (created or reused). */
   ensureContainer(signal?: AbortSignal): Promise<string>;
   uploadToContainer(containerId: string, name: string, data: Buffer): Promise<{ path: string }>;
@@ -151,21 +156,23 @@ export interface ModelChoice {
 }
 
 /**
- * Deployment for web_search / run_code: the model named in `envValue` when
- * it is deployed and serves the Responses API, else `defaultId` (the fast
- * model), else any deployed Responses model. Undefined when none is deployed.
+ * Model for web_search / run_code: the model named in `envValue` when it is
+ * deployed and serves the Responses API, else the first such model of
+ * `defaultIds` (the app passes FALLBACK_MODEL_CHAIN), else any deployed
+ * Responses model. `id` is the MODEL_CONFIGS id (usage and price),
+ * `deployment` the name the call uses. Undefined when none is deployed.
  */
-export function resolveResponsesDeployment(
+export function resolveResponsesModel(
   configs: Readonly<Record<string, ModelChoice>>,
   envValue: string | undefined,
-  defaultId = "gpt-5.6-luna",
-): string | undefined {
+  defaultIds: ReadonlyArray<string>,
+): { id: string; deployment: string } | undefined {
   const usable = (c: ModelChoice | undefined) =>
     !!c && c.supportsResponsesAPI === true && c.provider !== "anthropic" && !!c.deploymentName?.trim();
-  for (const id of [envValue?.trim(), defaultId]) {
-    if (id && usable(configs[id])) return configs[id].deploymentName!.trim();
+  for (const id of [envValue?.trim(), ...defaultIds]) {
+    if (id && Object.prototype.hasOwnProperty.call(configs, id) && usable(configs[id])) return { id, deployment: configs[id].deploymentName!.trim() };
   }
-  for (const c of Object.values(configs)) if (usable(c)) return c.deploymentName!.trim();
+  for (const [id, c] of Object.entries(configs)) if (usable(c)) return { id, deployment: c.deploymentName!.trim() };
   return undefined;
 }
 
@@ -263,6 +270,7 @@ function webSearchTool(clients: () => Promise<ProviderClients>) {
     }),
     execute: async ({ query }: { query: string }, { abortSignal }: { abortSignal?: AbortSignal }): Promise<WebSearchOutput> => {
       const res = await (await clients()).webSearch({ query }, abortSignal);
+      reportToolModelUsage(res.usage);
       const seen = new Set<string>();
       const citations = res.citations.filter((c) => {
         if (!/^https?:\/\//i.test(c.url) || seen.has(c.url)) return false;
@@ -484,6 +492,7 @@ function runCodeTool(deps: ProviderToolDeps, clients: () => Promise<ProviderClie
       const isInputCopy = (path: string, size: number | undefined) => size !== undefined && inputCopies.has(copyKey(path, size));
 
       const run = await c.runCode(containerId, { instructions: RUN_CODE_INSTRUCTIONS, input: runCodeInput(args, uploaded, deps.containerFiles) }, abortSignal);
+      reportToolModelUsage(run.usage);
 
       // Files the code created or changed come back to /workspace/outputs/,
       // except the inputs and their copies (same base name and size; also

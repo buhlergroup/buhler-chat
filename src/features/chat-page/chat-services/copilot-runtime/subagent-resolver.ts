@@ -11,7 +11,7 @@ import { loadUsableSkills } from "@/features/persona-page/persona-services/skill
 import { buildSkillCatalogPrompt } from "@/features/persona-page/persona-services/skills/skill-models";
 import { resolveExtensionsForChat } from "@/features/extensions-page/extension-services/extension-runtime";
 import type { PersonaModel } from "@/features/persona-page/persona-services/models";
-import { MODEL_CONFIGS, normalizeChatModelId, type ChatModel } from "../models";
+import { FALLBACK_MODEL_CHAIN, MODEL_CONFIGS, normalizeChatModelId, type ChatModel } from "../models";
 import { resolveReasoningEffort } from "../models/reasoning-effort";
 import type { ToolContext } from "../tools/tool-context";
 import { copilotModelSelectionId } from "./providers";
@@ -27,9 +27,6 @@ import {
 /** Tools a persona sub-agent never gets: delegation is the runtime's `task` here. */
 const DROPPED_TOOLS = new Set(["call_sub_agent", "search_sub_agent"]);
 
-/** Default model of the `general` sub-agent (COPILOT_SUBAGENT_MODEL). */
-export const DEFAULT_SUBAGENT_MODEL = "gpt-5.6-luna";
-
 /** Selection id of a model when the Copilot path can run it, else undefined. */
 export function selectionIdIfDeployed(modelId: string | undefined): string | undefined {
   if (!modelId) return undefined;
@@ -43,9 +40,21 @@ export function selectionIdIfDeployed(modelId: string | undefined): string | und
   }
 }
 
-/** `general` runs on COPILOT_SUBAGENT_MODEL (default the fast model), else the parent model. */
-export function generalSubAgentModel(env: Record<string, string | undefined> = process.env): string | undefined {
-  return selectionIdIfDeployed(env.COPILOT_SUBAGENT_MODEL?.trim() || DEFAULT_SUBAGENT_MODEL);
+/**
+ * `general` runs on COPILOT_SUBAGENT_MODEL when it is deployed, else on the
+ * first deployed model of the fallback chain (GPT-6 Luna, then gpt-5.6-luna),
+ * else on the parent model (undefined).
+ */
+export function generalSubAgentModel(
+  env: Record<string, string | undefined> = process.env,
+  selectionIdOf: (modelId: string) => string | undefined = selectionIdIfDeployed,
+  defaults: ReadonlyArray<string> = FALLBACK_MODEL_CHAIN,
+): string | undefined {
+  for (const id of [env.COPILOT_SUBAGENT_MODEL?.trim(), ...defaults]) {
+    const selectionId = id ? selectionIdOf(id) : undefined;
+    if (selectionId) return selectionId;
+  }
+  return undefined;
 }
 
 /** May the current user open this persona (fresh lookup, same rule as call_sub_agent)? */

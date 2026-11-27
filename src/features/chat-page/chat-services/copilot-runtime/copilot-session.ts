@@ -764,6 +764,8 @@ async function runTurnInSession(input: CopilotTurnInput): Promise<CopilotTurnHan
     spill: (path, content) => live.fs.writeFile(path, content),
     abortSignal: input.abortSignal,
     onResult: (record) => rawResults.set(record.toolCallId, record),
+    // A tool's own model call (web_search, run_code) counts in this turn's usage.
+    onModelUsage: (usage) => mapper.addToolModelUsage(usage),
   };
   const canUsePersona = input.canUsePersona;
   const gate = new SubAgentTurnGate(plan, {

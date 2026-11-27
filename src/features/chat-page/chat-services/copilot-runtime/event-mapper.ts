@@ -64,6 +64,20 @@ export interface UsageBucket {
 
 const emptyBucket = (): UsageBucket => ({ inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, calls: 0 });
 
+/**
+ * One model call an app tool made itself (web_search, run_code: a nested
+ * Responses call), outside the runtime. `model` is the MODEL_CONFIGS id of
+ * the deployment that served it. Input tokens include the cached ones.
+ */
+export interface ModelCallUsage {
+  model: string;
+  inputTokens: number;
+  outputTokens: number;
+  cacheReadTokens?: number;
+  cacheWriteTokens?: number;
+  reasoningTokens?: number;
+}
+
 /** One runtime compaction, as the session reported it. */
 export interface RuntimeCompaction {
   success: boolean;
@@ -107,7 +121,7 @@ export interface TurnUsage {
   lastInputTokens?: number;
   /** Number of model calls of the main agent. */
   calls: number;
-  /** Tokens per model, main agent AND sub-agents (cost is priced per model). */
+  /** Tokens per model: main agent, sub-agents AND the tools' own model calls (cost is priced per model). */
   byModel: Record<string, UsageBucket>;
   /** Tokens per sub-agent name (included in the totals above). */
   bySubAgent: Record<string, UsageBucket>;
@@ -469,26 +483,18 @@ export class CopilotEventMapper {
     this.stepState = "closed";
   }
 
+  /**
+   * A model call an app tool made itself (web_search, run_code): billed with
+   * the turn under its own model, but not a step of the main agent. Usage
+   * that arrives after the turn is over is not counted (the result is out).
+   */
+  addToolModelUsage(usage: ModelCallUsage): void {
+    if (this.finished) return;
+    this.addCall(usage);
+  }
+
   private onUsage(data: any, agentId?: string): void {
-    const num = (v: unknown) => (typeof v === "number" && Number.isFinite(v) ? v : 0);
-    const input = num(data.inputTokens);
-    const output = num(data.outputTokens);
-    const cacheRead = num(data.cacheReadTokens);
-    const cacheWrite = num(data.cacheWriteTokens);
-    this.usage.inputTokens += input;
-    this.usage.outputTokens += output;
-    this.usage.cacheReadTokens += cacheRead;
-    this.usage.cacheWriteTokens += cacheWrite;
-    this.usage.reasoningTokens += num(data.reasoningTokens);
-    const add = (bucket: UsageBucket) => {
-      bucket.inputTokens += input;
-      bucket.outputTokens += output;
-      bucket.cacheReadTokens += cacheRead;
-      bucket.cacheWriteTokens += cacheWrite;
-      bucket.calls += 1;
-    };
-    const model = typeof data.model === "string" && data.model ? data.model : "unknown";
-    add((this.usage.byModel[model] ??= emptyBucket()));
+    const { input, output, cacheRead, cacheWrite, add } = this.addCall(data);
     if (agentId) {
       // A sub-agent's call: billed with the turn, but not a step of the main agent.
       const name = this.options.subAgentNameOf?.(agentId) ?? "unknown";
@@ -512,6 +518,30 @@ export class CopilotEventMapper {
         inputTokenDetails: { cacheReadTokens: cacheRead, cacheWriteTokens: cacheWrite },
       };
     }
+  }
+
+  /** Adds one model call to the turn totals and to its model's bucket. */
+  private addCall(data: any) {
+    const num = (v: unknown) => (typeof v === "number" && Number.isFinite(v) ? v : 0);
+    const input = num(data.inputTokens);
+    const output = num(data.outputTokens);
+    const cacheRead = num(data.cacheReadTokens);
+    const cacheWrite = num(data.cacheWriteTokens);
+    this.usage.inputTokens += input;
+    this.usage.outputTokens += output;
+    this.usage.cacheReadTokens += cacheRead;
+    this.usage.cacheWriteTokens += cacheWrite;
+    this.usage.reasoningTokens += num(data.reasoningTokens);
+    const add = (bucket: UsageBucket) => {
+      bucket.inputTokens += input;
+      bucket.outputTokens += output;
+      bucket.cacheReadTokens += cacheRead;
+      bucket.cacheWriteTokens += cacheWrite;
+      bucket.calls += 1;
+    };
+    const model = typeof data.model === "string" && data.model ? data.model : "unknown";
+    add((this.usage.byModel[model] ??= emptyBucket()));
+    return { input, output, cacheRead, cacheWrite, add };
   }
 
   private isDynamic(toolName: string): boolean {
