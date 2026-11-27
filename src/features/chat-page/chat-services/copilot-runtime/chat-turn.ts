@@ -29,6 +29,7 @@ import {
 } from "./workspace-files";
 import { storeUpload } from "./workspace-uploads";
 import { spillLargePrompt } from "./prompt-spill";
+import { copilotOffersWebSearch, withWebSearchRequestNote } from "./web-search-default";
 import { copilotOffersSearchDocuments, withSearchNextMessageNote, withUploadsSearchHint } from "./search-documents-hint";
 import { THREAD_BUSY_TEXT, ThreadBusyError } from "./thread-lease";
 import { TURN_LIMIT_TEXTS, TurnLimitError } from "./runtime-limits";
@@ -49,7 +50,11 @@ export interface CopilotChatTurnArgs {
   /** The app's system message, WITHOUT the per-turn document hint. */
   systemMessage: string;
   toolset: Record<string, AiTool>;
-  /** Requested built-in toggles: served by our own tools (provider-tools.ts). */
+  /**
+   * The user's built-in toggles: served by our own tools (provider-tools.ts).
+   * web_search is offered on every turn by default; its toggle adds a note
+   * to the user message (web-search-default.ts).
+   */
   builtInToggles?: ProviderToolToggles;
   /** The run_code container's files: the thread's code interpreter files (agent-code-interpreter.ts). */
   codeInterpreterFiles?: ContainerInputFile[];
@@ -140,13 +145,17 @@ export async function runCopilotChatTurn(args: CopilotChatTurnArgs): Promise<Res
         : {}),
       extract_text: extractTextTool(workspaceExtractDeps({ fs, userKey })),
       index_document: offerSearch ? indexDocument : withSearchNextMessageNote(indexDocument),
-      // generate_image / web_search / run_code when their toggle is on.
+      // generate_image / run_code when their toggle is on; web_search on
+      // every turn by default (COPILOT_WEB_SEARCH_ALWAYS), else with its toggle.
       ...(args.builtInToggles
         ? providerTools({
             fs,
             threadId,
             userKey,
-            toggles: args.builtInToggles,
+            toggles: {
+              ...args.builtInToggles,
+              webSearch: copilotOffersWebSearch({ toggle: args.builtInToggles.webSearch }),
+            },
             containerFiles: args.codeInterpreterFiles ?? [],
           })
         : {}),
@@ -170,7 +179,9 @@ export async function runCopilotChatTurn(args: CopilotChatTurnArgs): Promise<Res
       toolset,
       // History before this turn: ctx.history ends with this turn's user message.
       priorHistory: ctx.history.slice(0, -1),
-      prompt: spilled.prompt,
+      // The Web toggle of this turn: a static note at the end of the user
+      // message (never in the system message, which stays the same).
+      prompt: withWebSearchRequestNote(spilled.prompt, !!args.builtInToggles?.webSearch),
       images: payload.multimodalImages,
       contextNote,
       abortSignal: abortController.signal,

@@ -479,6 +479,9 @@ export async function POST(req: Request) {
       systemMessage: system,
       toolset: tools,
       // The provider-hosted built-ins become our own tools on this path.
+      // webSearch is the user's toggle: chat-turn offers web_search on every
+      // turn by default and turns the toggle into a note on the user message
+      // (web-search-default.ts).
       builtInToggles: { ...effectiveTools, codeInterpreter: codeInterpreterOn },
       // The thread's code interpreter files (agent Code files, skill
       // archives, uploads) for the run_code container.

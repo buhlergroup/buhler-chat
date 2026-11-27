@@ -15,6 +15,7 @@ import { ensureCodeInterpreterContainer } from "../code-interpreter-container";
 import { ToolUserError } from "../tools/tool-user-error";
 import {
   resolveResponsesModel,
+  WEB_SEARCH_MODEL_ENV,
   type CodeRunResult,
   type ContainerFile,
   type ProviderClients,
@@ -136,7 +137,7 @@ export function productionProviderClients(deps: Pick<ProviderToolDeps, "threadId
     },
 
     async webSearch({ query }, signal) {
-      const model = responsesModel("COPILOT_WEB_SEARCH_MODEL");
+      const model = responsesModel(WEB_SEARCH_MODEL_ENV);
       const res = await responses().create(
         {
           model: model.deployment,
