@@ -11,7 +11,7 @@
  */
 import type { WorkspaceEntry } from "./blob-session-fs";
 import { extractedTextPath, isExtractable } from "./extract-text";
-import { normalizeSessionPath, SessionPathError, WORKSPACE_ROOT } from "./session-path";
+import { WORKSPACE_ROOT, workspacePathFromClient } from "./session-path";
 import { UPLOADS_DIR } from "./workspace-uploads";
 import type { WorkspaceFileInfo, WorkspaceListing, WorkspaceSummary } from "../workspace-file-model";
 
@@ -115,29 +115,8 @@ export async function summarizeWorkspace(deps: ListingDeps, limit = MAX_UPLOAD_C
   return { uploads, fileCount: files.length };
 }
 
-const CONTROL_CHARS = /[\u0000-\u001f\u007f]/;
-const MAX_PATH_CHARS = 1024;
-
-/**
- * A workspace path from the browser (relative to /workspace) as an absolute
- * path under /workspace, or a SessionPathError. Refused: empty, absolute,
- * backslashes, control characters, "." / ".." / empty segments, /workspace
- * itself, and anything the session path jail refuses.
- */
-export function workspacePathFromClient(raw: unknown): string {
-  if (typeof raw !== "string" || raw.length === 0 || raw.length > MAX_PATH_CHARS) {
-    throw new SessionPathError("Invalid file path");
-  }
-  if (raw.startsWith("/") || raw.includes("\\") || CONTROL_CHARS.test(raw)) {
-    throw new SessionPathError("Invalid file path");
-  }
-  if (raw.split("/").some((s) => s === "" || s === "." || s === "..")) {
-    throw new SessionPathError("Invalid file path");
-  }
-  const absolute = normalizeSessionPath(`${WORKSPACE_ROOT}/${raw}`);
-  if (!absolute.startsWith(`${WORKSPACE_ROOT}/`)) throw new SessionPathError("Invalid file path");
-  return absolute;
-}
+// Pure (no server-only imports), so it lives in session-path.ts: the chat renderer uses it too.
+export { workspacePathFromClient };
 
 export interface RemoveDeps {
   fs: {

@@ -163,9 +163,12 @@ class MessageErrorBoundary extends Component<{ children: ReactNode; mid: string 
 const ChatMessages = memo(function ChatMessages({
   profilePicture,
   compactionMarker,
+  workspaceThreadId,
 }: {
   profilePicture?: string | null;
   compactionMarker?: ThreadCompactionMarker | null;
+  /** The thread, when it has a chat workspace (Copilot path): workspace links become downloads. */
+  workspaceThreadId?: string | undefined;
 }) {
   const { messages, status, error } = useChatSession();
   const setInputText = useChatStore((s) => s.setInputText);
@@ -347,6 +350,7 @@ const ChatMessages = memo(function ChatMessages({
                         <RichResponse
                           content={text}
                           streaming={isLastMessage && isStreaming}
+                          workspaceThreadId={workspaceThreadId}
                         />
                       )}
                     </MessageContent>
@@ -669,6 +673,7 @@ const ChatPageInner = (props: ChatPageProps) => {
       <ChatMessages
         profilePicture={profilePicture}
         compactionMarker={props.compactionMarker}
+        workspaceThreadId={props.workspace ? chatThreadId : undefined}
       />
 
       <div className="sticky bottom-3 max-w-4xl mx-auto w-full">

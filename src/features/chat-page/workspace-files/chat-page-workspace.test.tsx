@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 
 // The real ChatPage, with what needs a browser session or the network mocked.
@@ -124,6 +124,51 @@ describe("ChatPage: chat workspace chips and Files panel", () => {
     const input = screen.getByPlaceholderText("Type your message...");
     const clipboardData = { getData: (t: string) => (t === "text/plain" ? "a".repeat(100_000) : ""), items: [], files: [] };
     expect(fireEvent.paste(input, { clipboardData })).toBe(true);
+  });
+
+  describe("workspace links in an answer", () => {
+    const answer = (text: string) => ({
+      messages: [{ id: "m1", role: "assistant", parts: [{ type: "text", text }] }],
+      status: "ready",
+      sendMessage: vi.fn(),
+      stop: vi.fn(),
+      error: undefined,
+    });
+    const LINK = '[data-streamdown="link"]';
+
+    beforeEach(async () => {
+      const { useChat } = await import("@ai-sdk/react");
+      // The thread id in the link is another thread: only the page's own may be used.
+      vi.mocked(useChat).mockReturnValue(
+        answer("[Download squares.csv](sandbox:/workspace/squares.csv) [x](/workspace/x.csv?t=other)") as never,
+      );
+    });
+
+    afterEach(async () => {
+      const { useChat } = await import("@ai-sdk/react");
+      vi.mocked(useChat).mockReturnValue({ ...answer(""), messages: [] } as never);
+    });
+
+    it("Copilot path: a link to a workspace file opens its download URL in this thread", async () => {
+      const open = vi.spyOn(window, "open").mockImplementation(() => null);
+      render(<ChatPage {...pageProps} workspace={{ uploads: [], fileCount: 1 }} />);
+      const links = document.querySelectorAll(LINK);
+      expect(links).toHaveLength(2);
+      fireEvent.click(links[0]);
+      await waitFor(() =>
+        expect(open).toHaveBeenCalledWith("/api/workspace/file?t=thread1&p=squares.csv", "_blank", "noreferrer"),
+      );
+      fireEvent.click(links[1]);
+      await waitFor(() =>
+        expect(open).toHaveBeenLastCalledWith("/api/workspace/file?t=thread1&p=x.csv", "_blank", "noreferrer"),
+      );
+      open.mockRestore();
+    });
+
+    it("AI SDK path: the link stays blocked", () => {
+      render(<ChatPage {...pageProps} workspace={null} />);
+      expect(screen.getByText(/Download squares\.csv \[blocked\]/)).toBeInTheDocument();
+    });
   });
 
   it("AI SDK path: no chips and no Files button", () => {

@@ -201,6 +201,7 @@ describe("run_code", () => {
     const description = String((t.tools.run_code as { description?: string }).description);
     expect(description).toContain("To give the user a file, link it with the url from downloads, e.g. [name](url).");
     expect(description).toContain("Never use /api/images or sandbox: links for these files.");
+    expect(description).toContain("can be linked as [name](/workspace/<path>); the chat makes it a download link.");
     expect(description).not.toContain("thread-1");
   });
 
