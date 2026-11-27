@@ -15,6 +15,11 @@ export interface RichResponseProps {
    * and only swap to the rendered card once the turn completes.
    */
   streaming?: boolean;
+  /**
+   * The thread on screen, when it has a chat workspace (Copilot path): links
+   * to workspace files become download links (see Response).
+   */
+  workspaceThreadId?: string | undefined;
 }
 
 /**
@@ -64,7 +69,7 @@ function parse(content: string): Segment[] {
   return segments;
 }
 
-const RichResponseImpl: React.FC<RichResponseProps> = ({ content, streaming }) => {
+const RichResponseImpl: React.FC<RichResponseProps> = ({ content, streaming, workspaceThreadId }) => {
   // While the turn is still streaming, render the whole message through
   // Streamdown only. Streamdown highlights code incrementally per block and
   // does NOT re-highlight the full message each chunk, so it stays smooth.
@@ -75,13 +80,13 @@ const RichResponseImpl: React.FC<RichResponseProps> = ({ content, streaming }) =
   // and the genui card — only mount once the turn completes. Reproduced and
   // guarded by e2e/markdown-stream-jank.spec.ts (big-code-block fixture).
   if (streaming) {
-    return <Response>{resolveBlobRefsInMarkdown(content)}</Response>;
+    return <Response workspaceThreadId={workspaceThreadId}>{resolveBlobRefsInMarkdown(content)}</Response>;
   }
   const segments = parse(content);
   // If no code segments, render whole content once to preserve full markdown context
   const hasCode = segments.some(s => s.type === 'code');
   if (!hasCode) {
-    return <Response>{resolveBlobRefsInMarkdown(content)}</Response>;
+    return <Response workspaceThreadId={workspaceThreadId}>{resolveBlobRefsInMarkdown(content)}</Response>;
   }
 
   return (
@@ -107,7 +112,7 @@ const RichResponseImpl: React.FC<RichResponseProps> = ({ content, streaming }) =
         }
         // Preserve original spacing; don't trim to keep markdown structure (headings, lists, tables)
         if (seg.text.length === 0) return null;
-        return <Response key={i}>{resolveBlobRefsInMarkdown(seg.text)}</Response>;
+        return <Response key={i} workspaceThreadId={workspaceThreadId}>{resolveBlobRefsInMarkdown(seg.text)}</Response>;
       })}
     </div>
   );
@@ -120,7 +125,7 @@ const RichResponseImpl: React.FC<RichResponseProps> = ({ content, streaming }) =
 // re-highlights ALL of their blocks on every chunk → multi-second main-thread
 // freeze that starts on the first chunk, before the new answer's own content
 // even appears (reproduced: 6.1s timer drift; e2e/markdown-stream-jank.spec.ts
-// "followup"). `content` (string) + `streaming` (bool) are the only props, so
+// "followup"). `content`, `streaming` and `workspaceThreadId` are primitives, so
 // React.memo's shallow equality skips any message whose text is unchanged.
 export const RichResponse = React.memo(RichResponseImpl);
 RichResponse.displayName = "RichResponse";

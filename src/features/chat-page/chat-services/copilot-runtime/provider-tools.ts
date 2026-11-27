@@ -362,7 +362,8 @@ function runCodeTool(deps: ProviderToolDeps, clients: () => Promise<ProviderClie
       `Files the code creates in /mnt/data come back to ${OUTPUTS_DIR}/; images among them are shown to the user automatically. ` +
       "Returns stdout, the output paths and `downloads`. " +
       "To give the user a file, link it with the url from downloads, e.g. [name](url). " +
-      "Never use /api/images or sandbox: links for these files.",
+      "Never use /api/images or sandbox: links for these files. " +
+      `Any other file in ${WORKSPACE_ROOT} can be linked as [name](${WORKSPACE_ROOT}/<path>); the chat makes it a download link.`,
     inputSchema: z
       .object({
         code: z.string().max(100_000).optional().describe("Python code to run as given."),

@@ -85,6 +85,29 @@ export function parentPath(normalized: string): string | undefined {
   return idx <= 0 ? undefined : normalized.slice(0, idx);
 }
 
+const MAX_PATH_CHARS = 1024;
+
+/**
+ * A workspace path from the browser (relative to /workspace) as an absolute
+ * path under /workspace, or a SessionPathError. Refused: empty, absolute,
+ * backslashes, control characters, "." / ".." / empty segments, /workspace
+ * itself, and anything the session path jail refuses.
+ */
+export function workspacePathFromClient(raw: unknown): string {
+  if (typeof raw !== "string" || raw.length === 0 || raw.length > MAX_PATH_CHARS) {
+    throw new SessionPathError("Invalid file path");
+  }
+  if (raw.startsWith("/") || raw.includes("\\") || CONTROL_CHARS.test(raw)) {
+    throw new SessionPathError("Invalid file path");
+  }
+  if (raw.split("/").some((s) => s === "" || s === "." || s === "..")) {
+    throw new SessionPathError("Invalid file path");
+  }
+  const absolute = normalizeSessionPath(`${WORKSPACE_ROOT}/${raw}`);
+  if (!absolute.startsWith(`${WORKSPACE_ROOT}/`)) throw new SessionPathError("Invalid file path");
+  return absolute;
+}
+
 const NAMESPACE_SEGMENT = /^[A-Za-z0-9][A-Za-z0-9_.@-]{0,199}$/;
 
 /**
